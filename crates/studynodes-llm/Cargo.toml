@@ -1,0 +1,16 @@
+[package]
+name = "studynodes-llm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+studynodes-graph = { path = "../studynodes-graph" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+async-trait = "0.1"
+

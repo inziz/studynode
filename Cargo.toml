@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/studynodes-graph",
+    "crates/studynodes-llm",
+    "crates/studynodes-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+thiserror = "2.0"
+sha2 = "0.10"
+tempfile = "3.10"
+tokio = { version = "1.40", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rstar = "0.12"
+
+[patch.crates-io]
+wgpu-hal = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/vendor/wgpu-hal" }
+winit = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/vendor/winit" }
+sctk-adwaita = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/vendor/sctk-adwaita" }
+parley_engine = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/vendor/parley_engine" }
+accesskit_windows = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/vendor/accesskit_windows" }
+accesskit_macos = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/vendor/accesskit_macos" }
