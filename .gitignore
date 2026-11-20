@@ -1,3 +1,5 @@
 /target
 /study_projects
+crates/studynodes-app/study_projects
+*.studynodes
 *.tmp

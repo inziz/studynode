@@ -214,4 +214,76 @@ mod tests {
         rt.state.select_edge(edge_id.clone());
         assert_eq!(rt.state.selected_edge, Some(edge_id));
     }
+
+    #[test]
+    fn test_node_scaling_and_trackpad_navigation() {
+        let mut rt = make_test_runtime();
+        rt.state.create_project("Scaling Test");
+
+        // Initial camera
+        assert_eq!(rt.state.graph.viewport.zoom, 1.0);
+        let n1_id = rt.state.add_note_node(Some(WorldPos::new(100.0, 100.0)));
+
+        // Test trackpad pan via screen delta
+        rt.state.graph.viewport.pan_by_screen_delta(50.0, -30.0);
+        assert!((rt.state.graph.viewport.offset.x - (-50.0)).abs() < 1e-4);
+        assert!((rt.state.graph.viewport.offset.y - (30.0)).abs() < 1e-4);
+
+        // Test zoom centered at anchor
+        let anchor = studynodes_graph::coords::ScreenPos::new(400.0, 300.0);
+        let world_at_anchor_before = rt.state.graph.viewport.screen_to_world(anchor);
+        rt.state.graph.viewport.zoom_at(anchor, 1.5);
+        assert!((rt.state.graph.viewport.zoom - 1.5).abs() < 1e-4);
+        let world_at_anchor_after = rt.state.graph.viewport.screen_to_world(anchor);
+        assert!((world_at_anchor_before.x - world_at_anchor_after.x).abs() < 1e-3);
+        assert!((world_at_anchor_before.y - world_at_anchor_after.y).abs() < 1e-3);
+
+        // Verify node card scales: base width is 280, at zoom 1.5 scaled is 420
+        let node = rt.state.graph.get_node(&n1_id).unwrap();
+        let scaled_w = node.size.0 * rt.state.graph.viewport.zoom;
+        assert_eq!(scaled_w, 420.0);
+    }
+
+    #[test]
+    fn test_inline_node_editing_and_deletion() {
+        let mut rt = make_test_runtime();
+        rt.state.create_project("Interactivity Test");
+
+        let id = rt.state.add_note_node(Some(WorldPos::new(200.0, 200.0)));
+        assert_eq!(rt.state.editing_node_id, None);
+
+        // Start editing directly on card
+        rt.state.start_editing_node(id.clone());
+        assert_eq!(rt.state.editing_node_id, Some(id.clone()));
+
+        // Simulate typing directly in buffer
+        rt.state.edit_node_content = rune::TextEdit::new("Updated notes directly from card input");
+        rt.state.stop_editing_node();
+        assert_eq!(rt.state.editing_node_id, None);
+
+        let node = rt.state.graph.get_node(&id).unwrap();
+        assert_eq!(node.content, "Updated notes directly from card input");
+
+        // Delete node directly from card
+        rt.state.delete_node(&id);
+        assert!(rt.state.graph.get_node(&id).is_none());
+    }
+
+    #[test]
+    fn test_wire_connection_and_ai_explanation() {
+        let mut rt = make_test_runtime();
+        rt.state.create_project("AI Wire Test");
+
+        let id1 = rt.state.add_note_node(Some(WorldPos::new(100.0, 100.0)));
+        let id2 = rt.state.add_document_node(Some(WorldPos::new(500.0, 100.0)));
+
+        // Connect nodes directly
+        rt.state.connect_nodes(&id1, &id2);
+        assert_eq!(rt.state.graph.edges.len(), 1);
+
+        // Run AI explain on node
+        rt.state.explain_node_ai(&id1);
+        let node = rt.state.graph.get_node(&id1).unwrap();
+        assert!(node.summary.is_some());
+    }
 }

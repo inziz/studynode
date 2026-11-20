@@ -11,7 +11,7 @@ path = "src/main.rs"
 [dependencies]
 studynodes-graph = { path = "../studynodes-graph" }
 studynodes-llm = { path = "../studynodes-llm" }
-rune = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/crates/rune" }
+rune = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/crates/rune", features = ["native-file-dialog"] }
 rune-kit = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/crates/rune-kit" }
 serde = { workspace = true }
 serde_json = { workspace = true }
