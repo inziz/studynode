@@ -61,7 +61,29 @@ fn view(s: &AppState, cx: &mut Cx<AppState>) -> El {
             .color(t.text_secondary.alpha(0.6)),
         );
 
-    col().w_full().h_full().child(main_content).child(status_bar)
+    col()
+        .w_full()
+        .h_full()
+        .child(main_content)
+        .child(status_bar)
+        .on_key(|s: &mut AppState, ev, _| {
+            if let rune::Key::Text(k) = &ev.key {
+                if k == " " && s.editing_node_id.is_none() {
+                    s.space_held = true;
+                    return true;
+                }
+            }
+            false
+        })
+        .on_key_up(|s: &mut AppState, ev, _| {
+            if let rune::Key::Text(k) = &ev.key {
+                if k == " " {
+                    s.space_held = false;
+                    return true;
+                }
+            }
+            false
+        })
 }
 
 fn main() {

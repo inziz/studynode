@@ -83,6 +83,7 @@ pub struct AppState {
     pub edit_edge_note: TextEdit,
     pub append_note_input: TextEdit,
     pub editing_node_id: Option<NodeId>,
+    pub space_held: bool,
 
     // Wire draft
     #[allow(dead_code)]
@@ -113,6 +114,7 @@ impl Default for AppState {
             edit_edge_note: TextEdit::new(""),
             append_note_input: TextEdit::new(""),
             editing_node_id: None,
+            space_held: false,
             wire_draft: None,
         };
 
@@ -255,6 +257,7 @@ impl AppState {
         if let Some(n) = self.graph.get_node(&id) {
             self.edit_node_title = TextEdit::new(&n.title);
             self.edit_node_content = TextEdit::new(&n.content);
+            self.inspector_open = true;
         }
     }
 

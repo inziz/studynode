@@ -5,9 +5,10 @@ use studynodes_llm::LlmProvider;
 
 use crate::state::AppState;
 
-const HEADLINE: TextStyle = TextStyle::new(14.0, 600.0);
+const TITLE_STYLE: TextStyle = TextStyle::new(15.0, 600.0);
 const SECTION_TITLE: TextStyle = TextStyle::new(10.5, 700.0);
-const BODY_STYLE: TextStyle = TextStyle::new(13.0, 400.0).lh(18.0);
+const BODY_STYLE: TextStyle = TextStyle::new(13.0, 400.0).lh(19.0);
+const READER_STYLE: TextStyle = TextStyle::new(13.5, 400.0).lh(22.0);
 const BADGE_STYLE: TextStyle = TextStyle::new(11.0, 600.0);
 const MUTED_STYLE: TextStyle = TextStyle::new(11.0, 400.0);
 
@@ -70,7 +71,7 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                 row()
                     .w_full()
                     .center_y()
-                    .child(text("✦ AI SYNTHESIS & DISCOVERY").font(HEADLINE).color(accent))
+                    .child(text("✦ AI SYNTHESIS & DISCOVERY").font(TITLE_STYLE).color(accent))
                     .child(el().grow(1.0))
                     .child(
                         el()
@@ -151,178 +152,195 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
             let line_count = node.content.lines().count().max(1);
             let read_min = (word_count as f32 / 200.0).ceil() as usize;
 
-            // 1. Header with Badge Pill and Deselect
-            content = content
-                .child(
-                    row()
-                        .w_full()
-                        .center_y()
-                        .gap(space::S2)
-                        .child(badge_pill(node_kind.display_name(), kc))
-                        .child(
-                            subtle_badge(
-                                &format!("#{}", &node.id.as_str()[..node.id.as_str().len().min(6)]),
-                                text_muted,
-                                card_bg,
-                            ),
-                        )
-                        .child(el().grow(1.0))
-                        .child(
-                            el()
-                                .px(6.0)
-                                .py(2.0)
-                                .radius(radius::SM)
-                                .fill(card_bg)
-                                .border(1.0, border_subtle)
-                                .on_press(|s: &mut AppState| {
-                                    s.sync_node_edits();
-                                    s.selected_nodes.clear();
-                                })
-                                .child(text("✕").font(MUTED_STYLE).color(text_muted)),
-                        ),
-                );
-
-            // 2. Editable Title
-            content = content
-                .child(
-                    col()
-                        .gap(4.0)
-                        .child(text("TITLE").font(SECTION_TITLE).color(text_muted))
-                        .child(
-                            el()
-                                .w_full()
-                                .padding(8.0)
-                                .radius(radius::SM)
-                                .fill(input_bg)
-                                .border(1.0, border)
-                                .child(
-                                    text_input(&s.edit_node_title, HEADLINE)
-                                        .single_line()
-                                        .w_full()
-                                        .color(t.text)
-                                        .caret(accent, accent.alpha(0.25))
-                                        .placeholder("Node Title...", Color::WHITE.alpha(0.35))
-                                        .on_edit(|s: &mut AppState| &mut s.edit_node_title)
-                                        .on_input_change(|s: &mut AppState, _| {
-                                            s.sync_node_edits();
-                                        })
-                                        .on_submit(|s: &mut AppState, _| {
-                                            s.sync_node_edits();
-                                        }),
-                                ),
-                        ),
-                );
-
-            // 3. Document-Specific Actions & File Ingestion
             if node_kind == NodeKind::Document {
+                // ==========================================
+                // DEDICATED FULL DOCUMENT READER & EDITOR
+                // ==========================================
+                content = content
+                    // 1. Reader Header Bar
+                    .child(
+                        row()
+                            .w_full()
+                            .center_y()
+                            .gap(space::S2)
+                            .child(badge_pill("📄 DOCUMENT READER", kc))
+                            .child(subtle_badge(&format!("{} words", word_count), t.text_secondary, card_bg))
+                            .child(subtle_badge(&format!("~{}m read", read_min), text_muted, card_bg))
+                            .child(el().grow(1.0))
+                            .child(
+                                el()
+                                    .px(8.0)
+                                    .py(3.0)
+                                    .radius(radius::SM)
+                                    .fill(card_bg)
+                                    .border(1.0, border_subtle)
+                                    .on_press(|s: &mut AppState| {
+                                        s.sync_node_edits();
+                                        s.inspector_open = false;
+                                    })
+                                    .child(text("✕ Close").font(MUTED_STYLE).color(text_muted)),
+                            ),
+                    )
+                    // 2. Editable Document Title
+                    .child(
+                        col()
+                            .gap(4.0)
+                            .child(text("DOCUMENT TITLE").font(SECTION_TITLE).color(kc))
+                            .child(
+                                el()
+                                    .w_full()
+                                    .padding(8.0)
+                                    .radius(radius::SM)
+                                    .fill(input_bg)
+                                    .border(1.0, border)
+                                    .child(
+                                        text_input(&s.edit_node_title, TITLE_STYLE)
+                                            .single_line()
+                                            .w_full()
+                                            .color(t.text)
+                                            .caret(accent, accent.alpha(0.25))
+                                            .placeholder("Document Title...", Color::WHITE.alpha(0.35))
+                                            .on_edit(|s: &mut AppState| &mut s.edit_node_title)
+                                            .on_input_change(|s: &mut AppState, _| {
+                                                s.sync_node_edits();
+                                            })
+                                            .on_submit(|s: &mut AppState, _| {
+                                                s.sync_node_edits();
+                                            }),
+                                    ),
+                            ),
+                    )
+                    // 3. Document Action Bar: Ingest, Sample, AI Explain, Save
+                    .child(
+                        row()
+                            .gap(space::S2)
+                            .child(
+                                el()
+                                    .grow(1.0)
+                                    .px(space::S3)
+                                    .py(space::S2)
+                                    .radius(radius::SM)
+                                    .fill(Color { r: 0.16, g: 0.28, b: 0.52, a: 0.45 })
+                                    .border(1.0, Color { r: 0.28, g: 0.50, b: 0.90, a: 0.75 })
+                                    .on_press_tx(move |_s: &mut AppState, tx: &mut Tx| {
+                                        let opts = FileDialogOptions {
+                                            title: "Ingest Document File".into(),
+                                            ..Default::default()
+                                        }
+                                        .filter("All Supported Files", &["pdf", "epub", "txt", "md", "json", "rs", "toml", "csv"])
+                                        .filter("Documents", &["pdf", "epub"])
+                                        .filter("Text & Markdown", &["txt", "md", "json", "rs", "toml", "csv"]);
+
+                                        let target_id = node_id_for_ingest.clone();
+                                        tx.open_file(opts, move |s: &mut AppState, res, _| {
+                                            match res {
+                                                Ok(Some(path)) => {
+                                                    s.ingest_file_into_node(&target_id, &path);
+                                                }
+                                                Ok(None) => {}
+                                                Err(e) => {
+                                                    s.status_message = format!("File picker error: {}", e);
+                                                }
+                                            }
+                                        });
+                                    })
+                                    .child(
+                                        row()
+                                            .center()
+                                            .gap(4.0)
+                                            .child(text("📂 Ingest File").font(type_::LABEL).color(Color::WHITE)),
+                                    ),
+                            )
+                            .child(
+                                el()
+                                    .px(space::S3)
+                                    .py(space::S2)
+                                    .radius(radius::SM)
+                                    .fill(card_bg)
+                                    .border(1.0, border)
+                                    .on_press(move |s: &mut AppState| {
+                                        s.load_sample_document(&node_id_for_sample);
+                                    })
+                                    .child(text("✦ Sample Paper").font(type_::LABEL).color(accent)),
+                            )
+                            .child(
+                                el()
+                                    .px(space::S3)
+                                    .py(space::S2)
+                                    .radius(radius::SM)
+                                    .fill(Color { r: 0.22, g: 0.16, b: 0.35, a: 0.40 })
+                                    .border(1.0, Color { r: 0.55, g: 0.35, b: 0.85, a: 0.65 })
+                                    .on_press(move |s: &mut AppState| {
+                                        s.explain_node_ai(&node_id_for_explain);
+                                    })
+                                    .child(text("✦ Summarize").font(type_::LABEL).color(Color { r: 0.78, g: 0.60, b: 1.0, a: 1.0 })),
+                            ),
+                    );
+
+                // Stats / Asset info row
+                content = content.child(
+                    row()
+                        .gap(space::S1)
+                        .child(subtle_badge(&format!("{} lines", line_count), text_muted, card_bg))
+                        .child(subtle_badge(&format!("{} characters", char_count), text_muted, card_bg))
+                        .child(
+                            if let Some(hash) = &node.asset_hash {
+                                subtle_badge(&format!("📎 Asset: {}", &hash[..hash.len().min(8)]), kc, card_bg)
+                            } else {
+                                el()
+                            },
+                        ),
+                );
+
+                // AI Summary / Key Insights if present
+                if let Some(summary) = &node.summary {
+                    content = content.child(
+                        col()
+                            .gap(4.0)
+                            .child(text("✦ AI KEY INSIGHTS & SYNTHESIS").font(SECTION_TITLE).color(Color { r: 0.78, g: 0.60, b: 1.0, a: 1.0 }))
+                            .child(
+                                el()
+                                    .w_full()
+                                    .padding(space::S3)
+                                    .radius(radius::SM)
+                                    .fill(Color { r: 0.22, g: 0.16, b: 0.35, a: 0.25 })
+                                    .border(1.0, Color { r: 0.55, g: 0.35, b: 0.85, a: 0.40 })
+                                    .child(text(summary).font(BODY_STYLE).color(t.text)),
+                            ),
+                    );
+                }
+
+                // 4. Large Comfortable Reader Viewport
                 content = content.child(
                     col()
-                        .gap(space::S2)
-                        .child(text("DOCUMENT INGESTION").font(SECTION_TITLE).color(kc))
-                        .child(
-                            row()
-                                .gap(space::S2)
-                                .child(
-                                    el()
-                                        .grow(1.0)
-                                        .px(space::S3)
-                                        .py(space::S2)
-                                        .radius(radius::SM)
-                                        .fill(Color { r: 0.16, g: 0.28, b: 0.52, a: 0.45 })
-                                        .border(1.0, Color { r: 0.28, g: 0.50, b: 0.90, a: 0.75 })
-                                        .on_press_tx(move |_s: &mut AppState, tx: &mut Tx| {
-                                            let opts = FileDialogOptions {
-                                                title: "Ingest Document or Note".into(),
-                                                ..Default::default()
-                                            }
-                                            .filter("All Supported Files", &["pdf", "epub", "txt", "md", "json", "rs", "toml", "csv"])
-                                            .filter("Documents", &["pdf", "epub"])
-                                            .filter("Plaintext & Markdown", &["txt", "md", "json", "rs", "toml", "csv"]);
-
-                                            let target_id = node_id_for_ingest.clone();
-                                            tx.open_file(opts, move |s: &mut AppState, res, _| {
-                                                match res {
-                                                    Ok(Some(path)) => {
-                                                        s.ingest_file_into_node(&target_id, &path);
-                                                    }
-                                                    Ok(None) => {}
-                                                    Err(e) => {
-                                                        s.status_message = format!("File picker error: {}", e);
-                                                    }
-                                                }
-                                            });
-                                        })
-                                        .child(
-                                            row()
-                                                .center()
-                                                .gap(4.0)
-                                                .child(text("📂 Ingest / Load File").font(type_::LABEL).color(Color::WHITE)),
-                                        ),
-                                )
-                                .child(
-                                    el()
-                                        .px(space::S3)
-                                        .py(space::S2)
-                                        .radius(radius::SM)
-                                        .fill(card_bg)
-                                        .border(1.0, border)
-                                        .on_press(move |s: &mut AppState| {
-                                            s.load_sample_document(&node_id_for_sample);
-                                        })
-                                        .child(text("✦ Sample Paper").font(type_::LABEL).color(accent)),
-                                ),
-                        ),
-                );
-            }
-
-            // Stats Pill Row (Word count, characters, reading estimate)
-            content = content.child(
-                row()
-                    .gap(space::S1)
-                    .child(subtle_badge(&format!("{} words", word_count), t.text_secondary, card_bg))
-                    .child(subtle_badge(&format!("{} chars", char_count), t.text_secondary, card_bg))
-                    .child(subtle_badge(&format!("~{}m read", read_min), text_muted, card_bg))
-                    .child(
-                        if let Some(hash) = &node.asset_hash {
-                            subtle_badge(&format!("📎 {}", &hash[..hash.len().min(8)]), kc, card_bg)
-                        } else {
-                            el()
-                        },
-                    ),
-            );
-
-            // 4. Editable Content Area
-            content = content
-                .child(
-                    col()
                         .gap(4.0)
                         .child(
                             row()
                                 .w_full()
-                                .child(text("CONTENT & NOTES").font(SECTION_TITLE).color(text_muted))
+                                .child(text("DOCUMENT TEXT & EXCERPTS").font(SECTION_TITLE).color(text_muted))
                                 .child(el().grow(1.0))
-                                .child(text(format!("{} lines", line_count)).font(MUTED_STYLE).color(text_muted)),
+                                .child(text("Direct live editor").font(MUTED_STYLE).color(text_muted)),
                         )
                         .child(
                             col()
                                 .w_full()
-                                .radius(radius::SM)
+                                .radius(radius::MD)
                                 .fill(input_bg)
                                 .border(1.0, border)
-                                .padding(8.0)
+                                .padding(12.0)
                                 .child(
                                     col()
                                         .w_full()
-                                        .min_h(180.0)
-                                        .max_h(320.0)
+                                        .min_h(320.0)
+                                        .max_h(560.0)
                                         .scroll(rune::ScrollSpec { stick_bottom: false })
                                         .child(
-                                            text_input(&s.edit_node_content, BODY_STYLE)
+                                            text_input(&s.edit_node_content, READER_STYLE)
                                                 .w_full()
-                                                .color(t.text)
+                                                .color(Color { r: 0.90, g: 0.92, b: 0.95, a: 1.0 })
                                                 .caret(accent, accent.alpha(0.25))
                                                 .placeholder(
-                                                    "Type your notes, markdown, or document excerpts here...",
+                                                    "Document content is empty.\n\nIngest a file (PDF, TXT, MD) using the button above or type/paste document excerpts here...",
                                                     Color::WHITE.alpha(0.35),
                                                 )
                                                 .on_edit(|s: &mut AppState| &mut s.edit_node_content)
@@ -338,137 +356,341 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                         ),
                 );
 
-            // 5. Quick Append & Note Actions
-            content = content
-                .child(
-                    col()
+                // 5. Quick Append & Document Actions
+                content = content.child(
+                    row()
+                        .w_full()
                         .gap(space::S2)
-                        .child(text("QUICK APPEND").font(SECTION_TITLE).color(text_muted))
                         .child(
-                            row()
-                                .w_full()
-                                .gap(space::S2)
+                            el()
+                                .grow(1.0)
+                                .px(6.0)
+                                .py(6.0)
+                                .radius(radius::SM)
+                                .fill(input_bg)
+                                .border(1.0, border)
                                 .child(
-                                    el()
-                                        .grow(1.0)
-                                        .padding(6.0)
-                                        .radius(radius::SM)
-                                        .fill(input_bg)
-                                        .border(1.0, border)
-                                        .child(
-                                            text_input(&s.append_note_input, TextStyle::new(12.0, 400.0))
-                                                .single_line()
-                                                .w_full()
-                                                .color(t.text)
-                                                .caret(accent, accent.alpha(0.25))
-                                                .placeholder("Quick note or bullet to append...", Color::WHITE.alpha(0.35))
-                                                .on_edit(|s: &mut AppState| &mut s.append_note_input)
-                                                .on_submit(|s: &mut AppState, _| {
-                                                    s.commit_append_input();
-                                                }),
-                                        ),
-                                )
-                                .child(
-                                    el()
-                                        .px(10.0)
-                                        .py(6.0)
-                                        .radius(radius::SM)
-                                        .fill(accent)
-                                        .on_press(|s: &mut AppState| {
+                                    text_input(&s.append_note_input, TextStyle::new(12.0, 400.0))
+                                        .single_line()
+                                        .w_full()
+                                        .color(t.text)
+                                        .caret(accent, accent.alpha(0.25))
+                                        .placeholder("Append note to document...", Color::WHITE.alpha(0.35))
+                                        .on_edit(|s: &mut AppState| &mut s.append_note_input)
+                                        .on_submit(|s: &mut AppState, _| {
                                             s.commit_append_input();
-                                        })
-                                        .child(text("+ Append").font(type_::LABEL).color(Color::WHITE)),
+                                        }),
                                 ),
                         )
                         .child(
-                            row()
-                                .gap(space::S1)
-                                .child(quick_format_chip("+ Bullet", |s| s.append_to_selected_node("• "), card_bg, border, t.text))
-                                .child(quick_format_chip("+ Heading", |s| s.append_to_selected_node("\n### "), card_bg, border, t.text))
-                                .child(quick_format_chip("+ Checkbox", |s| s.append_to_selected_node("\n- [ ] "), card_bg, border, t.text))
-                                .child(quick_format_chip("+ Quote", |s| s.append_to_selected_node("\n> "), card_bg, border, t.text)),
+                            el()
+                                .px(10.0)
+                                .py(6.0)
+                                .radius(radius::SM)
+                                .fill(accent)
+                                .on_press(|s: &mut AppState| {
+                                    s.commit_append_input();
+                                })
+                                .child(text("+ Append").font(type_::LABEL).color(Color::WHITE)),
                         ),
                 );
 
-            // 6. AI Summary Card (if present)
-            if let Some(summary) = &node.summary {
+                // Save & Delete
                 content = content.child(
-                    col()
-                        .gap(4.0)
-                        .child(text("AI SYNTHESIS SUMMARY").font(SECTION_TITLE).color(accent))
+                    row()
+                        .w_full()
+                        .gap(space::S2)
                         .child(
                             el()
-                                .w_full()
-                                .padding(space::S3)
+                                .grow(1.0)
+                                .padding(space::S2)
                                 .radius(radius::SM)
-                                .fill(accent.alpha(0.08))
-                                .border(1.0, accent.alpha(0.25))
-                                .child(text(summary).font(BODY_STYLE).color(t.text)),
+                                .fill(card_bg)
+                                .border(1.0, border)
+                                .on_press(|s: &mut AppState| {
+                                    s.sync_node_edits();
+                                    if let Some(bundle) = &s.bundle {
+                                        let _ = bundle.save_graph_atomic(&s.graph);
+                                    }
+                                    s.status_message = "Document saved".into();
+                                })
+                                .child(
+                                    row()
+                                        .center()
+                                        .gap(4.0)
+                                        .child(text("💾 Save Document").font(type_::LABEL).color(t.text)),
+                                ),
+                        )
+                        .child(
+                            el()
+                                .padding(space::S2)
+                                .radius(radius::SM)
+                                .fill(Color { r: 0.55, g: 0.15, b: 0.15, a: 0.25 })
+                                .border(1.0, Color { r: 0.8, g: 0.25, b: 0.25, a: 0.7 })
+                                .on_press(move |s: &mut AppState| {
+                                    s.delete_node(&node_id_for_delete);
+                                })
+                                .child(
+                                    text("Delete")
+                                        .font(type_::LABEL)
+                                        .color(Color { r: 1.0, g: 0.45, b: 0.45, a: 1.0 }),
+                                ),
+                        ),
+                );
+            } else {
+                // ==========================================
+                // NOTE & CONCEPT INSPECTOR
+                // ==========================================
+                // 1. Header with Badge Pill and Deselect
+                content = content
+                    .child(
+                        row()
+                            .w_full()
+                            .center_y()
+                            .gap(space::S2)
+                            .child(badge_pill(node_kind.display_name(), kc))
+                            .child(
+                                subtle_badge(
+                                    &format!("#{}", &node.id.as_str()[..node.id.as_str().len().min(6)]),
+                                    text_muted,
+                                    card_bg,
+                                ),
+                            )
+                            .child(el().grow(1.0))
+                            .child(
+                                el()
+                                    .px(6.0)
+                                    .py(2.0)
+                                    .radius(radius::SM)
+                                    .fill(card_bg)
+                                    .border(1.0, border_subtle)
+                                    .on_press(|s: &mut AppState| {
+                                        s.sync_node_edits();
+                                        s.selected_nodes.clear();
+                                    })
+                                    .child(text("✕").font(MUTED_STYLE).color(text_muted)),
+                            ),
+                    );
+
+                // 2. Editable Title
+                content = content
+                    .child(
+                        col()
+                            .gap(4.0)
+                            .child(text("TITLE").font(SECTION_TITLE).color(text_muted))
+                            .child(
+                                el()
+                                    .w_full()
+                                    .padding(8.0)
+                                    .radius(radius::SM)
+                                    .fill(input_bg)
+                                    .border(1.0, border)
+                                    .child(
+                                        text_input(&s.edit_node_title, TITLE_STYLE)
+                                            .single_line()
+                                            .w_full()
+                                            .color(t.text)
+                                            .caret(accent, accent.alpha(0.25))
+                                            .placeholder("Node Title...", Color::WHITE.alpha(0.35))
+                                            .on_edit(|s: &mut AppState| &mut s.edit_node_title)
+                                            .on_input_change(|s: &mut AppState, _| {
+                                                s.sync_node_edits();
+                                            })
+                                            .on_submit(|s: &mut AppState, _| {
+                                                s.sync_node_edits();
+                                            }),
+                                    ),
+                            ),
+                    );
+
+                // Stats Pill Row
+                content = content.child(
+                    row()
+                        .gap(space::S1)
+                        .child(subtle_badge(&format!("{} words", word_count), t.text_secondary, card_bg))
+                        .child(subtle_badge(&format!("{} chars", char_count), t.text_secondary, card_bg))
+                        .child(subtle_badge(&format!("~{}m read", read_min), text_muted, card_bg)),
+                );
+
+                // 3. Editable Content Area
+                content = content
+                    .child(
+                        col()
+                            .gap(4.0)
+                            .child(
+                                row()
+                                    .w_full()
+                                    .child(text("CONTENT & NOTES").font(SECTION_TITLE).color(text_muted))
+                                    .child(el().grow(1.0))
+                                    .child(text(format!("{} lines", line_count)).font(MUTED_STYLE).color(text_muted)),
+                            )
+                            .child(
+                                col()
+                                    .w_full()
+                                    .radius(radius::SM)
+                                    .fill(input_bg)
+                                    .border(1.0, border)
+                                    .padding(8.0)
+                                    .child(
+                                        col()
+                                            .w_full()
+                                            .min_h(180.0)
+                                            .max_h(320.0)
+                                            .scroll(rune::ScrollSpec { stick_bottom: false })
+                                            .child(
+                                                text_input(&s.edit_node_content, BODY_STYLE)
+                                                    .w_full()
+                                                    .color(t.text)
+                                                    .caret(accent, accent.alpha(0.25))
+                                                    .placeholder(
+                                                        "Type your notes, markdown, or study observations here...",
+                                                        Color::WHITE.alpha(0.35),
+                                                    )
+                                                    .on_edit(|s: &mut AppState| &mut s.edit_node_content)
+                                                    .on_input_change(|s: &mut AppState, _| {
+                                                        s.sync_node_edits();
+                                                    })
+                                                    .on_submit(|s: &mut AppState, _| {
+                                                        s.edit_node_content.insert("\n");
+                                                        s.sync_node_edits();
+                                                    }),
+                                            ),
+                                    ),
+                            ),
+                    );
+
+                // 4. Quick Append & Note Actions
+                content = content
+                    .child(
+                        col()
+                            .gap(space::S2)
+                            .child(text("QUICK APPEND").font(SECTION_TITLE).color(text_muted))
+                            .child(
+                                row()
+                                    .w_full()
+                                    .gap(space::S2)
+                                    .child(
+                                        el()
+                                            .grow(1.0)
+                                            .padding(6.0)
+                                            .radius(radius::SM)
+                                            .fill(input_bg)
+                                            .border(1.0, border)
+                                            .child(
+                                                text_input(&s.append_note_input, TextStyle::new(12.0, 400.0))
+                                                    .single_line()
+                                                    .w_full()
+                                                    .color(t.text)
+                                                    .caret(accent, accent.alpha(0.25))
+                                                    .placeholder("Quick note or bullet to append...", Color::WHITE.alpha(0.35))
+                                                    .on_edit(|s: &mut AppState| &mut s.append_note_input)
+                                                    .on_submit(|s: &mut AppState, _| {
+                                                        s.commit_append_input();
+                                                    }),
+                                            ),
+                                    )
+                                    .child(
+                                        el()
+                                            .px(10.0)
+                                            .py(6.0)
+                                            .radius(radius::SM)
+                                            .fill(accent)
+                                            .on_press(|s: &mut AppState| {
+                                                s.commit_append_input();
+                                            })
+                                            .child(text("+ Append").font(type_::LABEL).color(Color::WHITE)),
+                                    ),
+                            )
+                            .child(
+                                row()
+                                    .gap(space::S1)
+                                    .child(quick_format_chip("+ Bullet", |s| s.append_to_selected_node("• "), card_bg, border, t.text))
+                                    .child(quick_format_chip("+ Heading", |s| s.append_to_selected_node("\n### "), card_bg, border, t.text))
+                                    .child(quick_format_chip("+ Checkbox", |s| s.append_to_selected_node("\n- [ ] "), card_bg, border, t.text))
+                                    .child(quick_format_chip("+ Quote", |s| s.append_to_selected_node("\n> "), card_bg, border, t.text)),
+                            ),
+                    );
+
+                // 5. AI Summary Card (if present)
+                if let Some(summary) = &node.summary {
+                    content = content.child(
+                        col()
+                            .gap(4.0)
+                            .child(text("AI SYNTHESIS SUMMARY").font(SECTION_TITLE).color(accent))
+                            .child(
+                                el()
+                                    .w_full()
+                                    .padding(space::S3)
+                                    .radius(radius::SM)
+                                    .fill(accent.alpha(0.08))
+                                    .border(1.0, accent.alpha(0.25))
+                                    .child(text(summary).font(BODY_STYLE).color(t.text)),
+                            ),
+                    );
+                }
+
+                // AI Explain Action Button
+                content = content.child(
+                    el()
+                        .w_full()
+                        .padding(space::S2)
+                        .radius(radius::SM)
+                        .fill(Color { r: 0.22, g: 0.16, b: 0.35, a: 0.40 })
+                        .border(1.0, Color { r: 0.55, g: 0.35, b: 0.85, a: 0.65 })
+                        .on_press(move |s: &mut AppState| {
+                            s.explain_node_ai(&node_id_for_explain);
+                        })
+                        .child(
+                            row()
+                                .center()
+                                .gap(space::S1)
+                                .child(text("✦ Explain Concept with AI").font(type_::LABEL).color(Color { r: 0.78, g: 0.60, b: 1.0, a: 1.0 })),
+                        ),
+                );
+
+                // 6. Save & Delete Node Actions
+                content = content.child(
+                    row()
+                        .w_full()
+                        .gap(space::S2)
+                        .child(
+                            el()
+                                .grow(1.0)
+                                .padding(space::S2)
+                                .radius(radius::SM)
+                                .fill(card_bg)
+                                .border(1.0, border)
+                                .on_press(|s: &mut AppState| {
+                                    s.sync_node_edits();
+                                    if let Some(bundle) = &s.bundle {
+                                        let _ = bundle.save_graph_atomic(&s.graph);
+                                    }
+                                    s.status_message = "Node content saved".into();
+                                })
+                                .child(
+                                    row()
+                                        .center()
+                                        .gap(4.0)
+                                        .child(text("💾 Save Changes").font(type_::LABEL).color(t.text)),
+                                ),
+                        )
+                        .child(
+                            el()
+                                .padding(space::S2)
+                                .radius(radius::SM)
+                                .fill(Color { r: 0.55, g: 0.15, b: 0.15, a: 0.25 })
+                                .border(1.0, Color { r: 0.8, g: 0.25, b: 0.25, a: 0.7 })
+                                .on_press(move |s: &mut AppState| {
+                                    s.delete_node(&node_id_for_delete);
+                                })
+                                .child(
+                                    text("Delete")
+                                        .font(type_::LABEL)
+                                        .color(Color { r: 1.0, g: 0.45, b: 0.45, a: 1.0 }),
+                                ),
                         ),
                 );
             }
-
-            // AI Explain Action Button
-            content = content.child(
-                el()
-                    .w_full()
-                    .padding(space::S2)
-                    .radius(radius::SM)
-                    .fill(Color { r: 0.22, g: 0.16, b: 0.35, a: 0.40 })
-                    .border(1.0, Color { r: 0.55, g: 0.35, b: 0.85, a: 0.65 })
-                    .on_press(move |s: &mut AppState| {
-                        s.explain_node_ai(&node_id_for_explain);
-                    })
-                    .child(
-                        row()
-                            .center()
-                            .gap(space::S1)
-                            .child(text("✦ Explain Concept with AI").font(type_::LABEL).color(Color { r: 0.78, g: 0.60, b: 1.0, a: 1.0 })),
-                    ),
-            );
-
-            // 7. Save & Delete Node Actions
-            content = content.child(
-                row()
-                    .w_full()
-                    .gap(space::S2)
-                    .child(
-                        el()
-                            .grow(1.0)
-                            .padding(space::S2)
-                            .radius(radius::SM)
-                            .fill(card_bg)
-                            .border(1.0, border)
-                            .on_press(|s: &mut AppState| {
-                                s.sync_node_edits();
-                                if let Some(bundle) = &s.bundle {
-                                    let _ = bundle.save_graph_atomic(&s.graph);
-                                }
-                                s.status_message = "Node content saved".into();
-                            })
-                            .child(
-                                row()
-                                    .center()
-                                    .gap(4.0)
-                                    .child(text("💾 Save Changes").font(type_::LABEL).color(t.text)),
-                            ),
-                    )
-                    .child(
-                        el()
-                            .padding(space::S2)
-                            .radius(radius::SM)
-                            .fill(Color { r: 0.55, g: 0.15, b: 0.15, a: 0.25 })
-                            .border(1.0, Color { r: 0.8, g: 0.25, b: 0.25, a: 0.7 })
-                            .on_press(move |s: &mut AppState| {
-                                s.delete_node(&node_id_for_delete);
-                            })
-                            .child(
-                                text("Delete")
-                                    .font(type_::LABEL)
-                                    .color(Color { r: 1.0, g: 0.45, b: 0.45, a: 1.0 }),
-                            ),
-                    ),
-            );
         }
     } else if let Some(edge_id) = &s.selected_edge {
         if let Some(edge) = s.graph.get_edge(edge_id) {
@@ -566,7 +788,7 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                                 .fill(input_bg)
                                 .border(1.0, border)
                                 .child(
-                                    text_input(&s.edit_edge_label, HEADLINE)
+                                    text_input(&s.edit_edge_label, TITLE_STYLE)
                                         .single_line()
                                         .w_full()
                                         .color(t.text)
@@ -640,12 +862,12 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                 row()
                     .w_full()
                     .center_y()
-                    .child(text("INSPECTOR").font(HEADLINE).color(t.text))
+                    .child(text("INSPECTOR").font(TITLE_STYLE).color(t.text))
                     .child(el().grow(1.0))
                     .child(badge_pill("Idle", text_muted)),
             )
             .child(
-                text("Select any node or connection wire in the canvas to view details, edit contents, or adjust relationships.")
+                text("Select any node or connection wire in the canvas to view details, edit contents, or read documents.")
                     .font(BODY_STYLE)
                     .color(t.text_secondary),
             )
@@ -715,15 +937,18 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                     .border(1.0, border_subtle)
                     .child(text("✦ WORKFLOW TIPS").font(SECTION_TITLE).color(text_muted))
                     .child(
-                        text("• Drag between node sockets to connect concepts\n• Type directly into node title and content in this panel\n• Ingest PDFs, EPUBs, or TXT directly into document nodes\n• Trigger AI Synthesis to discover latent links")
+                        text("• Click any Document node to open the full Document Reader\n• Drag canvas background, Space+drag, or right-click to pan in 2D\n• Type directly into notes on canvas or in this sidebar\n• Ingest PDFs, EPUBs, or TXT directly into document nodes\n• Connect nodes via socket wire dragging")
                             .font(MUTED_STYLE)
                             .color(t.text_secondary),
                     ),
             );
     }
 
+    let is_doc_selected = s.selected_nodes.iter().next().and_then(|id| s.graph.get_node(id)).map_or(false, |n| n.kind == NodeKind::Document);
+    let panel_width = if is_doc_selected { 400.0 } else { 340.0 };
+
     col()
-        .w(340.0)
+        .w(panel_width)
         .h_full()
         .fill(panel_bg)
         .border(1.0, border)
