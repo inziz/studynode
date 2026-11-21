@@ -227,6 +227,7 @@ pub struct PopoutReaderState {
     pub active_image: Option<(PathBuf, rune::Image)>,
     pub section_images: HashMap<NodeId, (PathBuf, rune::Image)>,
     pub viewport_width: f32,
+    pub copied_slot: Option<&'static str>,
 }
 
 impl Default for PopoutReaderState {
@@ -247,6 +248,7 @@ impl Default for PopoutReaderState {
             active_image: None,
             section_images: HashMap::new(),
             viewport_width: 960.0,
+            copied_slot: None,
         }
     }
 }
@@ -281,6 +283,9 @@ impl PopoutReaderState {
         };
 
         self.applied_revision = snap.revision;
+        if snap.node_id != self.snapshot.node_id {
+            self.copied_slot = None;
+        }
         if self.title_edit.text != snap.title {
             self.title_edit = TextEdit::new(&snap.title);
         }
@@ -395,7 +400,7 @@ pub fn open_reader_window(bridge: Arc<Mutex<ReaderBridge>>) -> WindowHandle {
 
     let win_spec = WindowSpec::new("studynodes_reader", spec)
         .state(initial_state)
-        .titlebar(Titlebar::new(40.0))
+        .titlebar(Titlebar::new(36.0))
         .on_close(|s, _| {
             if let Ok(mut b) = s.bridge.lock() {
                 b.is_open = false;
@@ -410,23 +415,17 @@ pub fn open_reader_window(bridge: Arc<Mutex<ReaderBridge>>) -> WindowHandle {
 fn seg_btn(key: &'static str, label: &str, active: bool) -> El {
     el()
         .key(key)
-        .px(9.0)
-        .py(4.0)
-        .radius(3.0)
-        .fill(if active {
-            theme::bg_card_selected()
-        } else {
-            Color::TRANSPARENT
-        })
-        .hover(theme::hover_subtle())
-        .border(
-            1.0,
+        .px(5.0)
+        .py(5.0)
+        .border_sides(
+            [0.0, 0.0, 1.5, 0.0],
             if active {
-                theme::border_strong()
+                theme::accent_claude()
             } else {
                 Color::TRANSPARENT
             },
         )
+        .hover(theme::hover_subtle())
         .center()
         .cursor(Cursor::Pointer)
         .child(
@@ -448,13 +447,11 @@ fn toolbar_chip(
 ) -> El {
     el()
         .key(key)
-        .px(9.0)
-        .py(4.5)
-        .radius(4.0)
-        .fill(theme::bg_control())
+        .px(8.0)
+        .py(4.0)
+        .radius(6.0)
         .hover(theme::hover_subtle())
         .press(theme::press_subtle())
-        .border(1.0, theme::border_subtle())
         .cursor(Cursor::Pointer)
         .on_press(on_press)
         .child(text(label).font(theme::STATUS_TEXT).color(fg))
@@ -462,7 +459,7 @@ fn toolbar_chip(
 
 pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState>) -> El {
     cx.caption_color(theme::text_secondary());
-    cx.titlebar_height(40.0);
+    cx.titlebar_height(36.0);
 
     let insets = cx.chrome_insets();
     let snap = &s.snapshot;
@@ -471,28 +468,28 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
     let word_count = snap.content.split_whitespace().count();
     let read_min = (word_count as f32 / 200.0).ceil().max(1.0) as usize;
 
+    let kind_lbl = if snap.node_kind == NodeKind::Document {
+        doc_reader::format_badge(snap.doc_format)
+    } else {
+        theme::kind_label(snap.node_kind)
+    };
+
     let mut titlebar = row()
         .key("popout_titlebar")
         .w_full()
-        .h(40.0)
-        .pl(insets.leading + 12.0)
-        .pr(insets.trailing + 12.0)
-        .gap(8.0)
+        .h(36.0)
+        .pl(insets.leading + 14.0)
+        .pr(insets.trailing + 14.0)
+        .gap(10.0)
         .center_y()
-        .fill(theme::bg_chrome())
+        .fill(theme::bg_canvas())
         .border_sides([0.0, 0.0, 1.0, 0.0], theme::border_subtle())
         .window_drag()
         .child(
             text("✦")
-                .font(theme::CONTROL_TEXT)
+                .font(theme::STATUS_TEXT)
                 .color(theme::accent_claude()),
         )
-        .child(
-            text("reader")
-                .font(theme::TITLE_BAR)
-                .color(theme::text_primary()),
-        )
-        .child(text("·").font(theme::STATUS_TEXT).color(theme::text_muted()))
         .child(
             el().shrink().min_w(0.0).child(
                 text(if is_ro && snap.node_id.is_some() && !snap.title.is_empty() {
@@ -501,30 +498,14 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                     &snap.project_title
                 })
                 .font(theme::STATUS_TEXT)
-                .color(if is_ro {
-                    theme::text_primary()
-                } else {
-                    theme::text_secondary()
-                })
+                .color(theme::text_primary())
                 .truncate(),
             ),
         )
         .child(
-            el()
-                .px(6.0)
-                .py(2.0)
-                .radius(3.0)
-                .fill(theme::bg_control())
-                .border(1.0, theme::border_default())
-                .child(
-                    text(if snap.node_kind == NodeKind::Document {
-                        doc_reader::format_badge(snap.doc_format)
-                    } else {
-                        theme::kind_label(snap.node_kind)
-                    })
-                    .font(theme::BADGE_TEXT)
-                    .color(theme::text_primary()),
-                ),
+            text(kind_lbl)
+                .font(theme::BADGE_TEXT)
+                .color(theme::text_muted()),
         );
 
     let is_doc_or_note = matches!(
@@ -534,7 +515,7 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
     if !is_ro && is_doc_or_note {
         titlebar = titlebar.child(
             text(format!("{}w · ~{}m", word_count, read_min))
-                .font(theme::STATUS_TEXT)
+                .font(theme::BADGE_TEXT)
                 .color(theme::text_muted()),
         );
     }
@@ -552,35 +533,22 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                         .color(theme::text_muted()),
                 )
                 .child(
-                    el()
-                        .key("popout_sec_toggle_frame")
-                        .h(26.0)
-                        .px(9.0)
-                        .radius(4.0)
-                        .fill(theme::bg_control())
-                        .hover(theme::hover_subtle())
-                        .border(1.0, theme::border_subtle())
-                        .center()
-                        .cursor(Cursor::Pointer)
-                        .no_window_drag()
-                        .on_press(move |s: &mut PopoutReaderState| {
+                    toolbar_chip(
+                        "popout_sec_toggle_frame",
+                        if framed { "▭ Frame" } else { "— Banner" },
+                        theme::text_secondary(),
+                        move |s| {
                             s.snapshot.meta.section_framed = !s.snapshot.meta.section_framed;
                             s.send_cmd(ReaderCommand::ToggleSectionFramed(sec_id.clone()));
-                        })
-                        .child(
-                            text(if framed { "▭ Frame" } else { "— Banner" })
-                                .font(theme::STATUS_TEXT)
-                                .color(theme::text_primary()),
-                        ),
+                        },
+                    )
+                    .no_window_drag(),
                 );
         } else {
             let mut switcher = row()
                 .key("popout_view_tabs")
-                .padding(2.0)
-                .gap(2.0)
-                .radius(4.0)
-                .fill(theme::bg_input())
-                .border(1.0, theme::border_subtle())
+                .gap(10.0)
+                .center_y()
                 .no_window_drag();
 
             if is_doc_or_note && has_pdf {
@@ -623,29 +591,15 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
             }
 
             titlebar = titlebar.child(
-                el()
-                    .key("btn_popout_toggle_readonly")
-                    .h(26.0)
-                    .px(9.0)
-                    .radius(4.0)
-                    .fill(if is_ro {
-                        theme::accent_claude().alpha(0.16)
+                toolbar_chip(
+                    "btn_popout_toggle_readonly",
+                    if is_ro { "Edit" } else { "Done" },
+                    if is_ro {
+                        theme::accent_claude()
                     } else {
-                        theme::bg_control()
-                    })
-                    .hover(theme::hover_subtle())
-                    .border(
-                        1.0,
-                        if is_ro {
-                            theme::accent_claude().alpha(0.45)
-                        } else {
-                            theme::border_subtle()
-                        },
-                    )
-                    .center()
-                    .cursor(Cursor::Pointer)
-                    .no_window_drag()
-                    .on_press(move |s: &mut PopoutReaderState| {
+                        theme::text_primary()
+                    },
+                    move |s: &mut PopoutReaderState| {
                         let next = !s.snapshot.read_only;
                         s.snapshot.read_only = next;
                         if next && s.snapshot.doc_view_tab == DocViewTab::Source {
@@ -656,39 +610,17 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                             };
                         }
                         s.send_cmd(ReaderCommand::SetReadOnly(next));
-                    })
-                    .child(
-                        text(if is_ro { "✎ Edit" } else { "Read" })
-                            .font(theme::STATUS_TEXT)
-                            .color(if is_ro {
-                                theme::accent_claude()
-                            } else {
-                                theme::text_primary()
-                            }),
-                    ),
+                    },
+                )
+                .no_window_drag(),
             );
 
             if !is_ro && snap.node_kind == NodeKind::Document {
                 titlebar = titlebar.child(
-                    el()
-                        .key("btn_popout_external")
-                        .h(26.0)
-                        .px(8.0)
-                        .radius(4.0)
-                        .fill(theme::bg_control())
-                        .hover(theme::hover_subtle())
-                        .border(1.0, theme::border_subtle())
-                        .center()
-                        .cursor(Cursor::Pointer)
-                        .no_window_drag()
-                        .on_press(move |s: &mut PopoutReaderState| {
-                            s.send_cmd(ReaderCommand::OpenExternal(nid.clone()));
-                        })
-                        .child(
-                            text("↗")
-                                .font(theme::CONTROL_TEXT)
-                                .color(theme::text_primary()),
-                        ),
+                    toolbar_chip("btn_popout_external", "↗", theme::text_secondary(), move |s| {
+                        s.send_cmd(ReaderCommand::OpenExternal(nid.clone()));
+                    })
+                    .no_window_drag(),
                 );
             }
         }
@@ -697,13 +629,11 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
     titlebar = titlebar.child(
         el()
             .key("btn_popout_dock_back")
-            .h(26.0)
-            .px(10.0)
-            .radius(4.0)
-            .fill(theme::bg_control())
+            .px(8.0)
+            .py(4.0)
+            .radius(6.0)
             .hover(theme::hover_subtle())
             .press(theme::press_subtle())
-            .border(1.0, theme::border_default())
             .center()
             .cursor(Cursor::Pointer)
             .no_window_drag()
@@ -712,9 +642,9 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                 tx.close_window();
             })
             .child(
-                text("◧ Dock Back")
+                text("◧ Dock")
                     .font(theme::STATUS_TEXT)
-                    .color(theme::text_primary()),
+                    .color(theme::text_secondary()),
             ),
     );
 
@@ -870,16 +800,14 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                 .w_full()
                 .grow(1.0)
                 .min_h(0.0)
-                .padding(14.0)
-                .radius(4.0)
-                .fill(theme::bg_input())
-                .border(1.0, theme::border_default())
+                .items_center()
                 .scroll(ScrollSpec { stick_bottom: false })
                 .child(
                     text_input(&s.source_edit, theme::MONO_BODY)
                         .key("popout_doc_source")
                         .label("Document source")
                         .w_full()
+                        .max_w(740.0)
                         .min_h(520.0)
                         .color(theme::text_primary())
                         .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
@@ -910,8 +838,8 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
         } else {
             let mut preview_col = col()
                 .w_full()
-                .max_w(860.0)
-                .gap(12.0);
+                .max_w(740.0)
+                .gap(16.0);
 
             if let Some((_, img)) = &s.active_image {
                 if snap.doc_format == DocFormat::Image {
@@ -919,22 +847,21 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                         el()
                             .key("popout_image_preview")
                             .w_full()
-                            .min_h(360.0)
-                            .max_h(580.0)
-                            .radius(4.0)
-                            .border(1.0, theme::border_default())
+                            .min_h(340.0)
+                            .max_h(560.0)
+                            .radius(6.0)
                             .pixels_fit(img.pixels(), SurfaceFit::Fit),
                     );
                 }
             }
 
             let md_src = if snap.content.trim().is_empty() {
-                "*Empty document. Click **✎ Edit** to ingest or write Markdown.*".to_string()
+                "*Empty document. Click **Edit** to ingest or write Markdown.*".to_string()
             } else {
                 doc_reader::wrap_for_preview(&snap.content, snap.doc_format)
             };
 
-            let md_w = (s.viewport_width - 120.0).clamp(360.0, 820.0);
+            let md_w = (s.viewport_width - 120.0).clamp(360.0, 740.0);
             let md_style = theme::markdown_style().text_width(md_w);
             let mut md_builder = Markdown::new(&md_src).selectable(true);
             if !is_ro {
@@ -956,10 +883,8 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                 .w_full()
                 .grow(1.0)
                 .min_h(0.0)
-                .padding(if is_ro { 24.0 } else { 20.0 })
-                .radius(4.0)
-                .fill(theme::bg_input())
-                .border(1.0, theme::border_default())
+                .px(24.0)
+                .py(18.0)
                 .items_center()
                 .scroll(ScrollSpec { stick_bottom: false })
                 .child(preview_col);
@@ -969,30 +894,28 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                     .w_full()
                     .grow(1.0)
                     .min_h(0.0)
-                    .gap(10.0)
+                    .gap(8.0)
+                    .items_center()
                     .child(
-                        row().w_full().center().child(
-                            row()
-                                .key("popout_readonly_toolbar")
-                                .center_y()
-                                .gap(8.0)
-                                .px(10.0)
-                                .py(4.5)
-                                .radius(6.0)
-                                .fill(theme::bg_card())
-                                .border(1.0, theme::border_subtle())
-                                .child(
-                                    text(&snap.title)
-                                        .font(theme::CONTROL_TEXT)
-                                        .color(theme::text_primary())
-                                        .truncate(),
-                                )
-                                .child(
-                                    text(format!("· ~{}m read · read-only", read_min))
-                                        .font(theme::STATUS_TEXT)
-                                        .color(theme::text_muted()),
-                                ),
-                        ),
+                        col()
+                            .key("popout_readonly_toolbar")
+                            .w_full()
+                            .max_w(740.0)
+                            .gap(4.0)
+                            .pt(8.0)
+                            .child(
+                                text(&snap.title)
+                                    .font(TextStyle::new(22.0, 600.0))
+                                    .color(theme::text_primary())
+                                    .w_full()
+                                    .wrap(),
+                            )
+                            .child(
+                                text(format!("~{} min read", read_min))
+                                    .font(theme::STATUS_TEXT)
+                                    .color(theme::text_muted()),
+                            )
+                            .child(el().w_full().h(1.0).fill(theme::border_subtle())),
                     )
                     .child(content_box)
             } else {
@@ -1004,8 +927,10 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
             .w_full()
             .grow(1.0)
             .min_h(0.0)
-            .padding(if is_ro { 14.0 } else { 18.0 })
+            .px(24.0)
+            .py(16.0)
             .gap(12.0)
+            .items_center()
             .on_layout_tx(|s: &mut PopoutReaderState, r, tx| {
                 if r[2] > 100.0 && (s.viewport_width - r[2]).abs() > 6.0 {
                     s.viewport_width = r[2];
@@ -1017,73 +942,56 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
         if !is_ro {
             let top_meta = row()
                 .w_full()
+                .max_w(740.0)
                 .center_y()
                 .gap(10.0)
+                .pb(10.0)
+                .border_sides([0.0, 0.0, 1.0, 0.0], theme::border_subtle())
                 .child(
-                    el()
-                        .grow(1.0)
-                        .min_w(0.0)
-                        .px(12.0)
-                        .py(8.0)
-                        .radius(4.0)
-                        .fill(theme::bg_input())
-                        .border(1.0, theme::border_default())
-                        .child(
-                            text_input(&s.title_edit, TextStyle::new(15.0, 600.0))
-                                .key("popout_doc_title")
-                                .label("Document title")
-                                .single_line()
-                                .w_full()
-                                .color(theme::text_primary())
-                                .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
-                                .placeholder("Document title...", theme::text_muted())
-                                .on_edit(|s: &mut PopoutReaderState| &mut s.title_edit)
-                                .on_input_change(move |s: &mut PopoutReaderState, _| {
-                                    let title = s.title_edit.text.clone();
-                                    let content = s.source_edit.text.clone();
-                                    s.snapshot.title = title.clone();
-                                    s.send_cmd(ReaderCommand::UpdateTitleContent {
-                                        node_id: nid_for_title.clone(),
-                                        title,
-                                        content,
-                                    });
-                                }),
-                        ),
+                    el().grow(1.0).min_w(0.0).child(
+                        text_input(&s.title_edit, TextStyle::new(20.0, 600.0))
+                            .key("popout_doc_title")
+                            .label("Document title")
+                            .single_line()
+                            .w_full()
+                            .color(theme::text_primary())
+                            .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                            .placeholder("Document title...", theme::text_muted())
+                            .on_edit(|s: &mut PopoutReaderState| &mut s.title_edit)
+                            .on_input_change(move |s: &mut PopoutReaderState, _| {
+                                let title = s.title_edit.text.clone();
+                                let content = s.source_edit.text.clone();
+                                s.snapshot.title = title.clone();
+                                s.send_cmd(ReaderCommand::UpdateTitleContent {
+                                    node_id: nid_for_title.clone(),
+                                    title,
+                                    content,
+                                });
+                            }),
+                    ),
                 )
-                .child(
-                    el()
-                        .key("btn_popout_ai")
-                        .h(32.0)
-                        .px(12.0)
-                        .radius(4.0)
-                        .fill(theme::accent_claude().alpha(0.14))
-                        .hover(theme::accent_claude().alpha(0.22))
-                        .border(1.0, theme::accent_claude().alpha(0.45))
-                        .center()
-                        .cursor(Cursor::Pointer)
-                        .on_press(move |s: &mut PopoutReaderState| {
-                            s.send_cmd(ReaderCommand::ExplainAi(nid_for_ai.clone()));
-                        })
-                        .child(
-                            text("✦ Summarize")
-                                .font(theme::CONTROL_TEXT)
-                                .color(theme::text_primary()),
-                        ),
-                );
+                .child(toolbar_chip(
+                    "btn_popout_ai",
+                    "✦ Summarize",
+                    theme::accent_claude(),
+                    move |s| {
+                        s.send_cmd(ReaderCommand::ExplainAi(nid_for_ai.clone()));
+                    },
+                ));
             body_col = body_col.child(top_meta);
 
             if let Some(summary) = &snap.summary {
                 body_col = body_col.child(
                     el()
                         .w_full()
-                        .padding(10.0)
-                        .radius(4.0)
-                        .fill(theme::bg_card())
-                        .border(1.0, theme::accent_claude().alpha(0.35))
+                        .max_w(740.0)
+                        .pl(12.0)
+                        .py(2.0)
+                        .border_sides([0.0, 0.0, 0.0, 2.0], theme::accent_claude().alpha(0.65))
                         .child(
                             text(format!("✦ {}", summary))
                                 .font(theme::BODY_TEXT)
-                                .color(theme::text_primary())
+                                .color(theme::text_secondary())
                                 .w_full()
                                 .wrap(),
                         ),
@@ -1098,66 +1006,49 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
             body_col = body_col.child(
                 row()
                     .w_full()
+                    .max_w(740.0)
+                    .pt(8.0)
                     .gap(8.0)
+                    .center_y()
+                    .border_sides([1.0, 0.0, 0.0, 0.0], theme::border_subtle())
                     .child(
-                        el()
-                            .grow(1.0)
-                            .px(10.0)
-                            .py(7.0)
-                            .radius(4.0)
-                            .fill(theme::bg_input())
-                            .border(1.0, theme::border_default())
-                            .child(
-                                text_input(&s.append_edit, theme::CONTROL_TEXT)
-                                    .key("popout_append_note")
-                                    .label("Append note or excerpt")
-                                    .single_line()
-                                    .w_full()
-                                    .color(theme::text_primary())
-                                    .caret(
-                                        theme::accent_claude(),
-                                        theme::accent_claude().alpha(0.25),
-                                    )
-                                    .placeholder("Append note or excerpt...", theme::text_muted())
-                                    .on_edit(|s: &mut PopoutReaderState| &mut s.append_edit)
-                                    .on_submit(move |s: &mut PopoutReaderState, _| {
-                                        let txt = s.append_edit.text.trim().to_string();
-                                        if !txt.is_empty() {
-                                            s.append_edit = TextEdit::new("");
-                                            s.send_cmd(ReaderCommand::AppendText {
-                                                node_id: nid_append_submit.clone(),
-                                                text: txt,
-                                            });
-                                        }
-                                    }),
-                            ),
+                        el().grow(1.0).child(
+                            text_input(&s.append_edit, theme::STATUS_TEXT)
+                                .key("popout_append_note")
+                                .label("Append note or excerpt")
+                                .single_line()
+                                .w_full()
+                                .color(theme::text_primary())
+                                .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                                .placeholder("Append note or excerpt...", theme::text_muted())
+                                .on_edit(|s: &mut PopoutReaderState| &mut s.append_edit)
+                                .on_submit(move |s: &mut PopoutReaderState, _| {
+                                    let txt = s.append_edit.text.trim().to_string();
+                                    if !txt.is_empty() {
+                                        s.append_edit = TextEdit::new("");
+                                        s.send_cmd(ReaderCommand::AppendText {
+                                            node_id: nid_append_submit.clone(),
+                                            text: txt,
+                                        });
+                                    }
+                                }),
+                        ),
                     )
-                    .child(
-                        el()
-                            .key("btn_popout_append")
-                            .px(12.0)
-                            .py(7.0)
-                            .radius(4.0)
-                            .fill(theme::bg_control())
-                            .hover(theme::hover_subtle())
-                            .border(1.0, theme::border_default())
-                            .cursor(Cursor::Pointer)
-                            .on_press(move |s: &mut PopoutReaderState| {
-                                let txt = s.append_edit.text.trim().to_string();
-                                if !txt.is_empty() {
-                                    s.append_edit = TextEdit::new("");
-                                    s.send_cmd(ReaderCommand::AppendText {
-                                        node_id: nid_for_append.clone(),
-                                        text: txt,
-                                    });
-                                }
-                            })
-                            .child(
-                                text("+ Append")
-                                    .font(theme::CONTROL_TEXT)
-                                    .color(theme::text_primary()),
-                            ),
-                    ),
+                    .child(toolbar_chip(
+                        "btn_popout_append",
+                        "+ Append",
+                        theme::text_secondary(),
+                        move |s| {
+                            let txt = s.append_edit.text.trim().to_string();
+                            if !txt.is_empty() {
+                                s.append_edit = TextEdit::new("");
+                                s.send_cmd(ReaderCommand::AppendText {
+                                    node_id: nid_for_append.clone(),
+                                    text: txt,
+                                });
+                            }
+                        },
+                    )),
             );
         }
 
@@ -2051,8 +1942,8 @@ fn render_popout_image(
     let mut box_col = col()
         .key("popout_image_view")
         .w_full()
-        .max_w(900.0)
-        .gap(14.0)
+        .max_w(740.0)
+        .gap(16.0)
         .items_center();
 
     if !is_ro {
@@ -2262,11 +2153,9 @@ fn render_popout_image(
 
     let mut ocr_card = col()
         .w_full()
-        .gap(8.0)
-        .padding(12.0)
-        .radius(6.0)
-        .fill(theme::bg_card())
-        .border(1.0, theme::border_subtle())
+        .gap(12.0)
+        .pt(12.0)
+        .border_sides([1.0, 0.0, 0.0, 0.0], theme::border_subtle())
         .child(ocr_row);
 
     if let Some(err) = &snap.vision_error {
@@ -2286,15 +2175,16 @@ fn render_popout_image(
         .filter(|t| !t.trim().is_empty())
     {
         let eng = snap.meta.ocr_engine.as_deref().unwrap_or("OCR");
+        let extracted_owned = extracted.to_string();
+        let ocr_copied = s.copied_slot == Some("ocr");
         ocr_card = ocr_card.child(
             col()
                 .key("popout_ocr_extracted_preview")
                 .w_full()
                 .gap(8.0)
-                .padding(10.0)
-                .radius(4.0)
-                .fill(theme::bg_input())
-                .border(1.0, theme::border_default())
+                .pl(14.0)
+                .py(2.0)
+                .border_sides([0.0, 0.0, 0.0, 2.0], theme::border_strong())
                 .child(
                     text(extracted)
                         .font(theme::BODY_TEXT)
@@ -2306,17 +2196,39 @@ fn render_popout_image(
                     row()
                         .w_full()
                         .center_y()
-                        .gap(6.0)
+                        .gap(4.0)
                         .child(
                             text(eng)
                                 .font(theme::BADGE_TEXT)
                                 .color(theme::text_muted()),
                         )
                         .child(el().grow(1.0))
+                        .child(
+                            el()
+                                .key("btn_popout_ocr_copy")
+                                .px(7.0)
+                                .py(3.5)
+                                .radius(5.0)
+                                .hover(theme::hover_subtle())
+                                .cursor(Cursor::Pointer)
+                                .on_press_tx(move |s: &mut PopoutReaderState, tx: &mut Tx| {
+                                    tx.copy(extracted_owned.clone());
+                                    s.copied_slot = Some("ocr");
+                                })
+                                .child(
+                                    text(if ocr_copied { "Copied ✓" } else { "Copy" })
+                                        .font(theme::STATUS_TEXT)
+                                        .color(if ocr_copied {
+                                            theme::accent_claude()
+                                        } else {
+                                            theme::text_secondary()
+                                        }),
+                                ),
+                        )
                         .child(toolbar_chip(
                             "btn_popout_ocr_spawn_note",
                             "+ Note",
-                            theme::text_primary(),
+                            theme::text_secondary(),
                             move |s| {
                                 s.send_cmd(ReaderCommand::SpawnNoteFromOcr(nid_spawn_note.clone()));
                             },
@@ -2324,7 +2236,7 @@ fn render_popout_image(
                         .child(toolbar_chip(
                             "btn_popout_ocr_spawn_formula",
                             "+ Formula",
-                            theme::text_primary(),
+                            theme::text_secondary(),
                             move |s| {
                                 s.send_cmd(ReaderCommand::SpawnFormulaFromOcr(
                                     nid_spawn_eq.clone(),
@@ -2337,6 +2249,7 @@ fn render_popout_image(
                             theme::text_muted(),
                             move |s| {
                                 s.snapshot.meta.extracted_text = None;
+                                s.copied_slot = None;
                                 s.send_cmd(ReaderCommand::ClearExtractedText(nid_clear_ocr.clone()));
                             },
                         )),
@@ -2345,12 +2258,7 @@ fn render_popout_image(
     }
 
     let active_lang = snap.target_language.to_ascii_lowercase();
-    let mut lang_strip = row()
-        .padding(2.0)
-        .gap(2.0)
-        .radius(4.0)
-        .fill(theme::bg_input())
-        .border(1.0, theme::border_subtle());
+    let mut lang_strip = row().center_y().gap(6.0);
     for &(code, label) in SUPPORTED_LANGUAGES {
         let key: &'static str = match code {
             "en" => "popout_lang_en",
@@ -2370,8 +2278,10 @@ fn render_popout_image(
     }
     let lang_bar = row()
         .w_full()
+        .pt(8.0)
         .center_y()
         .gap(8.0)
+        .border_sides([1.0, 0.0, 0.0, 0.0], theme::border_subtle())
         .child(lang_strip)
         .child(el().grow(1.0))
         .child(toolbar_chip(
@@ -2397,15 +2307,16 @@ fn render_popout_image(
             .as_deref()
             .unwrap_or(&active_lang)
             .to_uppercase();
+        let tr_owned = tr.to_string();
+        let tr_copied = s.copied_slot == Some("translation");
         ocr_card = ocr_card.child(
             col()
                 .key("popout_translated_preview")
                 .w_full()
                 .gap(8.0)
-                .padding(10.0)
-                .radius(4.0)
-                .fill(theme::bg_input())
-                .border(1.0, theme::accent_claude().alpha(0.35))
+                .pl(14.0)
+                .py(2.0)
+                .border_sides([0.0, 0.0, 0.0, 2.0], theme::accent_claude().alpha(0.65))
                 .child(
                     text(tr)
                         .font(theme::BODY_TEXT)
@@ -2417,17 +2328,39 @@ fn render_popout_image(
                     row()
                         .w_full()
                         .center_y()
-                        .gap(6.0)
+                        .gap(4.0)
                         .child(
                             text(tr_lang)
                                 .font(theme::BADGE_TEXT)
                                 .color(theme::accent_claude()),
                         )
                         .child(el().grow(1.0))
+                        .child(
+                            el()
+                                .key("btn_popout_translate_copy")
+                                .px(7.0)
+                                .py(3.5)
+                                .radius(5.0)
+                                .hover(theme::hover_subtle())
+                                .cursor(Cursor::Pointer)
+                                .on_press_tx(move |s: &mut PopoutReaderState, tx: &mut Tx| {
+                                    tx.copy(tr_owned.clone());
+                                    s.copied_slot = Some("translation");
+                                })
+                                .child(
+                                    text(if tr_copied { "Copied ✓" } else { "Copy" })
+                                        .font(theme::STATUS_TEXT)
+                                        .color(if tr_copied {
+                                            theme::accent_claude()
+                                        } else {
+                                            theme::text_secondary()
+                                        }),
+                                ),
+                        )
                         .child(toolbar_chip(
                             "btn_popout_translate_spawn_note",
                             "+ Note",
-                            theme::text_primary(),
+                            theme::text_secondary(),
                             move |s| {
                                 s.send_cmd(ReaderCommand::SpawnNoteFromTranslation(
                                     nid_spawn_tr.clone(),
@@ -2440,6 +2373,7 @@ fn render_popout_image(
                             theme::text_muted(),
                             move |s| {
                                 s.snapshot.meta.translated_text = None;
+                                s.copied_slot = None;
                                 s.send_cmd(ReaderCommand::ClearTranslatedText(
                                     nid_clear_tr.clone(),
                                 ));
@@ -2753,6 +2687,8 @@ mod tests {
                 meta: NodeMeta {
                     extracted_text: Some("Δ wᵢⱼ = η · xᵢ · yⱼ".into()),
                     ocr_engine: Some("PP-OCRv5 (Local)".into()),
+                    translated_text: Some("Las neuronas que disparan juntas...".into()),
+                    target_language: Some("es".into()),
                     ..Default::default()
                 },
                 ocr_engine: OcrEnginePreference::LocalPpOcrV5,
@@ -2763,6 +2699,7 @@ mod tests {
             };
         }
 
+        let cb = rune::clipboard::memory();
         let mut rt = Runtime::new(
             PopoutReaderState::new(bridge.clone()),
             render_popout_reader,
@@ -2772,19 +2709,12 @@ mod tests {
                 scale: 2.0,
             },
         );
+        rt.use_clipboard(&cb);
         for _ in 0..6 {
             rt.frame(1.0 / 60.0);
         }
 
-        for key in [
-            "btn_popout_img_ocr_text",
-            "btn_popout_download_neural",
-            "btn_popout_cycle_ocr_engine",
-            "btn_popout_ocr_spawn_note",
-            "btn_popout_ocr_clear",
-            "popout_lang_ja",
-            "btn_popout_translate_node",
-        ] {
+        let click_popout = |rt: &mut Runtime<PopoutReaderState>, key: &str| {
             let r = rt
                 .elements()
                 .into_iter()
@@ -2795,6 +2725,29 @@ mod tests {
             rt.pointer_down(r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
             rt.pointer_up(r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
             rt.frame(1.0 / 60.0);
+        };
+
+        click_popout(&mut rt, "btn_popout_ocr_copy");
+        assert_eq!(
+            cb.text().as_deref().map(String::as_str),
+            Some("Δ wᵢⱼ = η · xᵢ · yⱼ")
+        );
+        click_popout(&mut rt, "btn_popout_translate_copy");
+        assert_eq!(
+            cb.text().as_deref().map(String::as_str),
+            Some("Las neuronas que disparan juntas...")
+        );
+
+        for key in [
+            "btn_popout_img_ocr_text",
+            "btn_popout_download_neural",
+            "btn_popout_cycle_ocr_engine",
+            "btn_popout_ocr_spawn_note",
+            "btn_popout_ocr_clear",
+            "popout_lang_ja",
+            "btn_popout_translate_node",
+        ] {
+            click_popout(&mut rt, key);
         }
 
         let cmds = std::mem::take(&mut bridge.lock().unwrap().commands);

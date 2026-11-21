@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use rune::{ImageCache, Pixels, TextEdit, Waker, WindowHandle};
 use serde::{Deserialize, Serialize};
@@ -245,6 +245,12 @@ pub struct AppState {
     #[allow(dead_code)]
     pub wire_draft: Option<ActiveWireDraft>,
     pub show_block_menu: bool,
+    pub show_ai_menu: bool,
+    pub inspector_more_menu_open: bool,
+    pub copied_feedback: Option<(&'static str, Instant)>,
+    pub toast_text: Option<String>,
+    pub toast_expires_at: Option<Instant>,
+    pub last_toast_status: String,
     pub flipped_flashcards: HashSet<NodeId>,
     pub inspector_answer_edit: TextEdit,
     pub hide_all_edge_labels: bool,
@@ -366,8 +372,8 @@ impl AppState {
             append_note_input: TextEdit::new(""),
             editing_node_id: None,
             space_held: false,
-            canvas_origin: [0.0, 40.0],
-            canvas_size: [1280.0, 734.0],
+            canvas_origin: [0.0, 36.0],
+            canvas_size: [1280.0, 764.0],
             reader_prefs,
             reader_read_only,
             custom_reader_edit,
@@ -381,6 +387,12 @@ impl AppState {
             card_image_previews: HashMap::new(),
             wire_draft: None,
             show_block_menu: false,
+            show_ai_menu: false,
+            inspector_more_menu_open: false,
+            copied_feedback: None,
+            toast_text: None,
+            toast_expires_at: None,
+            last_toast_status: "Ready".into(),
             flipped_flashcards: HashSet::new(),
             inspector_answer_edit: TextEdit::new(""),
             hide_all_edge_labels: false,
@@ -875,6 +887,9 @@ impl AppState {
     pub fn close_to_dashboard(&mut self) {
         self.save_active_into_tab();
         self.confirm_delete_project = None;
+        self.show_block_menu = false;
+        self.show_ai_menu = false;
+        self.inspector_more_menu_open = false;
         self.screen = AppScreen::Dashboard;
         crate::touchpad_win32::set_canvas_bounds(None);
         self.refresh_recent_projects();
@@ -1933,6 +1948,8 @@ impl AppState {
         self.sync_node_edits();
         self.sync_edge_edits();
         self.show_block_menu = false;
+        self.show_ai_menu = false;
+        self.inspector_more_menu_open = false;
         if !additive {
             self.selected_nodes.clear();
         }
@@ -1983,6 +2000,8 @@ impl AppState {
         self.sync_node_edits();
         self.sync_edge_edits();
         self.show_block_menu = false;
+        self.show_ai_menu = false;
+        self.inspector_more_menu_open = false;
         self.selected_nodes.clear();
         self.selected_edge = None;
         self.editing_node_id = None;
@@ -2467,6 +2486,92 @@ impl AppState {
         Some(next_id)
     }
 
+    /// Show a transient floating canvas toast for 3 seconds.
+    pub fn notify_toast(&mut self, msg: impl Into<String>) {
+        let m = msg.into();
+        self.status_message = m.clone();
+        self.last_toast_status = m.clone();
+        self.toast_text = Some(m);
+        self.toast_expires_at = Some(Instant::now() + Duration::from_secs(3));
+    }
+
+    /// Synchronize transient toast notifications and copied-chip timers on UI poll.
+    pub fn sync_toast_and_feedback(&mut self) -> bool {
+        let mut changed = false;
+        let now = Instant::now();
+
+        if self.status_message != self.last_toast_status {
+            self.last_toast_status = self.status_message.clone();
+            if self.status_message != "Ready" && !self.status_message.starts_with("Loaded '") {
+                self.toast_text = Some(self.status_message.clone());
+                self.toast_expires_at = Some(now + Duration::from_secs(3));
+                changed = true;
+            }
+        }
+
+        if let Some(exp) = self.toast_expires_at {
+            if now >= exp {
+                self.toast_text = None;
+                self.toast_expires_at = None;
+                changed = true;
+            }
+        }
+
+        if let Some((_, ts)) = self.copied_feedback {
+            if now.duration_since(ts) >= Duration::from_secs(2) {
+                self.copied_feedback = None;
+                changed = true;
+            }
+        }
+
+        changed
+    }
+
+    /// Record short-lived `"Copied ✓"` feedback and show a transient toast.
+    pub fn mark_copied(&mut self, slot: &'static str, label: &str) {
+        self.copied_feedback = Some((slot, Instant::now()));
+        self.notify_toast(label);
+    }
+
+    pub fn is_recently_copied(&self, slot: &'static str) -> bool {
+        self.copied_feedback
+            .is_some_and(|(s, ts)| s == slot && ts.elapsed() < Duration::from_secs(2))
+    }
+
+    /// Discover latent conceptual connections across selected (or top) nodes using AI synthesis.
+    pub fn run_ai_synthesize_connections(&mut self) {
+        self.sync_node_edits();
+        let focus_ids: Vec<_> = self.selected_nodes.iter().cloned().collect();
+        let target_ids = if focus_ids.is_empty() {
+            self.graph.nodes.keys().take(3).cloned().collect()
+        } else {
+            focus_ids
+        };
+        if target_ids.is_empty() {
+            self.notify_toast("Add nodes first to synthesize connections");
+            return;
+        }
+
+        let context =
+            studynodes_llm::LlmContext::build(&self.graph, &target_ids, "Discover Connections");
+        let provider = studynodes_llm::MockLlmProvider;
+
+        if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            if let Ok(patch) = rt.block_on(provider.generate_patch(&context)) {
+                let res = self.graph.validate_and_stage_patch(&patch);
+                self.persist_graph_and_snapshot();
+                self.notify_toast(format!(
+                    "✦ AI proposed {} link(s) & {} insight node(s)",
+                    res.proposed_edges.len(),
+                    res.new_nodes.len()
+                ));
+            }
+        }
+    }
+
     /// Generate active-recall Flashcard & Study Checklist nodes for selected focus nodes.
     pub fn generate_study_cards_ai(&mut self) {
         self.sync_node_edits();
@@ -2616,6 +2721,9 @@ impl AppState {
     pub fn select_edge(&mut self, id: EdgeId) {
         self.sync_node_edits();
         self.sync_edge_edits();
+        self.show_block_menu = false;
+        self.show_ai_menu = false;
+        self.inspector_more_menu_open = false;
         self.selected_nodes.clear();
         self.editing_node_id = None;
         self.active_pdf = None;

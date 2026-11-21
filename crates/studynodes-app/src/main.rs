@@ -10,8 +10,7 @@ mod state;
 mod theme;
 mod touchpad_win32;
 
-use rune::tok::space;
-use rune::{App, AppSpec, Cx, El, Titlebar, col, el, row, text};
+use rune::{App, AppSpec, Cx, El, Titlebar, col, row};
 
 use crate::canvas_view::{render_canvas_view, render_workspace_topbar};
 use crate::dashboard_view::render_dashboard;
@@ -20,7 +19,7 @@ use crate::state::{AppScreen, AppState, node_base_size};
 
 fn view(s: &AppState, cx: &mut Cx<AppState>) -> El {
     cx.caption_color(theme::text_secondary());
-    cx.titlebar_height(40.0);
+    cx.titlebar_height(36.0);
 
     if s.screen == AppScreen::Dashboard {
         touchpad_win32::set_canvas_bounds(None);
@@ -48,64 +47,12 @@ fn view(s: &AppState, cx: &mut Cx<AppState>) -> El {
         }
     };
 
-    // Sleek Monochrome 26px Bottom Status Bar (Claude Code-esque)
-    let status_bar = row()
-        .key("status_bar")
-        .w_full()
-        .h(26.0)
-        .px(12.0)
-        .gap(space::S2)
-        .center_y()
-        .fill(theme::bg_chrome())
-        .border_sides([1.0, 0.0, 0.0, 0.0], theme::border_subtle())
-        .child(
-            text("✦")
-                .font(theme::STATUS_TEXT)
-                .color(theme::accent_claude()),
-        )
-        .child(
-            text("studynodes")
-                .font(theme::STATUS_TEXT)
-                .color(theme::text_primary()),
-        )
-        .child(text("·").font(theme::STATUS_TEXT).color(theme::text_muted()))
-        .child(
-            text(&s.status_message)
-                .font(theme::STATUS_TEXT)
-                .color(theme::text_secondary()),
-        )
-        .child(el().grow(1.0))
-        .child(
-            text(match s.screen {
-                AppScreen::Dashboard => format!("{} workspaces · {} open", s.recent_projects.len(), s.tabs.len()),
-                AppScreen::Workspace => {
-                    if s.tabs.len() > 1 {
-                        format!(
-                            "{} tabs · {} nodes · {} links",
-                            s.tabs.len(),
-                            s.graph.nodes.len(),
-                            s.graph.edges.len()
-                        )
-                    } else {
-                        format!(
-                            "{} nodes · {} links",
-                            s.graph.nodes.len(),
-                            s.graph.edges.len()
-                        )
-                    }
-                }
-            })
-            .font(theme::STATUS_TEXT)
-            .color(theme::text_muted()),
-        );
-
     col()
         .key("app_root")
         .w_full()
         .h_full()
         .fill(theme::bg_canvas())
         .child(main_content)
-        .child(status_bar)
         .on_key_up(|s: &mut AppState, ev, _| {
             if let rune::Key::Text(k) = &ev.key {
                 if k == " " && s.space_held {
@@ -248,6 +195,9 @@ fn hebbian_delta(pre: f32, post: f32, lr: f32) -> f32 {
         s.graph.nodes.len(),
         s.graph.edges.len()
     );
+    s.last_toast_status = s.status_message.clone();
+    s.toast_text = None;
+    s.toast_expires_at = None;
 }
 
 fn setup_workspace_demo(s: &mut AppState) {
@@ -280,6 +230,7 @@ fn main() {
         let tp_changed = s.apply_touchpad_events(events);
         let bridge_changed = s.poll_reader_bridge();
         let vision_changed = s.poll_vision_jobs();
+        let toast_changed = s.sync_toast_and_feedback();
 
         let mut anim_changed = false;
         if s.screen == AppScreen::Workspace
@@ -289,9 +240,13 @@ fn main() {
             s.wire_anim_phase = ((tx.clock() * 0.35).rem_euclid(1.0)) as f32;
             tx.wake_after(std::time::Duration::from_millis(24));
             anim_changed = true;
+        } else if (s.toast_expires_at.is_some() || s.copied_feedback.is_some())
+            && !rune::is_headless()
+        {
+            tx.wake_after(std::time::Duration::from_millis(250));
         }
 
-        tp_changed || bridge_changed || vision_changed || anim_changed
+        tp_changed || bridge_changed || vision_changed || toast_changed || anim_changed
     });
     spec.on_key = Some(|s, ev, tx| {
         if tx.focused().is_none() && ev.key == rune::Key::Text(" ".into()) {
@@ -302,7 +257,7 @@ fn main() {
     });
 
     App::new(spec)
-        .titlebar(Titlebar::new(40.0))
+        .titlebar(Titlebar::new(36.0))
         .on_window(|w| touchpad_win32::attach(w))
         .run();
 }
@@ -1421,6 +1376,8 @@ mod tests {
         std::fs::write(&png_path, ONE_PX_PNG).expect("write png");
 
         let rt = &mut th.rt;
+        let cb = rune::clipboard::memory();
+        rt.use_clipboard(&cb);
         rt.state.create_project("Vision OCR Project");
         rt.state.set_vision_service_override(std::sync::Arc::new(
             studynodes_vision::MockVisionService {
@@ -1489,6 +1446,14 @@ mod tests {
             Some("MockVision (Test)")
         );
 
+        // 1-click Copy copies extracted text to clipboard
+        click_key(rt, "btn_ocr_copy");
+        assert_eq!(
+            cb.text().as_deref().map(String::as_str),
+            Some("Cells that fire together wire together.")
+        );
+        assert!(rt.state.is_recently_copied("ocr"));
+
         // Spawn Note -> linked [derived from] OCR
         click_key(rt, "btn_ocr_spawn_note");
         settle_frames(rt, 10);
@@ -1552,6 +1517,8 @@ mod tests {
     fn test_node_translation_and_spawn_translated_note() {
         let mut th = make_test_runtime();
         let rt = &mut th.rt;
+        let cb = rune::clipboard::memory();
+        rt.use_clipboard(&cb);
         rt.state.create_project("Translation Project");
         rt.state.set_vision_service_override(std::sync::Arc::new(
             studynodes_vision::MockVisionService {
@@ -1586,6 +1553,14 @@ mod tests {
             Some("[FR] Cells that fire together wire together.")
         );
         assert_eq!(note.meta.target_language.as_deref(), Some("fr"));
+
+        // 1-click Copy copies translated text to clipboard
+        click_key(rt, "btn_translate_copy");
+        assert_eq!(
+            cb.text().as_deref().map(String::as_str),
+            Some("[FR] Cells that fire together wire together.")
+        );
+        assert!(rt.state.is_recently_copied("translation"));
 
         click_key(rt, "btn_translate_spawn_note");
         settle_frames(rt, 10);

@@ -234,10 +234,20 @@ pub fn render_canvas_view(s: &AppState) -> El {
         .cursor(if s.space_held { Cursor::Grab } else { Cursor::Default })
         .pointer_buttons([PointerButton::Primary, PointerButton::Middle])
         .on_layout_tx(|s: &mut AppState, r, tx| {
-            s.canvas_origin = [r[0], r[1]];
-            s.canvas_size = [r[2].max(200.0), r[3].max(200.0)];
+            let new_origin = [r[0], r[1]];
+            let new_size = [r[2].max(200.0), r[3].max(200.0)];
+            let changed = (s.canvas_origin[0] - new_origin[0]).abs() > 0.5
+                || (s.canvas_origin[1] - new_origin[1]).abs() > 0.5
+                || (s.canvas_size[0] - new_size[0]).abs() > 0.5
+                || (s.canvas_size[1] - new_size[1]).abs() > 0.5;
+            s.canvas_origin = new_origin;
+            s.canvas_size = new_size;
             crate::touchpad_win32::set_canvas_bounds(Some(r));
-            tx.live_only();
+            if changed {
+                tx.instant();
+            } else {
+                tx.live_only();
+            }
         })
         .child(
             canvas(grid_shape)
@@ -421,41 +431,74 @@ pub fn render_canvas_view(s: &AppState) -> El {
         }
     }
 
+    let (dock_x, dock_y, hud_x, hud_y) = floating_overlay_coords(s.canvas_size);
+
     if s.show_block_menu {
-        canvas_container = canvas_container.child(render_block_menu_popover(s));
+        canvas_container = canvas_container.child(render_block_menu_popover(s, dock_x, dock_y));
     }
+    if s.show_ai_menu {
+        canvas_container = canvas_container.child(render_ai_menu_popover(s, dock_x, dock_y));
+    }
+    if let Some(msg) = &s.toast_text {
+        canvas_container = canvas_container.child(render_canvas_toast(s.canvas_size[0], dock_y, msg));
+    }
+
+    canvas_container = canvas_container
+        .child(render_canvas_floating_dock(s, dock_x, dock_y))
+        .child(render_canvas_viewport_hud(s, hud_x, hud_y));
 
     canvas_container
 }
 
-fn topbar_pill_btn(
+fn floating_overlay_coords(canvas_size: [f32; 2]) -> (f32, f32, f32, f32) {
+    let cw = canvas_size[0].max(240.0);
+    let ch = canvas_size[1].max(200.0);
+    let dock_w = 396.0;
+    let dock_h = 40.0;
+    let hud_w = 136.0;
+    let hud_h = 34.0;
+    let margin = 16.0;
+
+    let hud_x = (cw - hud_w - margin).max(margin);
+    let hud_y = (ch - hud_h - (margin + 3.0)).max(12.0);
+    let max_dock_x = (hud_x - 12.0 - dock_w).max(margin);
+    let dock_x = ((cw - dock_w) * 0.5).clamp(margin, max_dock_x);
+    let dock_y = (ch - dock_h - margin).max(12.0);
+    (dock_x, dock_y, hud_x, hud_y)
+}
+
+fn dock_ghost_btn(
     key: &'static str,
-    prefix_glyph: Option<(&'static str, Color)>,
-    label: &'static str,
+    glyph: Option<(&'static str, Color)>,
+    label: &str,
+    active: bool,
 ) -> El {
     let mut content = row().center_y().gap(5.0);
-    if let Some((glyph, color)) = prefix_glyph {
-        content = content.child(
-            text(glyph)
-                .font(theme::CONTROL_TEXT)
-                .color(color),
-        );
+    if let Some((g, c)) = glyph {
+        content = content.child(text(g).font(theme::CONTROL_TEXT).color(c));
     }
     content = content.child(
         text(label)
-            .font(theme::CONTROL_TEXT)
-            .color(theme::text_primary()),
+            .font(theme::STATUS_TEXT)
+            .color(if active {
+                theme::text_primary()
+            } else {
+                theme::text_secondary()
+            }),
     );
 
     el()
         .key(key)
-        .h(26.0)
+        .h(28.0)
         .px(10.0)
-        .radius(4.0)
-        .fill(theme::bg_control())
+        .radius(8.0)
+        .fill(if active {
+            theme::hover_subtle()
+        } else {
+            Color::TRANSPARENT
+        })
         .hover(theme::hover_subtle())
         .press(theme::press_subtle())
-        .border(1.0, theme::border_subtle())
         .center()
         .cursor(Cursor::Pointer)
         .no_window_drag()
@@ -467,7 +510,7 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
 
     let mut tabs_strip = row()
         .key("workspace_tabs_strip")
-        .gap(4.0)
+        .gap(2.0)
         .center_y()
         .shrink()
         .min_w(0.0)
@@ -475,9 +518,9 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
 
     if s.tabs.is_empty() {
         tabs_strip = tabs_strip.child(
-            el().shrink().min_w(0.0).child(
+            el().shrink().min_w(0.0).px(6.0).child(
                 text(&s.graph.title)
-                    .font(theme::TITLE_BAR)
+                    .font(theme::STATUS_TEXT)
                     .color(theme::text_primary())
                     .truncate(),
             ),
@@ -494,22 +537,17 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
             tabs_strip = tabs_strip.child(
                 row()
                     .key(format!("workspace_tab_shell_{}", idx))
-                    .h(26.0)
-                    .max_w(162.0)
-                    .radius(4.0)
-                    .fill(if is_active {
-                        theme::bg_card_selected()
-                    } else {
-                        theme::bg_control()
-                    })
-                    .border(
-                        1.0,
+                    .h(35.0)
+                    .max_w(168.0)
+                    .border_sides(
+                        [0.0, 0.0, 1.5, 0.0],
                         if is_active {
-                            theme::border_strong()
+                            theme::accent_claude()
                         } else {
-                            theme::border_subtle()
+                            Color::TRANSPARENT
                         },
                     )
+                    .hover(theme::hover_subtle())
                     .center_y()
                     .child(
                         row()
@@ -517,22 +555,21 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                             .grow(1.0)
                             .min_w(0.0)
                             .h_full()
-                            .pl(8.0)
+                            .pl(10.0)
                             .pr(4.0)
-                            .gap(5.0)
+                            .gap(6.0)
                             .center_y()
-                            .hover(theme::hover_subtle())
                             .cursor(Cursor::Pointer)
                             .on_press(move |s: &mut AppState| {
                                 s.switch_tab(idx);
                             })
                             .child(
                                 text("●")
-                                    .font(TextStyle::new(7.0, 600.0).mono())
+                                    .font(TextStyle::new(6.5, 600.0).mono())
                                     .color(if is_active {
                                         theme::accent_claude()
                                     } else {
-                                        theme::text_muted()
+                                        Color::TRANSPARENT
                                     }),
                             )
                             .child(
@@ -541,7 +578,7 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                                     .color(if is_active {
                                         theme::text_primary()
                                     } else {
-                                        theme::text_secondary()
+                                        theme::text_muted()
                                     })
                                     .truncate(),
                             ),
@@ -549,9 +586,10 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                     .child(
                         el()
                             .key(format!("workspace_tab_close_{}", idx))
-                            .size(20.0, 24.0)
+                            .size(20.0, 22.0)
+                            .radius(4.0)
                             .center()
-                            .hover(theme::accent_danger().alpha(0.18))
+                            .hover(theme::hover_subtle())
                             .cursor(Cursor::Pointer)
                             .on_press(move |s: &mut AppState| {
                                 s.close_tab(idx);
@@ -559,7 +597,11 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                             .child(
                                 text("×")
                                     .font(TextStyle::new(11.0, 500.0).mono())
-                                    .color(theme::text_muted()),
+                                    .color(if is_active {
+                                        theme::text_secondary()
+                                    } else {
+                                        theme::text_muted().alpha(0.6)
+                                    }),
                             ),
                     ),
             );
@@ -569,11 +611,9 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
             el()
                 .key("btn_new_tab")
                 .size(26.0, 26.0)
-                .radius(4.0)
-                .fill(theme::bg_control())
+                .radius(6.0)
                 .hover(theme::hover_subtle())
                 .press(theme::press_subtle())
-                .border(1.0, theme::border_subtle())
                 .center()
                 .cursor(Cursor::Pointer)
                 .on_press(|s: &mut AppState| {
@@ -582,7 +622,7 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 .child(
                     text("+")
                         .font(theme::CONTROL_TEXT)
-                        .color(theme::text_secondary()),
+                        .color(theme::text_muted()),
                 ),
         );
     }
@@ -590,25 +630,21 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
     let mut topbar = row()
         .key("workspace_topbar")
         .w_full()
-        .h(40.0)
-        .pl(insets.leading + 10.0)
+        .h(36.0)
+        .pl(insets.leading + 8.0)
         .pr(insets.trailing + 10.0)
-        .gap(8.0)
+        .gap(6.0)
         .center_y()
-        .fill(theme::bg_chrome())
+        .fill(theme::bg_canvas())
         .border_sides([0.0, 0.0, 1.0, 0.0], theme::border_subtle())
         .window_drag()
-        // Left: concise Back + Multi-Project Tabs
         .child(
             el()
                 .key("btn_back")
-                .h(26.0)
-                .px(8.0)
-                .radius(4.0)
-                .fill(theme::bg_control())
+                .size(26.0, 26.0)
+                .radius(6.0)
                 .hover(theme::hover_subtle())
                 .press(theme::press_subtle())
-                .border(1.0, theme::border_subtle())
                 .center()
                 .cursor(Cursor::Pointer)
                 .no_window_drag()
@@ -618,220 +654,35 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 .child(
                     text("←")
                         .font(theme::CONTROL_TEXT)
-                        .color(theme::text_secondary()),
+                        .color(theme::text_muted()),
                 ),
         )
         .child(tabs_strip)
-        // Middle draggable window band spacer
-        .child(el().grow(1.0))
-        // Right: concise monochrome creation + Claude AI + Zoom + Reader toggle
-        .child(
-            topbar_pill_btn(
-                "btn_add_note",
-                Some(("▪", theme::text_secondary())),
-                "+ Note",
-            )
-            .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
-                let offset_x = (s.graph.nodes.len() as f32 * 32.0) % 160.0;
-                let offset_y = (s.graph.nodes.len() as f32 * 24.0) % 120.0;
-                let pos = s
-                    .graph
-                    .viewport
-                    .screen_to_world(ScreenPos::new(200.0 + offset_x, 120.0 + offset_y));
-                let id = s.add_note_node(Some(pos));
-                tx.focus_when_shown(format!("note_body_{}", id.as_str()), false);
-            }),
-        )
-        .child(
-            topbar_pill_btn(
-                "btn_add_doc",
-                Some(("▤", theme::text_secondary())),
-                "+ Doc",
-            )
-            .on_press(|s: &mut AppState| {
-                let offset_x = (s.graph.nodes.len() as f32 * 32.0) % 160.0;
-                let offset_y = (s.graph.nodes.len() as f32 * 24.0) % 120.0;
-                let pos = s
-                    .graph
-                    .viewport
-                    .screen_to_world(ScreenPos::new(240.0 + offset_x, 150.0 + offset_y));
-                s.add_document_node(Some(pos));
-            }),
-        )
-        .child(
-            el()
-                .key("btn_toggle_block_menu")
-                .h(26.0)
-                .px(10.0)
-                .radius(4.0)
-                .fill(if s.show_block_menu {
-                    theme::accent_claude().alpha(0.18)
-                } else {
-                    theme::bg_control()
-                })
-                .hover(theme::hover_subtle())
-                .press(theme::press_subtle())
-                .border(
-                    1.0,
-                    if s.show_block_menu {
-                        theme::accent_claude().alpha(0.55)
-                    } else {
-                        theme::border_subtle()
-                    },
-                )
-                .center()
-                .cursor(Cursor::Pointer)
-                .no_window_drag()
-                .on_press(|s: &mut AppState| {
-                    s.show_block_menu = !s.show_block_menu;
-                })
-                .child(
-                    text("+ Block ▾")
-                        .font(theme::CONTROL_TEXT)
-                        .color(if s.show_block_menu {
-                            theme::text_primary()
-                        } else {
-                            theme::text_secondary()
-                        }),
-                ),
-        )
-        .child(
-            el()
-                .key("btn_ai")
-                .h(26.0)
-                .px(10.0)
-                .radius(4.0)
-                .fill(if s.ai_panel_open {
-                    theme::accent_claude().alpha(0.18)
-                } else {
-                    theme::bg_control()
-                })
-                .hover(theme::hover_subtle())
-                .press(theme::press_subtle())
-                .border(
-                    1.0,
-                    if s.ai_panel_open {
-                        theme::accent_claude().alpha(0.55)
-                    } else {
-                        theme::border_subtle()
-                    },
-                )
-                .center()
-                .cursor(Cursor::Pointer)
-                .no_window_drag()
-                .on_press(|s: &mut AppState| {
-                    s.ai_panel_open = !s.ai_panel_open;
-                    if s.ai_panel_open {
-                        if !s.inspector_popped_out {
-                            s.inspector_open = true;
-                        }
-                        s.status_message = "✦ AI Synthesis ready".into();
-                    }
-                })
-                .child(
-                    row()
-                        .center_y()
-                        .gap(4.0)
-                        .child(
-                            text("✦")
-                                .font(theme::CONTROL_TEXT)
-                                .color(theme::accent_claude()),
-                        )
-                        .child(
-                            text("AI")
-                                .font(theme::CONTROL_TEXT)
-                                .color(theme::text_primary()),
-                        ),
-                ),
-        )
-        // Jump to nearest nodes button (never get lost on infinite canvas)
-        .child(
-            topbar_pill_btn(
-                "btn_locate_nearest",
-                Some(("◎", theme::accent_claude())),
-                "Nearest",
-            )
-            .on_press(|s: &mut AppState| {
-                s.locate_nearest_nodes();
-            }),
-        )
-        // Compact segmented zoom pill
-        .child(
-            row()
-                .key("zoom_pill")
-                .h(26.0)
-                .center_y()
-                .radius(4.0)
-                .fill(theme::bg_control())
-                .border(1.0, theme::border_subtle())
-                .no_window_drag()
-                .child(
-                    el()
-                        .key("btn_zoom_out")
-                        .h_full()
-                        .px(7.0)
-                        .center()
-                        .hover(theme::hover_subtle())
-                        .cursor(Cursor::Pointer)
-                        .on_press(|s: &mut AppState| {
-                            s.graph.viewport.zoom = (s.graph.viewport.zoom * 0.85).max(0.2);
-                        })
-                        .child(
-                            text("−")
-                                .font(theme::CONTROL_TEXT)
-                                .color(theme::text_secondary()),
-                        ),
-                )
-                .child(
-                    el()
-                        .key("btn_zoom_reset")
-                        .h_full()
-                        .px(6.0)
-                        .center()
-                        .hover(theme::hover_subtle())
-                        .cursor(Cursor::Pointer)
-                        .on_press(|s: &mut AppState| {
-                            s.graph.viewport.zoom = 1.0;
-                            s.graph.viewport.offset = WorldPos::ZERO;
-                        })
-                        .child(
-                            text(format!(
-                                "{}%",
-                                (s.graph.viewport.zoom * 100.0).round() as u32
-                            ))
-                            .font(theme::STATUS_TEXT)
-                            .color(theme::text_secondary()),
-                        ),
-                )
-                .child(
-                    el()
-                        .key("btn_zoom_in")
-                        .h_full()
-                        .px(7.0)
-                        .center()
-                        .hover(theme::hover_subtle())
-                        .cursor(Cursor::Pointer)
-                        .on_press(|s: &mut AppState| {
-                            s.graph.viewport.zoom = (s.graph.viewport.zoom * 1.15).min(3.0);
-                        })
-                        .child(
-                            text("+")
-                                .font(theme::CONTROL_TEXT)
-                                .color(theme::text_secondary()),
-                        ),
-                ),
-        );
+        .child(el().grow(1.0));
 
     if s.inspector_popped_out {
         topbar = topbar.child(
-            topbar_pill_btn("btn_focus_popout", Some(("⧉", theme::accent_claude())), "Reader")
+            el()
+                .key("btn_focus_popout")
+                .h(24.0)
+                .px(8.0)
+                .radius(6.0)
+                .hover(theme::hover_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .no_window_drag()
                 .on_press(|s: &mut AppState| {
                     if let Some(h) = &s.popout_window {
                         h.focus();
                     } else {
                         s.pop_out_reader();
                     }
-                }),
+                })
+                .child(
+                    text("⧉ Reader")
+                        .font(theme::STATUS_TEXT)
+                        .color(theme::accent_claude()),
+                ),
         );
     }
 
@@ -839,21 +690,9 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
         el()
             .key("btn_toggle_panel")
             .size(26.0, 26.0)
-            .radius(4.0)
-            .fill(if s.inspector_open || s.inspector_popped_out {
-                theme::accent_primary().alpha(0.14)
-            } else {
-                theme::bg_control()
-            })
+            .radius(6.0)
             .hover(theme::hover_subtle())
-            .border(
-                1.0,
-                if s.inspector_open || s.inspector_popped_out {
-                    theme::border_strong()
-                } else {
-                    theme::border_subtle()
-                },
-            )
+            .press(theme::press_subtle())
             .center()
             .cursor(Cursor::Pointer)
             .no_window_drag()
@@ -865,15 +704,221 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 }
             })
             .child(
-                text("◧")
+                text("◫")
                     .font(theme::CONTROL_TEXT)
                     .color(if s.inspector_open || s.inspector_popped_out {
                         theme::text_primary()
                     } else {
-                        theme::text_secondary()
+                        theme::text_muted()
                     }),
             ),
     )
+}
+
+fn render_canvas_floating_dock(s: &AppState, dock_x: f32, dock_y: f32) -> El {
+    row()
+        .key("canvas_floating_dock")
+        .absolute(dock_x, dock_y)
+        .w(396.0)
+        .h(40.0)
+        .px(8.0)
+        .gap(3.0)
+        .center_y()
+        .radius(12.0)
+        .continuous_corners()
+        .fill(theme::bg_chrome().alpha(0.96))
+        .border(1.0, theme::border_default())
+        .shadow(10.0, 26.0, Color::BLACK.alpha(0.55))
+        .child(
+            dock_ghost_btn("btn_add_note", Some(("▪", theme::text_secondary())), "Note", false)
+                .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+                    s.show_block_menu = false;
+                    s.show_ai_menu = false;
+                    let offset_x = (s.graph.nodes.len() as f32 * 32.0) % 160.0;
+                    let offset_y = (s.graph.nodes.len() as f32 * 24.0) % 120.0;
+                    let pos = s
+                        .graph
+                        .viewport
+                        .screen_to_world(ScreenPos::new(200.0 + offset_x, 120.0 + offset_y));
+                    let id = s.add_note_node(Some(pos));
+                    tx.focus_when_shown(format!("note_body_{}", id.as_str()), false);
+                }),
+        )
+        .child(
+            dock_ghost_btn("btn_add_doc", Some(("▤", theme::text_secondary())), "Doc", false)
+                .on_press(|s: &mut AppState| {
+                    s.show_block_menu = false;
+                    s.show_ai_menu = false;
+                    let offset_x = (s.graph.nodes.len() as f32 * 32.0) % 160.0;
+                    let offset_y = (s.graph.nodes.len() as f32 * 24.0) % 120.0;
+                    let pos = s
+                        .graph
+                        .viewport
+                        .screen_to_world(ScreenPos::new(240.0 + offset_x, 150.0 + offset_y));
+                    s.add_document_node(Some(pos));
+                }),
+        )
+        .child(
+            dock_ghost_btn(
+                "btn_dock_add_image",
+                Some(("▣", theme::text_secondary())),
+                "Image",
+                false,
+            )
+            .on_press(|s: &mut AppState| {
+                s.show_block_menu = false;
+                s.show_ai_menu = false;
+                s.add_study_node(NodeKind::Image, None);
+            }),
+        )
+        .child(
+            dock_ghost_btn(
+                "btn_toggle_block_menu",
+                None,
+                "+ More ▾",
+                s.show_block_menu,
+            )
+            .on_press(|s: &mut AppState| {
+                s.show_block_menu = !s.show_block_menu;
+                s.show_ai_menu = false;
+            }),
+        )
+        .child(el().w(1.0).h(18.0).fill(theme::border_subtle()))
+        .child(
+            dock_ghost_btn(
+                "btn_ai",
+                Some(("✦", theme::accent_claude())),
+                "AI",
+                s.show_ai_menu,
+            )
+            .on_press(|s: &mut AppState| {
+                s.show_ai_menu = !s.show_ai_menu;
+                s.show_block_menu = false;
+            }),
+        )
+}
+
+fn render_canvas_viewport_hud(s: &AppState, hud_x: f32, hud_y: f32) -> El {
+    row()
+        .key("canvas_viewport_hud")
+        .absolute(hud_x, hud_y)
+        .w(136.0)
+        .h(34.0)
+        .px(5.0)
+        .gap(2.0)
+        .center_y()
+        .radius(10.0)
+        .continuous_corners()
+        .fill(theme::bg_chrome().alpha(0.95))
+        .border(1.0, theme::border_subtle())
+        .shadow(6.0, 18.0, Color::BLACK.alpha(0.45))
+        .child(
+            el()
+                .key("btn_locate_nearest")
+                .size(26.0, 26.0)
+                .radius(6.0)
+                .hover(theme::hover_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .no_window_drag()
+                .on_press(|s: &mut AppState| {
+                    s.locate_nearest_nodes();
+                })
+                .child(
+                    text("◎")
+                        .font(theme::CONTROL_TEXT)
+                        .color(theme::accent_claude()),
+                ),
+        )
+        .child(el().w(1.0).h(14.0).fill(theme::border_subtle()))
+        .child(
+            el()
+                .key("btn_zoom_out")
+                .size(24.0, 26.0)
+                .radius(6.0)
+                .hover(theme::hover_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .no_window_drag()
+                .on_press(|s: &mut AppState| {
+                    s.graph.viewport.zoom = (s.graph.viewport.zoom * 0.85).max(0.2);
+                })
+                .child(
+                    text("−")
+                        .font(theme::CONTROL_TEXT)
+                        .color(theme::text_secondary()),
+                ),
+        )
+        .child(
+            el()
+                .key("btn_zoom_reset")
+                .grow(1.0)
+                .h(26.0)
+                .radius(6.0)
+                .hover(theme::hover_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .no_window_drag()
+                .on_press(|s: &mut AppState| {
+                    s.graph.viewport.zoom = 1.0;
+                    s.graph.viewport.offset = WorldPos::ZERO;
+                })
+                .child(
+                    text(format!(
+                        "{}%",
+                        (s.graph.viewport.zoom * 100.0).round() as u32
+                    ))
+                    .font(theme::BADGE_TEXT)
+                    .color(theme::text_secondary()),
+                ),
+        )
+        .child(
+            el()
+                .key("btn_zoom_in")
+                .size(24.0, 26.0)
+                .radius(6.0)
+                .hover(theme::hover_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .no_window_drag()
+                .on_press(|s: &mut AppState| {
+                    s.graph.viewport.zoom = (s.graph.viewport.zoom * 1.15).min(3.0);
+                })
+                .child(
+                    text("+")
+                        .font(theme::CONTROL_TEXT)
+                        .color(theme::text_secondary()),
+                ),
+        )
+}
+
+fn render_canvas_toast(canvas_w: f32, dock_y: f32, msg: &str) -> El {
+    let est_w = (msg.chars().count() as f32 * 6.8 + 42.0).clamp(140.0, 360.0);
+    let tx = ((canvas_w - est_w) * 0.5).max(16.0);
+    let ty = (dock_y - 38.0).max(12.0);
+    row()
+        .key("canvas_toast")
+        .absolute(tx, ty)
+        .h(28.0)
+        .max_w(360.0)
+        .px(12.0)
+        .gap(6.0)
+        .center_y()
+        .radius(999.0)
+        .fill(theme::bg_chrome().alpha(0.96))
+        .border(1.0, theme::border_subtle())
+        .shadow(6.0, 16.0, Color::BLACK.alpha(0.45))
+        .child(
+            text("✦")
+                .font(theme::BADGE_TEXT)
+                .color(theme::accent_claude()),
+        )
+        .child(
+            text(msg)
+                .font(theme::STATUS_TEXT)
+                .color(theme::text_primary())
+                .truncate(),
+        )
 }
 
 fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32) -> El {
@@ -2661,8 +2706,9 @@ fn render_section_node(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f
     container
 }
 
-fn render_block_menu_popover(s: &AppState) -> El {
-    let menu_x = (s.canvas_size[0] - 252.0).clamp(12.0, 980.0);
+fn render_block_menu_popover(s: &AppState, dock_x: f32, dock_y: f32) -> El {
+    let menu_x = (dock_x + 96.0).clamp(12.0, (s.canvas_size[0] - 244.0).max(12.0));
+    let menu_y = (dock_y - 318.0).max(12.0);
     let items = [
         ("btn_add_section", "▭", "Section", "Group frame & title", NodeKind::Section),
         ("btn_add_image", "▣", "Image", "Visual figure or diagram", NodeKind::Image),
@@ -2675,21 +2721,15 @@ fn render_block_menu_popover(s: &AppState) -> El {
 
     let mut menu = col()
         .key("block_create_menu")
-        .absolute(menu_x, 8.0)
-        .w(238.0)
+        .absolute(menu_x, menu_y)
+        .w(232.0)
         .padding(6.0)
-        .gap(3.0)
-        .radius(6.0)
-        .fill(theme::bg_chrome())
-        .border(1.0, theme::border_strong())
-        .shadow(8.0, 22.0, Color::BLACK.alpha(0.55))
-        .child(
-            el().px(8.0).py(4.0).child(
-                text("STUDY BLOCKS")
-                    .font(theme::SECTION_LABEL)
-                    .color(theme::text_muted()),
-            ),
-        );
+        .gap(2.0)
+        .radius(10.0)
+        .continuous_corners()
+        .fill(theme::bg_chrome().alpha(0.98))
+        .border(1.0, theme::border_default())
+        .shadow(10.0, 24.0, Color::BLACK.alpha(0.55));
 
     for (key, glyph, name, desc, kind) in items {
         menu = menu.child(
@@ -2700,14 +2740,14 @@ fn render_block_menu_popover(s: &AppState) -> El {
                 .py(6.0)
                 .gap(8.0)
                 .center_y()
-                .radius(4.0)
+                .radius(6.0)
                 .hover(theme::hover_subtle())
                 .cursor(Cursor::Pointer)
                 .on_press(move |s: &mut AppState| {
                     s.add_study_node(kind, None);
                 })
                 .child(
-                    el().w(20.0).center().child(
+                    el().w(18.0).center().child(
                         text(glyph)
                             .font(theme::CONTROL_TEXT)
                             .color(theme::kind_accent(kind)),
@@ -2732,6 +2772,74 @@ fn render_block_menu_popover(s: &AppState) -> El {
     }
 
     menu
+}
+
+fn render_ai_menu_popover(s: &AppState, dock_x: f32, dock_y: f32) -> El {
+    let menu_x = (dock_x + 178.0).clamp(12.0, (s.canvas_size[0] - 236.0).max(12.0));
+    let menu_y = (dock_y - 102.0).max(12.0);
+    col()
+        .key("ai_quick_menu")
+        .absolute(menu_x, menu_y)
+        .w(224.0)
+        .padding(6.0)
+        .gap(2.0)
+        .radius(10.0)
+        .continuous_corners()
+        .fill(theme::bg_chrome().alpha(0.98))
+        .border(1.0, theme::border_default())
+        .shadow(10.0, 24.0, Color::BLACK.alpha(0.55))
+        .child(
+            row()
+                .key("btn_run_ai_synth")
+                .w_full()
+                .px(8.0)
+                .py(7.0)
+                .gap(8.0)
+                .center_y()
+                .radius(6.0)
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut AppState| {
+                    s.show_ai_menu = false;
+                    s.run_ai_synthesize_connections();
+                })
+                .child(
+                    text("✦")
+                        .font(theme::CONTROL_TEXT)
+                        .color(theme::accent_claude()),
+                )
+                .child(
+                    text("Synthesize Connections")
+                        .font(theme::STATUS_TEXT)
+                        .color(theme::text_primary()),
+                ),
+        )
+        .child(
+            row()
+                .key("btn_ai_generate_cards")
+                .w_full()
+                .px(8.0)
+                .py(7.0)
+                .gap(8.0)
+                .center_y()
+                .radius(6.0)
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut AppState| {
+                    s.show_ai_menu = false;
+                    s.generate_study_cards_ai();
+                })
+                .child(
+                    text("◇")
+                        .font(theme::CONTROL_TEXT)
+                        .color(theme::text_secondary()),
+                )
+                .child(
+                    text("Generate Study Cards")
+                        .font(theme::STATUS_TEXT)
+                        .color(theme::text_primary()),
+                ),
+        )
 }
 
 fn render_edge_pill(edge: &Edge, is_selected: bool, screen_pos: ScreenPos, zoom: f32) -> El {

@@ -19,6 +19,7 @@ pub fn bg_chrome() -> Color {
     hex("#141413")
 }
 
+#[allow(dead_code)]
 #[inline]
 pub fn bg_sidebar() -> Color {
     hex("#151514")
@@ -183,6 +184,7 @@ pub fn kind_label(kind: NodeKind) -> &'static str {
 }
 
 // Typography tokens (Claude Code terminal-editorial feel)
+#[allow(dead_code)]
 pub const TITLE_BAR: TextStyle = TextStyle::new(12.5, 600.0).mono();
 pub const PANEL_TITLE: TextStyle = TextStyle::new(13.5, 600.0);
 pub const SECTION_LABEL: TextStyle = TextStyle::new(10.0, 600.0).mono().tracking(0.6);
