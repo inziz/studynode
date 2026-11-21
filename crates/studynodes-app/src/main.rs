@@ -279,6 +279,7 @@ fn main() {
         let events = touchpad_win32::take_events();
         let tp_changed = s.apply_touchpad_events(events);
         let bridge_changed = s.poll_reader_bridge();
+        let vision_changed = s.poll_vision_jobs();
 
         let mut anim_changed = false;
         if s.screen == AppScreen::Workspace
@@ -290,7 +291,7 @@ fn main() {
             anim_changed = true;
         }
 
-        tp_changed || bridge_changed || anim_changed
+        tp_changed || bridge_changed || vision_changed || anim_changed
     });
     spec.on_key = Some(|s, ev, tx| {
         if tx.focused().is_none() && ev.key == rune::Key::Text(" ".into()) {
@@ -1385,5 +1386,188 @@ mod tests {
         // Selecting a pop-outable Image switches pop-out window cleanly
         rt.state.select_node(img_id, false);
         assert_eq!(rt.state.reader_bridge.lock().unwrap().snapshot.node_kind, NodeKind::Image);
+    }
+
+    fn poll_vision_until_idle(rt: &mut Runtime<AppState>) {
+        for _ in 0..80 {
+            if rt.state.poll_vision_jobs()
+                && rt.state.vision_pending_nodes.is_empty()
+                && !rt.state.vision_downloading_models
+            {
+                break;
+            }
+            if rt.state.vision_pending_nodes.is_empty() && !rt.state.vision_downloading_models {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        rt.state.poll_vision_jobs();
+        rt.invalidate();
+        settle_frames(rt, 12);
+    }
+
+    #[test]
+    fn test_image_ocr_extract_and_spawn_note_and_formula() {
+        const ONE_PX_PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+
+        let mut th = make_test_runtime();
+        let png_path = th._dir.path().join("lecture_slide.png");
+        std::fs::write(&png_path, ONE_PX_PNG).expect("write png");
+
+        let rt = &mut th.rt;
+        rt.state.create_project("Vision OCR Project");
+        rt.state.set_vision_service_override(std::sync::Arc::new(
+            studynodes_vision::MockVisionService {
+                models_ready: false,
+                ..Default::default()
+            },
+        ));
+
+        let img_id = rt
+            .state
+            .add_study_node(NodeKind::Image, Some(WorldPos::new(120.0, 120.0)));
+        rt.state.ingest_file_into_node(&img_id, &png_path);
+        rt.state.select_node(img_id.clone(), false);
+        rt.state.inspector_open = true;
+        rt.invalidate();
+        settle_frames(rt, 20);
+
+        // Switching to Tier 2 Neural reveals the Download Neural Models control when not cached
+        click_key(rt, "ocr_engine_neural");
+        assert_eq!(
+            rt.state.reader_prefs.ocr_engine,
+            studynodes_vision::OcrEnginePreference::NeuralCrossPlatform
+        );
+        assert!(rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some("btn_download_neural_models") && !e.exiting));
+
+        // Extract Text (non-blocking worker -> poll -> meta.extracted_text)
+        click_key(rt, "btn_img_ocr_text");
+        poll_vision_until_idle(rt);
+
+        let img_node = rt.state.graph.get_node(&img_id).unwrap();
+        assert_eq!(
+            img_node.meta.extracted_text.as_deref(),
+            Some("Cells that fire together wire together.")
+        );
+        assert_eq!(
+            img_node.meta.ocr_engine.as_deref(),
+            Some("MockVision (Test)")
+        );
+
+        // Spawn Note -> linked [derived from] OCR
+        click_key(rt, "btn_ocr_spawn_note");
+        settle_frames(rt, 10);
+        let ocr_note = rt
+            .state
+            .graph
+            .nodes
+            .values()
+            .find(|n| n.kind == NodeKind::Note && n.meta.source_node.as_ref() == Some(&img_id))
+            .expect("spawned OCR note");
+        assert_eq!(ocr_note.content, "Cells that fire together wire together.");
+        assert!(rt.state.graph.edges.values().any(|e| {
+            e.from.node == img_id
+                && e.to.node == ocr_note.id
+                && e.relation == studynodes_graph::model::EdgeRelation::DerivedFrom
+                && e.label == "OCR"
+        }));
+
+        // Extract Formula -> Spawn Formula -> linked [derived from] Equation OCR
+        click_key(rt, "btn_img_ocr_formula");
+        poll_vision_until_idle(rt);
+        assert_eq!(
+            rt.state
+                .graph
+                .get_node(&img_id)
+                .unwrap()
+                .meta
+                .extracted_text
+                .as_deref(),
+            Some("Δ wᵢⱼ = η · xᵢ · yⱼ")
+        );
+
+        click_key(rt, "btn_ocr_spawn_formula");
+        settle_frames(rt, 10);
+        let eq_node = rt
+            .state
+            .graph
+            .nodes
+            .values()
+            .find(|n| n.kind == NodeKind::Formula && n.meta.source_node.as_ref() == Some(&img_id))
+            .expect("spawned Formula card from OCR");
+        assert_eq!(eq_node.content, "Δ wᵢⱼ = η · xᵢ · yⱼ");
+        assert!(rt.state.graph.edges.values().any(|e| {
+            e.from.node == img_id
+                && e.to.node == eq_node.id
+                && e.relation == studynodes_graph::model::EdgeRelation::DerivedFrom
+                && e.label == "Equation OCR"
+        }));
+    }
+
+    #[test]
+    fn test_node_translation_and_spawn_translated_note() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Translation Project");
+        rt.state.set_vision_service_override(std::sync::Arc::new(
+            studynodes_vision::MockVisionService {
+                models_ready: true,
+                ..Default::default()
+            },
+        ));
+
+        let mut note_node = studynodes_graph::model::Node::new(
+            NodeKind::Note,
+            "Hebbian Plasticity",
+            WorldPos::new(140.0, 140.0),
+        );
+        note_node.size = crate::state::node_base_size(NodeKind::Note);
+        note_node.content = "Cells that fire together wire together.".into();
+        let note_id = note_node.id.clone();
+        rt.state.graph.add_node(note_node);
+        rt.state.select_node(note_id.clone(), false);
+        rt.state.inspector_open = true;
+        rt.invalidate();
+        settle_frames(rt, 20);
+
+        click_key(rt, "lang_fr");
+        assert_eq!(rt.state.reader_prefs.target_language, "fr");
+
+        click_key(rt, "btn_translate_node");
+        poll_vision_until_idle(rt);
+
+        let note = rt.state.graph.get_node(&note_id).unwrap();
+        assert_eq!(
+            note.meta.translated_text.as_deref(),
+            Some("[FR] Cells that fire together wire together.")
+        );
+        assert_eq!(note.meta.target_language.as_deref(), Some("fr"));
+
+        click_key(rt, "btn_translate_spawn_note");
+        settle_frames(rt, 10);
+
+        let tr_note = rt
+            .state
+            .graph
+            .nodes
+            .values()
+            .find(|n| n.kind == NodeKind::Note && n.meta.source_node.as_ref() == Some(&note_id))
+            .expect("spawned translated note");
+        assert_eq!(tr_note.content, "[FR] Cells that fire together wire together.");
+        assert!(rt.state.graph.edges.values().any(|e| {
+            e.from.node == note_id
+                && e.to.node == tr_note.id
+                && e.relation == studynodes_graph::model::EdgeRelation::DerivedFrom
+                && e.label == "Translation"
+        }));
     }
 }

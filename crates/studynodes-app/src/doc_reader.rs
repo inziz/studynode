@@ -26,6 +26,18 @@ fn default_read_only() -> bool {
     true
 }
 
+fn default_target_language() -> String {
+    "es".into()
+}
+
+fn default_ollama_url() -> String {
+    "http://127.0.0.1:11434".into()
+}
+
+fn default_ollama_model() -> String {
+    "qwen2.5:3b".into()
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReaderPreferences {
     pub mode: ReaderMode,
@@ -37,6 +49,18 @@ pub struct ReaderPreferences {
     /// Distraction-free read-only mode hiding editing controls behind a minimal toolbar.
     #[serde(default = "default_read_only")]
     pub read_only: bool,
+    /// Selected OCR backend tier (`Auto`, `WindowsNative`, or `NeuralCrossPlatform`).
+    #[serde(default)]
+    pub ocr_engine: studynodes_vision::OcrEnginePreference,
+    /// Preferred target language ISO code (`en`, `es`, `fr`, `de`, `pt`, `ja`).
+    #[serde(default = "default_target_language")]
+    pub target_language: String,
+    /// Local Ollama base URL used for offline LLM translation when running.
+    #[serde(default = "default_ollama_url")]
+    pub ollama_url: String,
+    /// Preferred Ollama translation model name.
+    #[serde(default = "default_ollama_model")]
+    pub ollama_model: String,
 }
 
 impl Default for ReaderPreferences {
@@ -46,6 +70,10 @@ impl Default for ReaderPreferences {
             custom_reader_path: String::new(),
             inspector_width: default_inspector_width(),
             read_only: default_read_only(),
+            ocr_engine: studynodes_vision::OcrEnginePreference::default(),
+            target_language: default_target_language(),
+            ollama_url: default_ollama_url(),
+            ollama_model: default_ollama_model(),
         }
     }
 }
@@ -1740,5 +1768,31 @@ mod tests {
         assert!(pages[0].body.contains("First line"));
         assert_eq!(pages[1].heading, "Methods");
         assert_eq!(pages[2].heading, "Methods (cont.)");
+    }
+
+    #[test]
+    fn test_reader_preferences_ocr_translation_persistence() {
+        let dir = tempdir().unwrap();
+        let legacy = r#"{"mode":"Integrated","custom_reader_path":"","inspector_width":460.0,"read_only":true}"#;
+        fs::write(dir.path().join("reader_prefs.json"), legacy).unwrap();
+        let loaded_legacy = load_preferences(dir.path());
+        assert_eq!(
+            loaded_legacy.ocr_engine,
+            studynodes_vision::OcrEnginePreference::Auto
+        );
+        assert_eq!(loaded_legacy.target_language, "es");
+
+        let updated = ReaderPreferences {
+            ocr_engine: studynodes_vision::OcrEnginePreference::NeuralCrossPlatform,
+            target_language: "ja".into(),
+            ..loaded_legacy
+        };
+        save_preferences(dir.path(), &updated).unwrap();
+        let reloaded = load_preferences(dir.path());
+        assert_eq!(
+            reloaded.ocr_engine,
+            studynodes_vision::OcrEnginePreference::NeuralCrossPlatform
+        );
+        assert_eq!(reloaded.target_language, "ja");
     }
 }

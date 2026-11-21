@@ -150,6 +150,18 @@ pub struct NodeMeta {
     /// Whether a `Section` renders as a framed group backdrop (`true`) or title banner only (`false`).
     #[serde(default)]
     pub section_framed: bool,
+    /// Cached OCR-extracted text for `Image` nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extracted_text: Option<String>,
+    /// Label describing which OCR engine produced `extracted_text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr_engine: Option<String>,
+    /// Cached translated text for `Image`, `Note`, `Excerpt`, or `Document` nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translated_text: Option<String>,
+    /// Target language code used for `translated_text` (e.g. `"es"`, `"en"`, `"ja"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_language: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -363,5 +375,31 @@ mod tests {
         }"#;
         let edge: Edge = serde_json::from_str(legacy_edge_json).expect("legacy edge json");
         assert!(!edge.hide_label);
+    }
+
+    #[test]
+    fn test_node_meta_ocr_translation_backward_compat() {
+        let legacy_meta_json = r#"{
+            "answer": "42",
+            "mastery": "good",
+            "section_framed": false
+        }"#;
+        let meta: NodeMeta = serde_json::from_str(legacy_meta_json).expect("legacy meta json");
+        assert_eq!(meta.answer.as_deref(), Some("42"));
+        assert!(meta.extracted_text.is_none());
+        assert!(meta.ocr_engine.is_none());
+        assert!(meta.translated_text.is_none());
+        assert!(meta.target_language.is_none());
+
+        let populated = NodeMeta {
+            extracted_text: Some("E = mc²".into()),
+            ocr_engine: Some("Windows Native OCR".into()),
+            translated_text: Some("Energía = masa · c²".into()),
+            target_language: Some("es".into()),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&populated).expect("serialize");
+        let decoded: NodeMeta = serde_json::from_str(&encoded).expect("round-trip");
+        assert_eq!(decoded, populated);
     }
 }

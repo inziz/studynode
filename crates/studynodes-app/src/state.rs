@@ -1,15 +1,21 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::SystemTime;
 
 use rune::{ImageCache, Pixels, TextEdit, Waker, WindowHandle};
 use serde::{Deserialize, Serialize};
 
 use studynodes_graph::coords::{ScreenPos, WorldPos};
-use studynodes_graph::model::{EdgeId, EdgeStatus, NodeId, NodeKind, PortDirection, PortId};
+use studynodes_graph::model::{
+    Edge, EdgeEndpoint, EdgeId, EdgeRelation, EdgeStatus, NodeId, NodeKind, PortDirection, PortId,
+};
 use studynodes_graph::{CommandHistory, ProjectBundle, StudyGraph};
 use studynodes_llm::LlmProvider;
+use studynodes_vision::{
+    LocalVisionService, NeuralModelStatus, OcrEnginePreference, OcrMode, OcrOutput,
+    TranslationOutput, VisionConfig, VisionService,
+};
 
 use crate::doc_reader::{
     self, DocFormat, ReaderMode, ReaderPreferences, extract_document_markdown, render_pdf_page,
@@ -158,6 +164,22 @@ pub fn node_world_size(node: &studynodes_graph::model::Node) -> (f32, f32) {
     }
 }
 
+pub enum VisionJobResult {
+    OcrFinished {
+        node_id: NodeId,
+        mode: OcrMode,
+        result: Result<OcrOutput, String>,
+    },
+    TranslationFinished {
+        node_id: NodeId,
+        target_lang: String,
+        result: Result<TranslationOutput, String>,
+    },
+    ModelsDownloaded {
+        result: Result<NeuralModelStatus, String>,
+    },
+}
+
 pub struct AppState {
     pub screen: AppScreen,
     pub projects_dir: PathBuf,
@@ -227,6 +249,16 @@ pub struct AppState {
     pub hide_all_edge_labels: bool,
     pub wire_anim_phase: f32,
     pub popped_out_node_id: Option<NodeId>,
+
+    // Background OCR & Translation pipeline (non-blocking)
+    pub vision_service_override: Option<Arc<dyn VisionService>>,
+    pub vision_tx: mpsc::Sender<VisionJobResult>,
+    pub vision_rx: mpsc::Receiver<VisionJobResult>,
+    pub vision_waker: Option<Waker>,
+    pub vision_pending_nodes: HashSet<NodeId>,
+    pub vision_downloading_models: bool,
+    pub neural_models_ready: bool,
+    pub vision_last_error: Option<String>,
 }
 
 impl Default for AppState {
@@ -289,6 +321,9 @@ impl AppState {
         let custom_reader_edit = TextEdit::new(&reader_prefs.custom_reader_path);
         let inspector_width = reader_prefs.inspector_width.clamp(300.0, 860.0);
         let reader_read_only = reader_prefs.read_only;
+        let neural_models_ready =
+            studynodes_vision::neural_ocr::model_status(&projects_dir.join("models")).is_ready();
+        let (vision_tx, vision_rx) = mpsc::channel();
 
         let mut state = Self {
             screen: AppScreen::Dashboard,
@@ -342,6 +377,14 @@ impl AppState {
             hide_all_edge_labels: false,
             wire_anim_phase: 0.35,
             popped_out_node_id: None,
+            vision_service_override: None,
+            vision_tx,
+            vision_rx,
+            vision_waker: None,
+            vision_pending_nodes: HashSet::new(),
+            vision_downloading_models: false,
+            neural_models_ready,
+            vision_last_error: None,
         };
 
         state.refresh_recent_projects();
@@ -350,6 +393,7 @@ impl AppState {
 
     pub fn set_wakers(&mut self, waker: Waker) {
         self.image_cache = ImageCache::new(waker.clone());
+        self.vision_waker = Some(waker.clone());
         if let Ok(mut b) = self.reader_bridge.lock() {
             b.main_waker = Some(waker);
         }
@@ -1317,6 +1361,7 @@ impl AppState {
                 )) => ReaderSnapshot {
                     revision: rev,
                     project_title: self.graph.title.clone(),
+                    vision_pending: self.vision_pending_nodes.contains(&id),
                     node_id: Some(id),
                     node_kind,
                     title,
@@ -1334,12 +1379,22 @@ impl AppState {
                     pdf_page_count,
                     pdf_zoom,
                     read_only: self.reader_read_only,
+                    ocr_engine: self.reader_prefs.ocr_engine,
+                    target_language: self.reader_prefs.target_language.clone(),
+                    vision_downloading_models: self.vision_downloading_models,
+                    neural_models_ready: self.neural_models_ready,
+                    vision_error: self.vision_last_error.clone(),
                 },
                 None => ReaderSnapshot {
                     revision: rev,
                     project_title: self.graph.title.clone(),
                     doc_view_tab: self.doc_view_tab,
                     read_only: self.reader_read_only,
+                    ocr_engine: self.reader_prefs.ocr_engine,
+                    target_language: self.reader_prefs.target_language.clone(),
+                    vision_downloading_models: self.vision_downloading_models,
+                    neural_models_ready: self.neural_models_ready,
+                    vision_error: self.vision_last_error.clone(),
                     ..ReaderSnapshot::default()
                 },
             };
@@ -1551,6 +1606,38 @@ impl AppState {
                 }
                 ReaderCommand::IngestImagePath { node_id, path } => {
                     self.ingest_file_into_node(&node_id, &path);
+                    push_snap = true;
+                }
+                ReaderCommand::SetOcrEngine(engine) => {
+                    self.set_ocr_engine(engine);
+                    push_snap = true;
+                }
+                ReaderCommand::DownloadNeuralModels => {
+                    self.download_neural_ocr_models();
+                    push_snap = true;
+                }
+                ReaderCommand::RunImageOcr { node_id, mode } => {
+                    self.run_image_ocr(&node_id, mode);
+                    push_snap = true;
+                }
+                ReaderCommand::SpawnNoteFromOcr(node_id) => {
+                    self.spawn_note_from_extracted_text(&node_id);
+                    push_snap = true;
+                }
+                ReaderCommand::SpawnFormulaFromOcr(node_id) => {
+                    self.spawn_formula_from_extracted_text(&node_id);
+                    push_snap = true;
+                }
+                ReaderCommand::SetTargetLanguage(lang) => {
+                    self.set_target_language(&lang);
+                    push_snap = true;
+                }
+                ReaderCommand::RunNodeTranslation(node_id) => {
+                    self.run_node_translation(&node_id, None);
+                    push_snap = true;
+                }
+                ReaderCommand::SpawnNoteFromTranslation(node_id) => {
+                    self.spawn_note_from_translation(&node_id);
                     push_snap = true;
                 }
             }
@@ -2703,6 +2790,443 @@ Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
             self.select_node(id, false);
         }
         self.status_message = format!("Ingested {} file(s)", files.len());
+    }
+
+    #[allow(dead_code)]
+    pub fn set_vision_service_override(&mut self, svc: Arc<dyn VisionService>) {
+        self.neural_models_ready = svc.model_status().is_ready();
+        self.vision_service_override = Some(svc);
+        self.push_reader_snapshot();
+    }
+
+    fn active_vision_service(&self) -> Arc<dyn VisionService> {
+        if let Some(over) = &self.vision_service_override {
+            return Arc::clone(over);
+        }
+        Arc::new(LocalVisionService::new(VisionConfig {
+            models_dir: self.projects_dir.join("models"),
+            engine: self.reader_prefs.ocr_engine,
+            ollama_url: self.reader_prefs.ollama_url.clone(),
+            ollama_model: self.reader_prefs.ollama_model.clone(),
+            gemini_api_key: std::env::var("GEMINI_API_KEY")
+                .ok()
+                .filter(|k| !k.trim().is_empty()),
+        }))
+    }
+
+    pub fn set_ocr_engine(&mut self, engine: OcrEnginePreference) {
+        self.reader_prefs.ocr_engine = engine;
+        self.neural_models_ready = self.active_vision_service().model_status().is_ready();
+        self.vision_last_error = None;
+        let _ = doc_reader::save_preferences(&self.projects_dir, &self.reader_prefs);
+        self.status_message = format!("OCR Engine: {}", engine.display_name());
+        self.push_reader_snapshot();
+    }
+
+    pub fn set_target_language(&mut self, lang: &str) {
+        let code = lang.trim().to_ascii_lowercase();
+        if code.is_empty() {
+            return;
+        }
+        self.reader_prefs.target_language = code.clone();
+        let _ = doc_reader::save_preferences(&self.projects_dir, &self.reader_prefs);
+        self.status_message = format!(
+            "Target language: {}",
+            studynodes_vision::language_display_name(&code)
+        );
+        self.push_reader_snapshot();
+    }
+
+    /// Download Tier 2 cross-platform pure-Rust neural OCR weights in a non-blocking thread.
+    pub fn download_neural_ocr_models(&mut self) {
+        if self.vision_downloading_models {
+            return;
+        }
+        let svc = self.active_vision_service();
+        if svc.model_status().is_ready() {
+            self.neural_models_ready = true;
+            self.status_message = "Tier 2 neural OCR models already cached".into();
+            self.push_reader_snapshot();
+            return;
+        }
+
+        self.vision_downloading_models = true;
+        self.vision_last_error = None;
+        self.status_message = "Downloading Tier 2 neural OCR weights (~12 MB)...".into();
+        self.push_reader_snapshot();
+
+        let tx = self.vision_tx.clone();
+        let waker = self.vision_waker.clone();
+        std::thread::spawn(move || {
+            let result = svc.download_neural_models().map_err(|e| e.to_string());
+            let _ = tx.send(VisionJobResult::ModelsDownloaded { result });
+            if let Some(w) = waker {
+                (w)();
+            }
+        });
+    }
+
+    /// Trigger offline Tier 1 / Tier 2 OCR on an `Image` node in a background worker thread.
+    pub fn run_image_ocr(&mut self, node_id: &NodeId, mode: OcrMode) {
+        self.sync_node_edits();
+        if self.vision_pending_nodes.contains(node_id) {
+            return;
+        }
+
+        let Some(img_path) = self.resolved_node_asset_path(node_id) else {
+            let msg = "Attach an image file first before running OCR.".to_string();
+            self.vision_last_error = Some(msg.clone());
+            self.status_message = msg;
+            self.push_reader_snapshot();
+            return;
+        };
+
+        let svc = self.active_vision_service();
+        self.vision_pending_nodes.insert(node_id.clone());
+        self.vision_last_error = None;
+        self.status_message = match mode {
+            OcrMode::EquationFormula => format!(
+                "Extracting equation via {}...",
+                self.reader_prefs.ocr_engine.short_label()
+            ),
+            _ => format!(
+                "Extracting text via {}...",
+                self.reader_prefs.ocr_engine.short_label()
+            ),
+        };
+        self.push_reader_snapshot();
+
+        let nid = node_id.clone();
+        let tx = self.vision_tx.clone();
+        let waker = self.vision_waker.clone();
+        std::thread::spawn(move || {
+            let result = svc
+                .extract_image(&img_path, mode, None)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(VisionJobResult::OcrFinished {
+                node_id: nid,
+                mode,
+                result,
+            });
+            if let Some(w) = waker {
+                (w)();
+            }
+        });
+    }
+
+    /// Translate extracted text (or Node body text) into the target language off the UI thread.
+    pub fn run_node_translation(&mut self, node_id: &NodeId, target_lang_opt: Option<&str>) {
+        self.sync_node_edits();
+        if self.vision_pending_nodes.contains(node_id) {
+            return;
+        }
+
+        let target_lang = target_lang_opt
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.reader_prefs.target_language.clone());
+        if self.reader_prefs.target_language != target_lang {
+            self.reader_prefs.target_language = target_lang.clone();
+            let _ = doc_reader::save_preferences(&self.projects_dir, &self.reader_prefs);
+        }
+
+        let source_text = self.graph.get_node(node_id).and_then(|n| {
+            if n.kind == NodeKind::Image {
+                n.meta
+                    .extracted_text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned)
+                    .or_else(|| {
+                        let body = n.content.trim();
+                        if body.is_empty() || body.starts_with("Attached image:") {
+                            None
+                        } else {
+                            Some(body.to_string())
+                        }
+                    })
+            } else {
+                let body = n.content.trim();
+                if !body.is_empty() {
+                    Some(body.to_string())
+                } else {
+                    n.summary
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(ToOwned::to_owned)
+                }
+            }
+        });
+
+        let Some(text_to_translate) = source_text else {
+            let msg = "No text to translate yet (run Extract Text or type content first).".into();
+            self.vision_last_error = Some(msg);
+            self.status_message = "No text available to translate".into();
+            self.push_reader_snapshot();
+            return;
+        };
+
+        let svc = self.active_vision_service();
+        self.vision_pending_nodes.insert(node_id.clone());
+        self.vision_last_error = None;
+        self.status_message = format!("Translating to {}...", target_lang.to_uppercase());
+        self.push_reader_snapshot();
+
+        let nid = node_id.clone();
+        let lang_clone = target_lang.clone();
+        let tx = self.vision_tx.clone();
+        let waker = self.vision_waker.clone();
+        std::thread::spawn(move || {
+            let result = svc
+                .translate(&text_to_translate, &lang_clone)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(VisionJobResult::TranslationFinished {
+                node_id: nid,
+                target_lang: lang_clone,
+                result,
+            });
+            if let Some(w) = waker {
+                (w)();
+            }
+        });
+    }
+
+    /// Poll completed OCR / model download / translation background jobs on the UI loop.
+    pub fn poll_vision_jobs(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(job) = self.vision_rx.try_recv() {
+            changed = true;
+            match job {
+                VisionJobResult::ModelsDownloaded { result } => {
+                    self.vision_downloading_models = false;
+                    match result {
+                        Ok(st) => {
+                            self.neural_models_ready = st.is_ready();
+                            self.vision_last_error = None;
+                            self.status_message =
+                                "Tier 2 neural OCR models downloaded and cached".into();
+                        }
+                        Err(err) => {
+                            self.vision_last_error = Some(err.clone());
+                            self.status_message = format!("Model download error: {}", err);
+                        }
+                    }
+                }
+                VisionJobResult::OcrFinished {
+                    node_id,
+                    mode,
+                    result,
+                } => {
+                    self.vision_pending_nodes.remove(&node_id);
+                    self.neural_models_ready =
+                        self.active_vision_service().model_status().is_ready();
+                    match result {
+                        Ok(out) => {
+                            let formatted = if mode == OcrMode::EquationFormula {
+                                formula_math::expand_math_shorthand(&out.text)
+                            } else {
+                                out.text.clone()
+                            };
+                            self.vision_last_error = None;
+                            if let Some(node) = self.graph.get_node_mut(&node_id) {
+                                node.meta.extracted_text = if formatted.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(formatted.clone())
+                                };
+                                node.meta.ocr_engine = Some(out.engine_label.clone());
+                            }
+                            if formatted.trim().is_empty() {
+                                self.status_message = format!(
+                                    "{} completed — no readable text detected",
+                                    out.engine_label
+                                );
+                            } else {
+                                self.status_message = format!(
+                                    "{} extracted {} chars",
+                                    out.engine_label,
+                                    formatted.chars().count()
+                                );
+                            }
+                            if let Some(bundle) = &self.bundle {
+                                let _ = bundle.save_graph_atomic(&self.graph);
+                            }
+                        }
+                        Err(err) => {
+                            self.vision_last_error = Some(err.clone());
+                            self.status_message = format!("OCR error: {}", err);
+                        }
+                    }
+                }
+                VisionJobResult::TranslationFinished {
+                    node_id,
+                    target_lang,
+                    result,
+                } => {
+                    self.vision_pending_nodes.remove(&node_id);
+                    match result {
+                        Ok(out) => {
+                            self.vision_last_error = None;
+                            if let Some(node) = self.graph.get_node_mut(&node_id) {
+                                node.meta.translated_text = Some(out.translated_text.clone());
+                                node.meta.target_language = Some(out.target_language.clone());
+                            }
+                            self.status_message = format!(
+                                "Translated to {} via {}",
+                                target_lang.to_uppercase(),
+                                out.backend_label
+                            );
+                            if let Some(bundle) = &self.bundle {
+                                let _ = bundle.save_graph_atomic(&self.graph);
+                            }
+                        }
+                        Err(err) => {
+                            self.vision_last_error = Some(err.clone());
+                            self.status_message = format!("Translation error: {}", err);
+                        }
+                    }
+                }
+            }
+        }
+        if changed {
+            self.push_reader_snapshot();
+        }
+        changed
+    }
+
+    fn spawn_derived_card(
+        &mut self,
+        source_id: &NodeId,
+        kind: NodeKind,
+        title: String,
+        content: String,
+        edge_label: &str,
+    ) -> Option<NodeId> {
+        let (src_pos, src_title) = self
+            .graph
+            .get_node(source_id)
+            .map(|n| (n.pos, n.title.clone()))?;
+        let src_sz = self
+            .graph
+            .get_node(source_id)
+            .map(node_world_size)
+            .unwrap_or_else(|| node_base_size(kind));
+
+        let sibling_count = self
+            .graph
+            .edges
+            .values()
+            .filter(|e| {
+                e.from.node == *source_id && e.relation == EdgeRelation::DerivedFrom
+            })
+            .count() as f32;
+
+        let spawn_pos = WorldPos::new(
+            src_pos.x + src_sz.0 + 56.0,
+            src_pos.y + sibling_count * 190.0,
+        );
+        let mut node = studynodes_graph::model::Node::new(kind, title, spawn_pos);
+        node.size = node_base_size(kind);
+        node.content = content;
+        node.meta.source_node = Some(source_id.clone());
+        if kind == NodeKind::Formula {
+            node.meta.language = Some("MATH".into());
+        }
+        let new_id = node.id.clone();
+        self.graph.add_node(node);
+
+        let mut edge = Edge::new(
+            EdgeEndpoint {
+                node: source_id.clone(),
+                port: PortId::new(PortId::DEFAULT_OUT),
+            },
+            EdgeEndpoint {
+                node: new_id.clone(),
+                port: PortId::new(PortId::DEFAULT_IN),
+            },
+        );
+        edge.relation = EdgeRelation::DerivedFrom;
+        edge.label = edge_label.to_string();
+        edge.note = format!("Derived from '{}'", src_title);
+        self.graph.add_edge(edge);
+
+        self.persist_graph_and_snapshot();
+        Some(new_id)
+    }
+
+    /// Spawn a linked `Note` card from an Image node's `meta.extracted_text` (`[derived from] OCR`).
+    pub fn spawn_note_from_extracted_text(&mut self, image_id: &NodeId) -> Option<NodeId> {
+        let (title, body) = self.graph.get_node(image_id).and_then(|n| {
+            let txt = n
+                .meta
+                .extracted_text
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?;
+            Some((format!("{} · OCR", n.title), txt.to_string()))
+        })?;
+        let new_id = self.spawn_derived_card(image_id, NodeKind::Note, title, body, "OCR");
+        if new_id.is_some() {
+            self.status_message = "Spawned linked OCR Note".into();
+        }
+        new_id
+    }
+
+    /// Spawn a linked `Formula` card from an Image node's extracted equation (`[derived from] Equation OCR`).
+    pub fn spawn_formula_from_extracted_text(&mut self, image_id: &NodeId) -> Option<NodeId> {
+        let (title, eq_body) = self.graph.get_node(image_id).and_then(|n| {
+            let txt = n
+                .meta
+                .extracted_text
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?;
+            let formatted = formula_math::expand_math_shorthand(txt);
+            Some((format!("{} · Formula", n.title), formatted))
+        })?;
+        let new_id = self.spawn_derived_card(
+            image_id,
+            NodeKind::Formula,
+            title,
+            eq_body,
+            "Equation OCR",
+        );
+        if new_id.is_some() {
+            self.status_message = "Spawned linked Formula card from OCR".into();
+        }
+        new_id
+    }
+
+    /// Spawn a linked translated `Note` card from `meta.translated_text` (`[derived from] Translation`).
+    pub fn spawn_note_from_translation(&mut self, source_id: &NodeId) -> Option<NodeId> {
+        let (title, body) = self.graph.get_node(source_id).and_then(|n| {
+            let tr = n
+                .meta
+                .translated_text
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?;
+            let lang = n
+                .meta
+                .target_language
+                .as_deref()
+                .unwrap_or(&self.reader_prefs.target_language)
+                .to_uppercase();
+            Some((format!("{} ({})", n.title, lang), tr.to_string()))
+        })?;
+        let new_id = self.spawn_derived_card(
+            source_id,
+            NodeKind::Note,
+            title,
+            body,
+            "Translation",
+        );
+        if new_id.is_some() {
+            self.status_message = "Spawned linked Translation Note".into();
+        }
+        new_id
     }
 
     /// Apply unlocked simultaneous 2D touchpad Pan and Zoom events (reversed pan direction; pinch=out, expand=in).

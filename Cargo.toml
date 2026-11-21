@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/studynodes-graph",
     "crates/studynodes-llm",
+    "crates/studynodes-vision",
     "crates/studynodes-app",
 ]
 
@@ -35,3 +36,12 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = 0
+
+[profile.dev.package.rten]
+opt-level = 3
+
+[profile.dev.package.rten-tensor]
+opt-level = 3
+
+[profile.dev.package.ocrs]
+opt-level = 3

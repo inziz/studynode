@@ -4,8 +4,9 @@ use rune::{
     el, row, text, text_input,
 };
 use rune_kit::Markdown;
-use studynodes_graph::model::{EdgeRelation, NodeKind};
+use studynodes_graph::model::{EdgeRelation, Node, NodeKind};
 use studynodes_llm::LlmProvider;
+use studynodes_vision::{OcrEnginePreference, OcrMode, SUPPORTED_LANGUAGES};
 
 use crate::doc_reader::{self, DocFormat, ReaderMode};
 use crate::formula_math;
@@ -973,6 +974,12 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                         ),
                 );
 
+                if node_kind == NodeKind::Image {
+                    content = content.child(render_image_vision_section(s, node));
+                } else {
+                    content = content.child(render_translation_section(s, node));
+                }
+
                 // Quick append + Save / Delete footer
                 content = content
                     .child(
@@ -1243,6 +1250,13 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                             ),
                     )
                     .child(render_specialized_node_inspector(s, node));
+
+                if matches!(
+                    node_kind,
+                    NodeKind::Note | NodeKind::Excerpt | NodeKind::Concept | NodeKind::LlmSynthesis
+                ) {
+                    content = content.child(render_translation_section(s, node));
+                }
 
                 if let Some(summary) = &node.summary {
                     content = content.child(
@@ -1703,6 +1717,31 @@ fn render_readonly_doc_panel(
         );
     }
 
+    if node.kind == NodeKind::Image {
+        let ocr_nid = node.id.clone();
+        let is_busy = s.vision_pending_nodes.contains(&node.id);
+        small_toolbar = small_toolbar.child(
+            el()
+                .key("btn_readonly_ocr")
+                .h(24.0)
+                .px(8.0)
+                .radius(4.0)
+                .fill(theme::accent_claude().alpha(0.14))
+                .hover(theme::accent_claude().alpha(0.24))
+                .border(1.0, theme::accent_claude().alpha(0.45))
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.run_image_ocr(&ocr_nid, OcrMode::PlainText);
+                })
+                .child(
+                    text(if is_busy { "OCR..." } else { "OCR" })
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::accent_claude()),
+                ),
+        );
+    }
+
     small_toolbar = small_toolbar
         .child(
             el()
@@ -1858,13 +1897,17 @@ fn render_readonly_doc_panel(
                     el()
                         .key("integrated_image_preview")
                         .w_full()
-                        .min_h(260.0)
-                        .max_h(440.0)
+                        .min_h(150.0)
+                        .max_h(220.0)
                         .radius(4.0)
                         .border(1.0, theme::border_default())
                         .pixels_fit(img.pixels(), SurfaceFit::Fit),
                 );
             }
+        }
+
+        if node.kind == NodeKind::Image {
+            preview_col = preview_col.child(render_image_vision_section(s, node));
         }
 
         let md_src = if node.content.trim().is_empty() {
@@ -2237,4 +2280,414 @@ fn render_specialized_node_inspector(
         }
         _ => el(),
     }
+}
+
+fn render_image_vision_section(s: &AppState, node: &Node) -> El {
+    let nid_text = node.id.clone();
+    let nid_formula = node.id.clone();
+    let nid_spawn_note = node.id.clone();
+    let nid_spawn_formula = node.id.clone();
+
+    let engine = s.reader_prefs.ocr_engine;
+    let is_busy = s.vision_pending_nodes.contains(&node.id);
+    let neural_selected = engine == OcrEnginePreference::NeuralCrossPlatform
+        || (!cfg!(target_os = "windows") && engine == OcrEnginePreference::Auto);
+
+    let (status_lbl, status_color) = if is_busy {
+        ("Extracting...", theme::accent_claude())
+    } else if engine == OcrEnginePreference::WindowsNative {
+        if cfg!(target_os = "windows") {
+            ("Win OCR", theme::text_secondary())
+        } else {
+            ("Win Only", theme::text_muted())
+        }
+    } else if s.neural_models_ready {
+        ("Neural Ready", theme::accent_claude())
+    } else if cfg!(target_os = "windows") && engine == OcrEnginePreference::Auto {
+        ("Win OCR", theme::text_secondary())
+    } else {
+        ("Neural Not Cached", theme::text_muted())
+    };
+
+    let mut sec = col()
+        .key("image_vision_section")
+        .w_full()
+        .gap(8.0)
+        .padding(10.0)
+        .radius(4.0)
+        .fill(theme::bg_card())
+        .border(1.0, theme::border_subtle())
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(6.0)
+                .child(
+                    text("IMAGE OCR")
+                        .font(theme::SECTION_LABEL)
+                        .color(theme::text_muted()),
+                )
+                .child(el().grow(1.0))
+                .child(subtle_badge(status_lbl, status_color)),
+        )
+        .child(
+            row()
+                .key("ocr_engine_selector")
+                .w_full()
+                .padding(2.0)
+                .gap(2.0)
+                .radius(4.0)
+                .fill(theme::bg_input())
+                .border(1.0, theme::border_subtle())
+                .child(
+                    seg_tab(
+                        "ocr_engine_auto",
+                        "Auto",
+                        engine == OcrEnginePreference::Auto,
+                    )
+                    .grow(1.0)
+                    .on_press(|s: &mut AppState| {
+                        s.set_ocr_engine(OcrEnginePreference::Auto);
+                    }),
+                )
+                .child(
+                    seg_tab(
+                        "ocr_engine_win",
+                        "Win OCR",
+                        engine == OcrEnginePreference::WindowsNative,
+                    )
+                    .grow(1.0)
+                    .on_press(|s: &mut AppState| {
+                        s.set_ocr_engine(OcrEnginePreference::WindowsNative);
+                    }),
+                )
+                .child(
+                    seg_tab(
+                        "ocr_engine_neural",
+                        "Neural",
+                        engine == OcrEnginePreference::NeuralCrossPlatform,
+                    )
+                    .grow(1.0)
+                    .on_press(|s: &mut AppState| {
+                        s.set_ocr_engine(OcrEnginePreference::NeuralCrossPlatform);
+                    }),
+                ),
+        );
+
+    if neural_selected && !s.neural_models_ready {
+        sec = sec.child(
+            el()
+                .key("btn_download_neural_models")
+                .w_full()
+                .h(28.0)
+                .px(8.0)
+                .radius(4.0)
+                .fill(theme::bg_control())
+                .hover(theme::hover_subtle())
+                .border(1.0, theme::border_default())
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut AppState| {
+                    s.download_neural_ocr_models();
+                })
+                .child(
+                    text(if s.vision_downloading_models {
+                        "Downloading models..."
+                    } else {
+                        "↓ Download Neural Models (~12 MB)"
+                    })
+                    .font(theme::BADGE_TEXT)
+                    .color(theme::text_primary()),
+                ),
+        );
+    }
+
+    sec = sec.child(
+        row()
+            .w_full()
+            .gap(6.0)
+            .child(
+                el()
+                    .key("btn_img_ocr_text")
+                    .grow(1.0)
+                    .h(28.0)
+                    .px(8.0)
+                    .radius(4.0)
+                    .fill(theme::accent_primary())
+                    .hover(theme::accent_primary().alpha(0.88))
+                    .center()
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.run_image_ocr(&nid_text, OcrMode::PlainText);
+                    })
+                    .child(
+                        text(if is_busy { "Extracting..." } else { "Extract Text" })
+                            .font(theme::CONTROL_TEXT)
+                            .color(theme::text_inverted()),
+                    ),
+            )
+            .child(
+                el()
+                    .key("btn_img_ocr_formula")
+                    .grow(1.0)
+                    .h(28.0)
+                    .px(8.0)
+                    .radius(4.0)
+                    .fill(theme::bg_control())
+                    .hover(theme::hover_subtle())
+                    .border(1.0, theme::border_default())
+                    .center()
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.run_image_ocr(&nid_formula, OcrMode::EquationFormula);
+                    })
+                    .child(
+                        text("Extract Formula")
+                            .font(theme::CONTROL_TEXT)
+                            .color(theme::text_primary()),
+                    ),
+            ),
+    );
+
+    if let Some(err) = &s.vision_last_error {
+        sec = sec.child(
+            el()
+                .key("ocr_error_banner")
+                .w_full()
+                .padding(8.0)
+                .radius(4.0)
+                .fill(theme::bg_input())
+                .border(1.0, theme::accent_danger().alpha(0.45))
+                .child(
+                    text(err)
+                        .font(theme::STATUS_TEXT)
+                        .color(theme::accent_danger())
+                        .w_full()
+                        .wrap(),
+                ),
+        );
+    }
+
+    if let Some(extracted) = node
+        .meta
+        .extracted_text
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+    {
+        let engine_badge = node
+            .meta
+            .ocr_engine
+            .as_deref()
+            .unwrap_or("OCR Output");
+        sec = sec.child(
+            col()
+                .key("ocr_extracted_preview")
+                .w_full()
+                .gap(6.0)
+                .padding(10.0)
+                .radius(4.0)
+                .fill(theme::bg_input())
+                .border(1.0, theme::border_default())
+                .child(
+                    row()
+                        .w_full()
+                        .center_y()
+                        .child(subtle_badge(engine_badge, theme::accent_claude())),
+                )
+                .child(
+                    text(extracted)
+                        .font(theme::BODY_TEXT)
+                        .color(theme::text_primary())
+                        .w_full()
+                        .wrap(),
+                )
+                .child(
+                    row()
+                        .w_full()
+                        .gap(6.0)
+                        .child(
+                            el()
+                                .key("btn_ocr_spawn_note")
+                                .grow(1.0)
+                                .h(26.0)
+                                .px(8.0)
+                                .radius(4.0)
+                                .fill(theme::bg_control())
+                                .hover(theme::hover_subtle())
+                                .border(1.0, theme::border_subtle())
+                                .center()
+                                .cursor(Cursor::Pointer)
+                                .on_press(move |s: &mut AppState| {
+                                    s.spawn_note_from_extracted_text(&nid_spawn_note);
+                                })
+                                .child(
+                                    text("Spawn Note →")
+                                        .font(theme::BADGE_TEXT)
+                                        .color(theme::text_primary()),
+                                ),
+                        )
+                        .child(
+                            el()
+                                .key("btn_ocr_spawn_formula")
+                                .grow(1.0)
+                                .h(26.0)
+                                .px(8.0)
+                                .radius(4.0)
+                                .fill(theme::bg_control())
+                                .hover(theme::hover_subtle())
+                                .border(1.0, theme::border_subtle())
+                                .center()
+                                .cursor(Cursor::Pointer)
+                                .on_press(move |s: &mut AppState| {
+                                    s.spawn_formula_from_extracted_text(&nid_spawn_formula);
+                                })
+                                .child(
+                                    text("Spawn Formula →")
+                                        .font(theme::BADGE_TEXT)
+                                        .color(theme::text_primary()),
+                                ),
+                        ),
+                ),
+        );
+    }
+
+    sec.child(render_translation_section(s, node))
+}
+
+fn render_translation_section(s: &AppState, node: &Node) -> El {
+    let nid_trans = node.id.clone();
+    let nid_spawn_tr = node.id.clone();
+    let active_lang = s.reader_prefs.target_language.to_ascii_lowercase();
+    let is_busy = s.vision_pending_nodes.contains(&node.id);
+
+    let mut lang_row = row().key("translation_lang_chips").w_full().gap(4.0);
+    for &(code, label) in SUPPORTED_LANGUAGES {
+        let selected = active_lang == code;
+        let key: &'static str = match code {
+            "en" => "lang_en",
+            "es" => "lang_es",
+            "fr" => "lang_fr",
+            "de" => "lang_de",
+            "pt" => "lang_pt",
+            "ja" => "lang_ja",
+            _ => "lang_en",
+        };
+        lang_row = lang_row.child(
+            seg_tab(key, label, selected)
+                .grow(1.0)
+                .on_press(move |s: &mut AppState| {
+                    s.set_target_language(code);
+                }),
+        );
+    }
+
+    let mut tr_col = col()
+        .key("translation_section")
+        .w_full()
+        .gap(6.0)
+        .padding(10.0)
+        .radius(4.0)
+        .fill(theme::bg_card())
+        .border(1.0, theme::border_subtle())
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .child(
+                    text("TRANSLATE")
+                        .font(theme::SECTION_LABEL)
+                        .color(theme::text_muted()),
+                )
+                .child(el().grow(1.0))
+                .child(subtle_badge(
+                    &active_lang.to_uppercase(),
+                    theme::text_secondary(),
+                )),
+        )
+        .child(lang_row)
+        .child(
+            el()
+                .key("btn_translate_node")
+                .w_full()
+                .h(28.0)
+                .px(8.0)
+                .radius(4.0)
+                .fill(theme::bg_control())
+                .hover(theme::accent_claude().alpha(0.18))
+                .border(1.0, theme::border_default())
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.run_node_translation(&nid_trans, None);
+                })
+                .child(
+                    text(if is_busy {
+                        "Translating...".to_string()
+                    } else {
+                        format!("Translate → {}", active_lang.to_uppercase())
+                    })
+                    .font(theme::CONTROL_TEXT)
+                    .color(theme::text_primary()),
+                ),
+        );
+
+    if let Some(translated) = node
+        .meta
+        .translated_text
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+    {
+        let lang_badge = node
+            .meta
+            .target_language
+            .as_deref()
+            .unwrap_or(&active_lang)
+            .to_uppercase();
+        tr_col = tr_col.child(
+            col()
+                .key("translated_text_preview")
+                .w_full()
+                .gap(6.0)
+                .padding(10.0)
+                .radius(4.0)
+                .fill(theme::bg_input())
+                .border(1.0, theme::accent_claude().alpha(0.35))
+                .child(
+                    row()
+                        .w_full()
+                        .center_y()
+                        .child(subtle_badge(&lang_badge, theme::accent_claude())),
+                )
+                .child(
+                    text(translated)
+                        .font(theme::BODY_TEXT)
+                        .color(theme::text_primary())
+                        .w_full()
+                        .wrap(),
+                )
+                .child(
+                    el()
+                        .key("btn_translate_spawn_note")
+                        .w_full()
+                        .h(26.0)
+                        .px(8.0)
+                        .radius(4.0)
+                        .fill(theme::bg_control())
+                        .hover(theme::hover_subtle())
+                        .border(1.0, theme::border_subtle())
+                        .center()
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.spawn_note_from_translation(&nid_spawn_tr);
+                        })
+                        .child(
+                            text("Spawn Translated Note →")
+                                .font(theme::BADGE_TEXT)
+                                .color(theme::text_primary()),
+                        ),
+                ),
+        );
+    }
+
+    tr_col
 }
