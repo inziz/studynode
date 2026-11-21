@@ -18,11 +18,18 @@ pub enum ReaderMode {
     CustomExternal,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+fn default_inspector_width() -> f32 {
+    460.0
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReaderPreferences {
     pub mode: ReaderMode,
     /// Empty string means OS default application; non-empty launches the configured binary.
     pub custom_reader_path: String,
+    /// User-adjusted docked right panel width in logical points.
+    #[serde(default = "default_inspector_width")]
+    pub inspector_width: f32,
 }
 
 impl Default for ReaderPreferences {
@@ -30,6 +37,7 @@ impl Default for ReaderPreferences {
         Self {
             mode: ReaderMode::Integrated,
             custom_reader_path: String::new(),
+            inspector_width: default_inspector_width(),
         }
     }
 }
@@ -1397,6 +1405,140 @@ pub fn toggle_markdown_task(src: &str, task_index: usize) -> String {
     out
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextPreviewPage {
+    pub heading: String,
+    pub body: String,
+}
+
+fn clean_preview_line(line: &str) -> String {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.starts_with("```") {
+        let lang = trimmed.trim_start_matches('`').trim();
+        return if lang.is_empty() {
+            "[code]".to_string()
+        } else {
+            format!("[{}]", lang)
+        };
+    }
+    let without_heading = trimmed.trim_start_matches('#').trim_start();
+    let without_quote = without_heading
+        .strip_prefix("> ")
+        .unwrap_or(without_heading);
+    let cleaned = without_quote
+        .replace("**", "")
+        .replace("__", "")
+        .replace('`', "");
+    // Strip markdown italic wrappers (`*word*`) without touching leading bullet `* `.
+    if let Some(rest) = cleaned.strip_prefix("* ") {
+        format!("- {}", rest.replace('*', ""))
+    } else {
+        cleaned.replace('*', "")
+    }
+}
+
+/// Split Markdown or extracted document text into selectable preview pages for canvas cards.
+pub fn split_document_preview_pages(markdown: &str, max_lines: usize) -> Vec<TextPreviewPage> {
+    let max_lines = max_lines.max(4);
+    let max_chars = 360usize;
+
+    let mut sections: Vec<(String, Vec<String>)> = Vec::new();
+    let mut cur_heading = String::new();
+    let mut cur_lines: Vec<String> = Vec::new();
+
+    for raw_line in markdown.lines() {
+        let trimmed = raw_line.trim();
+        if let Some(h) = trimmed
+            .strip_prefix("# ")
+            .or_else(|| trimmed.strip_prefix("## "))
+        {
+            if !cur_heading.is_empty() || !cur_lines.is_empty() {
+                sections.push((cur_heading.clone(), std::mem::take(&mut cur_lines)));
+            }
+            cur_heading = clean_preview_line(h);
+        } else {
+            let cleaned = clean_preview_line(trimmed);
+            if !cleaned.is_empty() {
+                cur_lines.push(cleaned);
+            }
+        }
+    }
+    if !cur_heading.is_empty() || !cur_lines.is_empty() {
+        sections.push((cur_heading, cur_lines));
+    }
+
+    if sections.is_empty() {
+        return vec![TextPreviewPage {
+            heading: "Empty Document".into(),
+            body: "Click to ingest a PDF, Office doc, or Markdown file.".into(),
+        }];
+    }
+
+    let mut pages = Vec::new();
+    for (sec_idx, (heading, lines)) in sections.into_iter().enumerate() {
+        let base_heading = if heading.is_empty() {
+            format!("Section {}", sec_idx + 1)
+        } else {
+            heading
+        };
+
+        if lines.is_empty() {
+            pages.push(TextPreviewPage {
+                heading: base_heading,
+                body: "(Section header)".into(),
+            });
+            continue;
+        }
+
+        let mut chunk: Vec<String> = Vec::new();
+        let mut chunk_chars = 0usize;
+        let mut part = 0usize;
+
+        for line in lines {
+            let next_chars = chunk_chars + line.len() + 1;
+            if !chunk.is_empty() && (chunk.len() >= max_lines || next_chars > max_chars) {
+                let h = if part == 0 {
+                    base_heading.clone()
+                } else {
+                    format!("{} (cont.)", base_heading)
+                };
+                pages.push(TextPreviewPage {
+                    heading: h,
+                    body: chunk.join("\n"),
+                });
+                chunk.clear();
+                chunk_chars = 0;
+                part += 1;
+            }
+            chunk_chars += line.len() + 1;
+            chunk.push(line);
+        }
+
+        if !chunk.is_empty() {
+            let h = if part == 0 {
+                base_heading
+            } else {
+                format!("{} (cont.)", base_heading)
+            };
+            pages.push(TextPreviewPage {
+                heading: h,
+                body: chunk.join("\n"),
+            });
+        }
+    }
+
+    if pages.is_empty() {
+        pages.push(TextPreviewPage {
+            heading: "Empty Document".into(),
+            body: "Click to ingest a PDF, Office doc, or Markdown file.".into(),
+        });
+    }
+    pages
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1553,5 +1695,20 @@ mod tests {
         assert_eq!(toggled, "- [x] Done\n- [x] Pending\n");
         let toggled_back = toggle_markdown_task(&toggled, 0);
         assert_eq!(toggled_back, "- [ ] Done\n- [x] Pending\n");
+    }
+
+    #[test]
+    fn test_split_document_preview_pages() {
+        let empty = split_document_preview_pages("   \n ", 6);
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].heading, "Empty Document");
+
+        let md = "# Intro\nFirst line\nSecond line\n## Methods\nStep 1\nStep 2\nStep 3\nStep 4\nStep 5\n";
+        let pages = split_document_preview_pages(md, 4);
+        assert!(pages.len() >= 3, "expected at least 3 pages, got {:?}", pages);
+        assert_eq!(pages[0].heading, "Intro");
+        assert!(pages[0].body.contains("First line"));
+        assert_eq!(pages[1].heading, "Methods");
+        assert_eq!(pages[2].heading, "Methods (cont.)");
     }
 }

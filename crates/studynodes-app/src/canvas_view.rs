@@ -1,13 +1,13 @@
 use rune::{
-    Color, Cursor, Cx, El, LineCap, Phase, PointerButton, ScrollSpec, Shape, TextStyle, Tx,
-    canvas, col, el, row, text, text_input,
+    Color, Cursor, Cx, El, LineCap, Phase, PointerButton, ScrollSpec, Shape, SurfaceFit, TextStyle,
+    Tx, canvas, col, el, row, text, text_input,
 };
 
 use studynodes_graph::bezier::CubicBezier;
 use studynodes_graph::coords::{ScreenPos, WorldPos};
 use studynodes_graph::model::{Edge, EdgeStatus, Node, NodeKind, PortDirection, PortId};
 
-use crate::doc_reader;
+use crate::doc_reader::{self, DocFormat};
 use crate::state::{AppState, CanvasMode, node_base_size};
 use crate::theme;
 
@@ -145,14 +145,20 @@ pub fn render_canvas_view(s: &AppState) -> El {
                 let factor = if e.dy > 0.0 { 1.10 } else { 0.90 };
                 s.graph.viewport.zoom_at(ScreenPos::new(e.x, e.y), factor);
             } else if e.mods.shift && e.dx == 0.0 {
-                s.graph.viewport.pan_by_screen_delta(e.dy, 0.0);
+                s.graph.viewport.pan_by_screen_delta(-e.dy, 0.0);
             } else {
-                s.graph.viewport.pan_by_screen_delta(e.dx, e.dy);
+                s.graph.viewport.pan_by_screen_delta(-e.dx, -e.dy);
             }
             true
         })
         .on_magnify(|s: &mut AppState, e, _| {
-            let factor = (1.0 + e.delta).clamp(0.5, 2.0);
+            // Windows Ctrl+wheel pinch sends dy>0 for expand, which Rune's pinch_wheel negates.
+            let delta = if cfg!(target_os = "windows") {
+                -e.delta
+            } else {
+                e.delta
+            };
+            let factor = (1.0 + delta).clamp(0.5, 2.0);
             s.graph.viewport.zoom_at(ScreenPos::new(e.x, e.y), factor);
             true
         })
@@ -267,7 +273,129 @@ fn topbar_pill_btn(
 pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
     let insets = cx.chrome_insets();
 
-    row()
+    let mut tabs_strip = row()
+        .key("workspace_tabs_strip")
+        .gap(4.0)
+        .center_y()
+        .shrink()
+        .min_w(0.0)
+        .no_window_drag();
+
+    if s.tabs.is_empty() {
+        tabs_strip = tabs_strip.child(
+            el().shrink().min_w(0.0).child(
+                text(&s.graph.title)
+                    .font(theme::TITLE_BAR)
+                    .color(theme::text_primary())
+                    .truncate(),
+            ),
+        );
+    } else {
+        for (idx, tab) in s.tabs.iter().enumerate() {
+            let is_active = s.active_tab == Some(idx);
+            let title_text = if is_active {
+                &s.graph.title
+            } else {
+                &tab.title
+            };
+
+            tabs_strip = tabs_strip.child(
+                row()
+                    .key(format!("workspace_tab_shell_{}", idx))
+                    .h(26.0)
+                    .max_w(162.0)
+                    .radius(4.0)
+                    .fill(if is_active {
+                        theme::bg_card_selected()
+                    } else {
+                        theme::bg_control()
+                    })
+                    .border(
+                        1.0,
+                        if is_active {
+                            theme::border_strong()
+                        } else {
+                            theme::border_subtle()
+                        },
+                    )
+                    .center_y()
+                    .child(
+                        row()
+                            .key(format!("workspace_tab_{}", idx))
+                            .grow(1.0)
+                            .min_w(0.0)
+                            .h_full()
+                            .pl(8.0)
+                            .pr(4.0)
+                            .gap(5.0)
+                            .center_y()
+                            .hover(theme::hover_subtle())
+                            .cursor(Cursor::Pointer)
+                            .on_press(move |s: &mut AppState| {
+                                s.switch_tab(idx);
+                            })
+                            .child(
+                                text("●")
+                                    .font(TextStyle::new(7.0, 600.0).mono())
+                                    .color(if is_active {
+                                        theme::accent_claude()
+                                    } else {
+                                        theme::text_muted()
+                                    }),
+                            )
+                            .child(
+                                text(title_text)
+                                    .font(theme::STATUS_TEXT)
+                                    .color(if is_active {
+                                        theme::text_primary()
+                                    } else {
+                                        theme::text_secondary()
+                                    })
+                                    .truncate(),
+                            ),
+                    )
+                    .child(
+                        el()
+                            .key(format!("workspace_tab_close_{}", idx))
+                            .size(20.0, 24.0)
+                            .center()
+                            .hover(theme::accent_danger().alpha(0.18))
+                            .cursor(Cursor::Pointer)
+                            .on_press(move |s: &mut AppState| {
+                                s.close_tab(idx);
+                            })
+                            .child(
+                                text("×")
+                                    .font(TextStyle::new(11.0, 500.0).mono())
+                                    .color(theme::text_muted()),
+                            ),
+                    ),
+            );
+        }
+
+        tabs_strip = tabs_strip.child(
+            el()
+                .key("btn_new_tab")
+                .size(26.0, 26.0)
+                .radius(4.0)
+                .fill(theme::bg_control())
+                .hover(theme::hover_subtle())
+                .press(theme::press_subtle())
+                .border(1.0, theme::border_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut AppState| {
+                    s.close_to_dashboard();
+                })
+                .child(
+                    text("+")
+                        .font(theme::CONTROL_TEXT)
+                        .color(theme::text_secondary()),
+                ),
+        );
+    }
+
+    let mut topbar = row()
         .key("workspace_topbar")
         .w_full()
         .h(40.0)
@@ -278,7 +406,7 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
         .fill(theme::bg_chrome())
         .border_sides([0.0, 0.0, 1.0, 0.0], theme::border_subtle())
         .window_drag()
-        // Left: concise Back + Project Title
+        // Left: concise Back + Multi-Project Tabs
         .child(
             el()
                 .key("btn_back")
@@ -301,17 +429,7 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                         .color(theme::text_secondary()),
                 ),
         )
-        .child(
-            el()
-                .shrink()
-                .min_w(0.0)
-                .child(
-                    text(&s.graph.title)
-                        .font(theme::TITLE_BAR)
-                        .color(theme::text_primary())
-                        .truncate(),
-                ),
-        )
+        .child(tabs_strip)
         // Middle draggable window band spacer
         .child(el().grow(1.0))
         // Right: concise monochrome creation + Claude AI + Zoom + Reader toggle
@@ -375,7 +493,9 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 .on_press(|s: &mut AppState| {
                     s.ai_panel_open = !s.ai_panel_open;
                     if s.ai_panel_open {
-                        s.inspector_open = true;
+                        if !s.inspector_popped_out {
+                            s.inspector_open = true;
+                        }
                         s.status_message = "✦ AI Synthesis ready".into();
                     }
                 })
@@ -460,43 +580,60 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                                 .color(theme::text_secondary()),
                         ),
                 ),
-        )
-        // Sidebar toggle button
-        .child(
-            el()
-                .key("btn_toggle_panel")
-                .size(26.0, 26.0)
-                .radius(4.0)
-                .fill(if s.inspector_open {
-                    theme::accent_primary().alpha(0.14)
-                } else {
-                    theme::bg_control()
-                })
-                .hover(theme::hover_subtle())
-                .border(
-                    1.0,
-                    if s.inspector_open {
-                        theme::border_strong()
-                    } else {
-                        theme::border_subtle()
-                    },
-                )
-                .center()
-                .cursor(Cursor::Pointer)
-                .no_window_drag()
+        );
+
+    if s.inspector_popped_out {
+        topbar = topbar.child(
+            topbar_pill_btn("btn_focus_popout", Some(("⧉", theme::accent_claude())), "Reader")
                 .on_press(|s: &mut AppState| {
+                    if let Some(h) = &s.popout_window {
+                        h.focus();
+                    } else {
+                        s.pop_out_reader();
+                    }
+                }),
+        );
+    }
+
+    topbar.child(
+        el()
+            .key("btn_toggle_panel")
+            .size(26.0, 26.0)
+            .radius(4.0)
+            .fill(if s.inspector_open || s.inspector_popped_out {
+                theme::accent_primary().alpha(0.14)
+            } else {
+                theme::bg_control()
+            })
+            .hover(theme::hover_subtle())
+            .border(
+                1.0,
+                if s.inspector_open || s.inspector_popped_out {
+                    theme::border_strong()
+                } else {
+                    theme::border_subtle()
+                },
+            )
+            .center()
+            .cursor(Cursor::Pointer)
+            .no_window_drag()
+            .on_press(|s: &mut AppState| {
+                if s.inspector_popped_out {
+                    s.dock_reader_back();
+                } else {
                     s.inspector_open = !s.inspector_open;
-                })
-                .child(
-                    text("◧")
-                        .font(theme::CONTROL_TEXT)
-                        .color(if s.inspector_open {
-                            theme::text_primary()
-                        } else {
-                            theme::text_secondary()
-                        }),
-                ),
-        )
+                }
+            })
+            .child(
+                text("◧")
+                    .font(theme::CONTROL_TEXT)
+                    .color(if s.inspector_open || s.inspector_popped_out {
+                        theme::text_primary()
+                    } else {
+                        theme::text_secondary()
+                    }),
+            ),
+    )
 }
 
 fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32) -> El {
@@ -870,64 +1007,258 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
             }
         }
         NodeKind::Document => {
-            let word_count = node.content.split_whitespace().count();
-            let fmt_badge = doc_reader::format_badge(s.node_doc_format(&node.id));
-            col()
+            let doc_open_btn_id = node.id.clone();
+            let prev_page_id = node.id.clone();
+            let next_page_id = node.id.clone();
+            let doc_fmt = s.node_doc_format(&node.id);
+            let fmt_badge = doc_reader::format_badge(doc_fmt);
+            let has_pdf_asset =
+                doc_fmt == DocFormat::Pdf && s.resolved_node_asset_path(&node.id).is_some();
+
+            let pdf_preview = if has_pdf_asset {
+                s.card_pdf_previews.get(&(node.id.clone(), node.preview_page))
+            } else {
+                None
+            };
+            let img_preview = if doc_fmt == DocFormat::Image {
+                s.card_image_previews.get(&node.id)
+            } else {
+                None
+            };
+            let text_pages = if pdf_preview.is_none() && img_preview.is_none() {
+                Some(doc_reader::split_document_preview_pages(&node.content, 5))
+            } else {
+                None
+            };
+
+            let (cur_page_idx, total_pages) = if let Some(pdf_p) = pdf_preview {
+                let tot = pdf_p.page_count.max(1);
+                (node.preview_page.min(tot - 1), tot)
+            } else if let Some(ref pages) = text_pages {
+                let tot = pages.len().max(1);
+                (node.preview_page.min(tot - 1), tot)
+            } else {
+                (0, 1)
+            };
+
+            let page_heading_size = (10.0 * zoom).clamp(7.0, 13.5);
+            let page_body_size = (9.0 * zoom).clamp(6.5, 12.5);
+
+            let preview_inner = if let Some(pdf_p) = pdf_preview {
+                el().w_full()
+                    .h_full()
+                    .padding(4.0 * zoom)
+                    .pixels_fit(&pdf_p.pixels, SurfaceFit::Fit)
+            } else if let Some(img) = img_preview {
+                el().w_full()
+                    .h_full()
+                    .padding(4.0 * zoom)
+                    .pixels_fit(img.pixels(), SurfaceFit::Fit)
+            } else if let Some(ref pages) = text_pages {
+                let page = &pages[cur_page_idx];
+                col()
+                    .w_full()
+                    .h_full()
+                    .padding(7.0 * zoom)
+                    .gap(3.0 * zoom)
+                    .clip_soft(0.0)
+                    .child(
+                        text(&page.heading)
+                            .font(TextStyle::new(page_heading_size, 600.0).mono())
+                            .color(theme::text_primary())
+                            .truncate(),
+                    )
+                    .child(el().w_full().h(1.0).fill(theme::border_subtle()))
+                    .child(
+                        text(&page.body)
+                            .font(TextStyle::new(page_body_size, 400.0).lh(page_body_size * 1.32))
+                            .color(theme::text_secondary())
+                            .w_full()
+                            .wrap(),
+                    )
+            } else {
+                el()
+            };
+
+            let preview_frame = col()
                 .key(format!("node_body_{}", node.id.as_str()))
                 .w_full()
                 .grow(1.0)
                 .min_h(0.0)
-                .clip_soft(0.0)
-                .px(10.0 * zoom)
-                .py(8.0 * zoom)
-                .justify_between()
+                .radius(4.0 * zoom)
+                .fill(theme::bg_input())
                 .hover(theme::hover_subtle())
+                .border(1.0, theme::border_subtle())
+                .clip_soft(0.0)
                 .cursor(Cursor::Pointer)
                 .on_press(move |s: &mut AppState| {
                     s.select_node(doc_click_id.clone(), false);
-                    s.inspector_open = true;
+                    if !s.inspector_popped_out {
+                        s.inspector_open = true;
+                    }
                     s.ai_panel_open = false;
                     s.status_message = "Opened Document Reader".into();
                 })
+                .child(preview_inner);
+
+            let footer_strip = row()
+                .w_full()
+                .center_y()
+                .gap(4.0 * zoom)
                 .child(
-                    row()
-                        .center_y()
-                        .gap(6.0 * zoom)
+                    el()
+                        .px(5.0 * zoom)
+                        .py(1.5 * zoom)
+                        .radius(3.0 * zoom)
+                        .fill(theme::bg_control())
+                        .border(1.0, theme::border_default())
                         .child(
-                            el()
-                                .px(6.0 * zoom)
-                                .py(2.0 * zoom)
-                                .radius(3.0 * zoom)
-                                .fill(theme::bg_control())
-                                .border(1.0, theme::border_default())
-                                .child(
-                                    text(fmt_badge)
-                                        .font(TextStyle::new(badge_size, 600.0).mono())
-                                        .color(theme::text_primary()),
-                                ),
-                        )
-                        .child(
-                            text(format!("{} words", word_count))
-                                .font(TextStyle::new(badge_size, 400.0).mono())
-                                .color(theme::text_muted()),
-                        ),
-                )
-                .child(
-                    row()
-                        .w_full()
-                        .center_y()
-                        .justify_between()
-                        .child(
-                            text("Open reader")
-                                .font(TextStyle::new((body_size * 0.9).max(7.5), 500.0).mono())
-                                .color(theme::text_secondary()),
-                        )
-                        .child(
-                            text("→")
-                                .font(TextStyle::new((body_size * 0.9).max(7.5), 600.0).mono())
+                            text(fmt_badge)
+                                .font(TextStyle::new(badge_size, 600.0).mono())
                                 .color(theme::text_primary()),
                         ),
                 )
+                .child(
+                    row()
+                        .center_y()
+                        .gap(2.0 * zoom)
+                        .child(
+                            el()
+                                .key(format!("doc_prev_page_{}", node.id.as_str()))
+                                .px(5.0 * zoom)
+                                .py(1.5 * zoom)
+                                .radius(3.0 * zoom)
+                                .fill(theme::bg_control())
+                                .hover(theme::hover_subtle())
+                                .border(1.0, theme::border_subtle())
+                                .cursor(Cursor::Pointer)
+                                .on_press(move |s: &mut AppState| {
+                                    s.step_node_preview_page(&prev_page_id, -1);
+                                })
+                                .child(
+                                    text("‹")
+                                        .font(TextStyle::new(badge_size, 600.0).mono())
+                                        .color(theme::text_secondary()),
+                                ),
+                        )
+                        .child(
+                            text(format!("p.{}/{}", cur_page_idx + 1, total_pages))
+                                .font(TextStyle::new(badge_size, 500.0).mono())
+                                .color(theme::text_secondary()),
+                        )
+                        .child(
+                            el()
+                                .key(format!("doc_next_page_{}", node.id.as_str()))
+                                .px(5.0 * zoom)
+                                .py(1.5 * zoom)
+                                .radius(3.0 * zoom)
+                                .fill(theme::bg_control())
+                                .hover(theme::hover_subtle())
+                                .border(1.0, theme::border_subtle())
+                                .cursor(Cursor::Pointer)
+                                .on_press(move |s: &mut AppState| {
+                                    s.step_node_preview_page(&next_page_id, 1);
+                                })
+                                .child(
+                                    text("›")
+                                        .font(TextStyle::new(badge_size, 600.0).mono())
+                                        .color(theme::text_secondary()),
+                                ),
+                        ),
+                )
+                .child(el().grow(1.0))
+                .child(
+                    el()
+                        .key(format!("doc_open_{}", node.id.as_str()))
+                        .px(6.0 * zoom)
+                        .py(1.5 * zoom)
+                        .radius(3.0 * zoom)
+                        .fill(theme::bg_control())
+                        .hover(theme::hover_subtle())
+                        .border(1.0, theme::border_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.select_node(doc_open_btn_id.clone(), false);
+                            if !s.inspector_popped_out {
+                                s.inspector_open = true;
+                            } else if let Some(h) = &s.popout_window {
+                                h.focus();
+                            }
+                            s.ai_panel_open = false;
+                            s.status_message = "Opened Document Reader".into();
+                        })
+                        .child(
+                            text("Open →")
+                                .font(TextStyle::new(badge_size, 500.0).mono())
+                                .color(theme::text_primary()),
+                        ),
+                );
+
+            col()
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .clip_soft(0.0)
+                .px(8.0 * zoom)
+                .py(6.0 * zoom)
+                .gap(5.0 * zoom)
+                .child(preview_frame)
+                .child(footer_strip)
+        }
+        NodeKind::Image => {
+            if let Some(img) = s.card_image_previews.get(&node.id) {
+                col()
+                    .key(format!("node_body_{}", node.id.as_str()))
+                    .w_full()
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .clip_soft(0.0)
+                    .padding(6.0 * zoom)
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.select_node(other_click_id.clone(), false);
+                        if !s.inspector_popped_out {
+                            s.inspector_open = true;
+                        }
+                        s.ai_panel_open = false;
+                    })
+                    .child(
+                        el()
+                            .w_full()
+                            .grow(1.0)
+                            .min_h(0.0)
+                            .radius(4.0 * zoom)
+                            .fill(theme::bg_input())
+                            .border(1.0, theme::border_subtle())
+                            .pixels_fit(img.pixels(), SurfaceFit::Fit),
+                    )
+            } else {
+                col()
+                    .key(format!("node_body_{}", node.id.as_str()))
+                    .w_full()
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .clip_soft(0.0)
+                    .px(10.0 * zoom)
+                    .py(8.0 * zoom)
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.select_node(other_click_id.clone(), false);
+                        if !s.inspector_popped_out {
+                            s.inspector_open = true;
+                        }
+                        s.ai_panel_open = false;
+                    })
+                    .child(
+                        text("Visual image asset.")
+                            .font(TextStyle::new(body_size, 400.0).lh(body_size * 1.4))
+                            .color(theme::text_secondary())
+                            .w_full()
+                            .wrap(),
+                    )
+            }
         }
         _ => {
             let preview_text = if node.content.trim().is_empty() {
@@ -952,7 +1283,9 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                 .cursor(Cursor::Pointer)
                 .on_press(move |s: &mut AppState| {
                     s.select_node(other_click_id.clone(), false);
-                    s.inspector_open = true;
+                    if !s.inspector_popped_out {
+                        s.inspector_open = true;
+                    }
                     s.ai_panel_open = false;
                 })
                 .child(

@@ -1,7 +1,7 @@
 use rune::tok::space;
 use rune::{
-    Color, Cursor, Cx, El, FileDialogOptions, ScrollSpec, SurfaceFit, TextStyle, Tx, col, el, row,
-    text, text_input,
+    Color, Cursor, Cx, El, FileDialogOptions, Phase, ScrollSpec, SurfaceFit, TextStyle, Tx, col,
+    el, row, text, text_input,
 };
 use rune_kit::Markdown;
 use studynodes_graph::model::{EdgeRelation, NodeKind};
@@ -29,6 +29,27 @@ fn subtle_badge(label: &str, text_color: Color) -> El {
         .fill(theme::bg_control())
         .border(1.0, theme::border_subtle())
         .child(text(label).font(theme::BADGE_TEXT).color(text_color))
+}
+
+fn popout_panel_btn() -> El {
+    el()
+        .key("btn_popout_reader")
+        .size(24.0, 24.0)
+        .radius(4.0)
+        .fill(theme::bg_control())
+        .hover(theme::hover_subtle())
+        .press(theme::press_subtle())
+        .border(1.0, theme::border_subtle())
+        .center()
+        .cursor(Cursor::Pointer)
+        .on_press(|s: &mut AppState| {
+            s.pop_out_reader();
+        })
+        .child(
+            text("⧉")
+                .font(TextStyle::new(12.5, 500.0).mono())
+                .color(theme::text_primary()),
+        )
 }
 
 fn close_panel_btn() -> El {
@@ -273,6 +294,7 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                                             }),
                                     ),
                             )
+                            .child(popout_panel_btn())
                             .child(
                                 el()
                                     .key("btn_open_external_reader")
@@ -795,7 +817,9 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                         doc_reader::wrap_for_preview(&node.content, doc_format)
                     };
 
-                    let md_style = theme::markdown_style().text_width(396.0);
+                    let panel_width = s.inspector_width.clamp(300.0, 860.0);
+                    let md_w = (panel_width - 76.0).max(220.0);
+                    let md_style = theme::markdown_style().text_width(md_w);
                     let md_el = Markdown::new(&md_src)
                         .selectable(true)
                         .on_task(|s: &mut AppState, _block_key, offset, checked| {
@@ -942,6 +966,7 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                                 theme::text_muted(),
                             ))
                             .child(el().grow(1.0))
+                            .child(popout_panel_btn())
                             .child(close_panel_btn()),
                     )
                     .child(
@@ -1412,7 +1437,7 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                             .color(theme::text_muted()),
                     )
                     .child(
-                        text("• Two-finger trackpad scroll moves X & Y freely\n• Pinch or Ctrl+scroll zooms at pointer\n• Drag note header to move card\n• Drag from right port to link nodes\n• Space + drag pans anywhere")
+                        text("• Two-finger trackpad scroll pans X & Y\n• Pinch zooms out, expand zooms in\n• Drag left edge of panel to resize\n• Click ⧉ to pop reader into full window\n• Drag note header to move, port to link")
                             .font(theme::STATUS_TEXT)
                             .color(theme::text_secondary())
                             .w_full()
@@ -1421,21 +1446,48 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
             );
     }
 
-    let is_doc_selected = s
-        .selected_nodes
-        .iter()
-        .next()
-        .and_then(|id| s.graph.get_node(id))
-        .is_some_and(|n| matches!(n.kind, NodeKind::Document | NodeKind::Image));
-    let panel_width = if is_doc_selected { 460.0 } else { 350.0 };
+    let panel_width = s.inspector_width.clamp(300.0, 860.0);
 
-    col()
+    let resize_handle = el()
+        .key("inspector_resize_handle")
+        .w(6.0)
+        .h_full()
+        .fill(theme::bg_sidebar())
+        .hover(theme::accent_claude().alpha(0.32))
+        .border_sides([0.0, 0.0, 0.0, 1.0], theme::border_subtle())
+        .center()
+        .cursor(Cursor::ResizeColumn)
+        .on_drag(|s: &mut AppState, d, _| match d.phase {
+            Phase::Down => {
+                s.inspector_resize_start_w = s.inspector_width;
+            }
+            Phase::Move => {
+                s.inspector_width = (s.inspector_resize_start_w - d.dx).clamp(300.0, 860.0);
+            }
+            Phase::Up => {
+                s.reader_prefs.inspector_width = s.inspector_width;
+                let _ = doc_reader::save_preferences(&s.projects_dir, &s.reader_prefs);
+            }
+        })
+        .child(
+            el().w(1.5)
+                .h(36.0)
+                .radius(1.0)
+                .fill(theme::border_strong()),
+        );
+
+    let panel = col()
         .key("inspector_panel")
         .w(panel_width)
         .h_full()
         .fill(theme::bg_sidebar())
-        .border_sides([0.0, 0.0, 0.0, 1.0], theme::border_subtle())
         .padding(16.0)
         .scroll(ScrollSpec { stick_bottom: false })
-        .child(content)
+        .child(content);
+
+    row()
+        .key("inspector_container")
+        .h_full()
+        .child(resize_handle)
+        .child(panel)
 }
