@@ -123,6 +123,21 @@ impl ProjectBundle {
         Ok((hash, dest_path))
     }
 
+    /// Resolve an ingested asset file in `assets/` by its SHA-256 hash stem.
+    pub fn find_asset_path(&self, hash: &str) -> Option<PathBuf> {
+        let assets_dir = self.root_dir.join(Self::ASSETS_DIR);
+        let entries = fs::read_dir(&assets_dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path.file_stem().and_then(|s| s.to_str()) == Some(hash)
+            {
+                return Some(path);
+            }
+        }
+        None
+    }
+
     /// Prune unreferenced SHA-256 blobs from the `assets/` directory that are no longer used by any node.
     /// Returns the number of pruned orphan files.
     pub fn prune_orphan_assets(&self, graph: &StudyGraph) -> Result<usize, BundleError> {

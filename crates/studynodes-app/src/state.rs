@@ -1,6 +1,8 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
-use rune::TextEdit;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use rune::{ImageCache, Pixels, TextEdit, Waker};
 use serde::{Deserialize, Serialize};
 
 use studynodes_graph::coords::{ScreenPos, WorldPos};
@@ -8,12 +10,35 @@ use studynodes_graph::model::{EdgeId, NodeId, NodeKind, PortId};
 use studynodes_graph::{CommandHistory, ProjectBundle, StudyGraph};
 use studynodes_llm::LlmProvider;
 
+use crate::doc_reader::{
+    self, DocFormat, ReaderMode, ReaderPreferences, extract_document_markdown, render_pdf_page,
+};
 use crate::touchpad_win32::TouchpadEvent;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppScreen {
     Dashboard,
     Workspace,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DocViewTab {
+    #[default]
+    Preview,
+    Pages,
+    Source,
+}
+
+#[derive(Clone)]
+pub struct ActivePdfState {
+    pub node_id: NodeId,
+    pub asset_path: PathBuf,
+    pub page_index: usize,
+    pub page_count: usize,
+    pub zoom: f32,
+    pub pixels: Pixels,
+    pub page_size: (u32, u32),
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -102,6 +127,15 @@ pub struct AppState {
     pub space_held: bool,
     pub canvas_origin: [f32; 2],
 
+    // Integrated & Custom Document Reader state
+    pub reader_prefs: ReaderPreferences,
+    pub custom_reader_edit: TextEdit,
+    pub reader_settings_open: bool,
+    pub doc_view_tab: DocViewTab,
+    pub active_pdf: Option<ActivePdfState>,
+    pub image_cache: ImageCache,
+    pub active_image: Option<(NodeId, PathBuf, rune::Image)>,
+
     // Wire draft
     #[allow(dead_code)]
     pub wire_draft: Option<ActiveWireDraft>,
@@ -110,6 +144,9 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         let projects_dir = dirs_or_local_projects_dir();
+        let reader_prefs = doc_reader::load_preferences(&projects_dir);
+        let custom_reader_edit = TextEdit::new(&reader_prefs.custom_reader_path);
+
         let mut state = Self {
             screen: AppScreen::Dashboard,
             projects_dir,
@@ -135,6 +172,13 @@ impl Default for AppState {
             editing_node_id: None,
             space_held: false,
             canvas_origin: [0.0, 40.0],
+            reader_prefs,
+            custom_reader_edit,
+            reader_settings_open: false,
+            doc_view_tab: DocViewTab::Preview,
+            active_pdf: None,
+            image_cache: ImageCache::new(Arc::new(|| {})),
+            active_image: None,
             wire_draft: None,
         };
 
@@ -152,6 +196,10 @@ fn dirs_or_local_projects_dir() -> PathBuf {
 }
 
 impl AppState {
+    pub fn set_image_waker(&mut self, waker: Waker) {
+        self.image_cache = ImageCache::new(waker);
+    }
+
     /// Scan `projects_dir` for existing `.studynodes` folders.
     pub fn refresh_recent_projects(&mut self) {
         self.recent_projects.clear();
@@ -193,6 +241,9 @@ impl AppState {
                 self.editing_node_id = None;
                 self.inspector_open = false;
                 self.ai_panel_open = false;
+                self.active_pdf = None;
+                self.active_image = None;
+                self.doc_view_tab = DocViewTab::Preview;
                 self.screen = AppScreen::Workspace;
                 self.status_message = format!("Created '{}'", title);
             }
@@ -214,6 +265,9 @@ impl AppState {
                 self.editing_node_id = None;
                 self.inspector_open = false;
                 self.ai_panel_open = false;
+                self.active_pdf = None;
+                self.active_image = None;
+                self.doc_view_tab = DocViewTab::Preview;
                 self.screen = AppScreen::Workspace;
                 self.status_message = format!("Opened '{}'", self.graph.title);
             }
@@ -328,14 +382,226 @@ impl AppState {
         }
     }
 
+    /// Resolve a node's stored asset file on disk, if any.
+    pub fn resolved_node_asset_path(&self, node_id: &NodeId) -> Option<PathBuf> {
+        let hash = self.graph.get_node(node_id)?.asset_hash.as_deref()?;
+        self.bundle.as_ref()?.find_asset_path(hash)
+    }
+
+    /// Detect the active document format for a node.
+    pub fn node_doc_format(&self, node_id: &NodeId) -> DocFormat {
+        if let Some(path) = self.resolved_node_asset_path(node_id) {
+            return doc_reader::detect_format(&path);
+        }
+        if let Some(node) = self.graph.get_node(node_id) {
+            if node.kind == NodeKind::Image {
+                return DocFormat::Image;
+            }
+        }
+        DocFormat::Markdown
+    }
+
+    /// Ensure integrated reader media (Hayro PDF page or Rune image) is loaded for `node_id`.
+    pub fn ensure_reader_media_for_node(&mut self, node_id: &NodeId, switch_tab: bool) {
+        let Some(asset_path) = self.resolved_node_asset_path(node_id) else {
+            self.active_pdf = None;
+            self.active_image = None;
+            if switch_tab {
+                self.doc_view_tab = DocViewTab::Preview;
+            }
+            return;
+        };
+
+        let fmt = doc_reader::detect_format(&asset_path);
+        match fmt {
+            DocFormat::Pdf => {
+                self.active_image = None;
+                let already_loaded = self.active_pdf.as_ref().is_some_and(|p| {
+                    &p.node_id == node_id && p.asset_path == asset_path && !switch_tab
+                });
+                if already_loaded {
+                    return;
+                }
+
+                let pixels = Pixels::new();
+                let mut state = ActivePdfState {
+                    node_id: node_id.clone(),
+                    asset_path: asset_path.clone(),
+                    page_index: 0,
+                    page_count: 1,
+                    zoom: 1.5,
+                    pixels,
+                    page_size: (0, 0),
+                    error: None,
+                };
+                match render_pdf_page(&asset_path, 0, state.zoom) {
+                    Ok(rendered) => {
+                        state.page_count = rendered.page_count;
+                        state.page_size = (rendered.width, rendered.height);
+                        state
+                            .pixels
+                            .set(rendered.width, rendered.height, rendered.rgba);
+                    }
+                    Err(e) => {
+                        state.error = Some(e);
+                    }
+                }
+                self.active_pdf = Some(state);
+                if switch_tab {
+                    self.doc_view_tab = DocViewTab::Pages;
+                }
+            }
+            DocFormat::Image => {
+                self.active_pdf = None;
+                let already_loaded = self
+                    .active_image
+                    .as_ref()
+                    .is_some_and(|(id, p, _)| id == node_id && p == &asset_path);
+                if !already_loaded {
+                    let img = self.image_cache.file(&asset_path, 760.0, 2.0);
+                    self.active_image = Some((node_id.clone(), asset_path, img));
+                }
+                if switch_tab {
+                    self.doc_view_tab = DocViewTab::Preview;
+                }
+            }
+            _ => {
+                self.active_pdf = None;
+                self.active_image = None;
+                if switch_tab {
+                    self.doc_view_tab = DocViewTab::Preview;
+                }
+            }
+        }
+    }
+
+    pub fn set_pdf_page(&mut self, page_index: usize) {
+        let Some(pdf) = self.active_pdf.as_mut() else {
+            return;
+        };
+        let clamped = page_index.min(pdf.page_count.saturating_sub(1));
+        match render_pdf_page(&pdf.asset_path, clamped, pdf.zoom) {
+            Ok(rendered) => {
+                pdf.page_index = clamped;
+                pdf.page_count = rendered.page_count;
+                pdf.page_size = (rendered.width, rendered.height);
+                pdf.error = None;
+                pdf.pixels
+                    .set(rendered.width, rendered.height, rendered.rgba);
+                self.status_message = format!("PDF page {} / {}", clamped + 1, rendered.page_count);
+            }
+            Err(e) => {
+                pdf.error = Some(e);
+            }
+        }
+    }
+
+    pub fn set_pdf_zoom(&mut self, next_zoom: f32) {
+        let Some(pdf) = self.active_pdf.as_mut() else {
+            return;
+        };
+        let zoom = next_zoom.clamp(0.75, 2.75);
+        match render_pdf_page(&pdf.asset_path, pdf.page_index, zoom) {
+            Ok(rendered) => {
+                pdf.zoom = zoom;
+                pdf.page_count = rendered.page_count;
+                pdf.page_size = (rendered.width, rendered.height);
+                pdf.error = None;
+                pdf.pixels
+                    .set(rendered.width, rendered.height, rendered.rgba);
+            }
+            Err(e) => {
+                pdf.error = Some(e);
+            }
+        }
+    }
+
+    pub fn set_reader_mode(&mut self, mode: ReaderMode) {
+        self.reader_prefs.mode = mode;
+        let _ = doc_reader::save_preferences(&self.projects_dir, &self.reader_prefs);
+        self.status_message = match mode {
+            ReaderMode::Integrated => "Switched to Integrated Reader".into(),
+            ReaderMode::CustomExternal => "Switched to Custom External Reader".into(),
+        };
+    }
+
+    pub fn save_custom_reader_path(&mut self, path: String) {
+        self.reader_prefs.custom_reader_path = path.clone();
+        self.custom_reader_edit = TextEdit::new(&path);
+        let _ = doc_reader::save_preferences(&self.projects_dir, &self.reader_prefs);
+        self.status_message = if path.trim().is_empty() {
+            "Custom reader reset to system default".into()
+        } else {
+            "Saved custom reader executable".into()
+        };
+    }
+
+    pub fn open_node_in_external_reader(&mut self, node_id: &NodeId) {
+        self.sync_node_edits();
+        let target_path = if let Some(asset) = self.resolved_node_asset_path(node_id) {
+            asset
+        } else if let Some(node) = self.graph.get_node(node_id) {
+            let export_path = if let Some(bundle) = &self.bundle {
+                bundle
+                    .root_dir
+                    .join(ProjectBundle::EXTRACTED_DIR)
+                    .join(format!("{}.md", node.id.as_str()))
+            } else {
+                std::env::temp_dir().join(format!("studynodes_{}.md", node.id.as_str()))
+            };
+            let _ = std::fs::write(&export_path, &node.content);
+            export_path
+        } else {
+            return;
+        };
+
+        match doc_reader::launch_external_reader(&target_path, &self.reader_prefs.custom_reader_path)
+        {
+            Ok(msg) => self.status_message = msg,
+            Err(err) => self.status_message = err,
+        }
+    }
+
+    pub fn toggle_selected_doc_task(&mut self, marker_offset: usize, checked: bool) {
+        self.sync_node_edits();
+        let Some(id) = self.selected_nodes.iter().next().cloned() else {
+            return;
+        };
+        if let Some(node) = self.graph.get_node_mut(&id) {
+            let bytes = node.content.as_bytes();
+            if bytes.get(marker_offset..marker_offset + 3).is_some_and(|w| {
+                w[0] == b'[' && matches!(w[1], b' ' | b'x' | b'X') && w[2] == b']'
+            }) {
+                let mut updated = bytes.to_vec();
+                updated[marker_offset + 1] = if checked { b'x' } else { b' ' };
+                if let Ok(s) = String::from_utf8(updated) {
+                    node.content = s;
+                }
+            } else {
+                node.content = doc_reader::toggle_markdown_task(&node.content, marker_offset);
+            }
+            self.canvas_content_edit = TextEdit::new(&node.content);
+            self.inspector_content_edit = TextEdit::new(&node.content);
+            self.status_message = "Updated Markdown checklist".into();
+        }
+        if let Some(bundle) = &self.bundle {
+            let _ = bundle.save_graph_atomic(&self.graph);
+        }
+    }
+
     /// Select a node and populate edit buffers (preserving active edits/caret when already singly selected).
     pub fn select_node(&mut self, id: NodeId, additive: bool) {
         if !additive && self.selected_nodes.len() == 1 && self.selected_nodes.contains(&id) {
+            let mut open_doc = false;
             if let Some(n) = self.graph.get_node(&id) {
-                if n.kind == NodeKind::Document {
+                if matches!(n.kind, NodeKind::Document | NodeKind::Image) {
                     self.inspector_open = true;
                     self.ai_panel_open = false;
+                    open_doc = true;
                 }
+            }
+            if open_doc {
+                self.ensure_reader_media_for_node(&id, false);
             }
             return;
         }
@@ -348,20 +614,35 @@ impl AppState {
         self.selected_edge = None;
         self.selected_nodes.insert(id.clone());
 
+        let mut node_kind = None;
         if let Some(n) = self.graph.get_node(&id) {
             self.canvas_title_edit = TextEdit::new(&n.title);
             self.canvas_content_edit = TextEdit::new(&n.content);
             self.inspector_title_edit = TextEdit::new(&n.title);
             self.inspector_content_edit = TextEdit::new(&n.content);
-            if n.kind == NodeKind::Document {
+            node_kind = Some(n.kind);
+            if matches!(n.kind, NodeKind::Document | NodeKind::Image) {
                 self.inspector_open = true;
                 self.ai_panel_open = false;
                 self.editing_node_id = None;
             } else if n.kind == NodeKind::Note {
-                self.editing_node_id = Some(id);
+                self.editing_node_id = Some(id.clone());
             } else {
                 self.editing_node_id = None;
             }
+        }
+
+        if matches!(node_kind, Some(NodeKind::Document | NodeKind::Image)) {
+            self.ensure_reader_media_for_node(&id, true);
+            if self.reader_prefs.mode == ReaderMode::CustomExternal
+                && !cfg!(test)
+                && !rune::is_headless()
+            {
+                self.open_node_in_external_reader(&id);
+            }
+        } else {
+            self.active_pdf = None;
+            self.active_image = None;
         }
     }
 
@@ -372,6 +653,8 @@ impl AppState {
         self.selected_nodes.clear();
         self.selected_edge = None;
         self.editing_node_id = None;
+        self.active_pdf = None;
+        self.active_image = None;
         self.canvas_title_edit = TextEdit::new("");
         self.canvas_content_edit = TextEdit::new("");
         self.inspector_title_edit = TextEdit::new("");
@@ -401,10 +684,28 @@ impl AppState {
             if self.editing_node_id.as_ref() == Some(id) {
                 self.editing_node_id = None;
             }
+            if self
+                .active_pdf
+                .as_ref()
+                .is_some_and(|p| &p.node_id == id)
+            {
+                self.active_pdf = None;
+            }
+            if self
+                .active_image
+                .as_ref()
+                .is_some_and(|(nid, _, _)| nid == id)
+            {
+                self.active_image = None;
+            }
             if let Some(bundle) = &self.bundle {
                 let _ = bundle.save_graph_atomic(&self.graph);
             }
-            self.status_message = format!("Deleted '{}' ({} link(s) removed)", removed.title, edges.len());
+            self.status_message = format!(
+                "Deleted '{}' ({} link(s) removed)",
+                removed.title,
+                edges.len()
+            );
         }
     }
 
@@ -465,6 +766,8 @@ impl AppState {
         self.sync_edge_edits();
         self.selected_nodes.clear();
         self.editing_node_id = None;
+        self.active_pdf = None;
+        self.active_image = None;
         self.selected_edge = Some(id.clone());
         self.inspector_open = true;
         self.ai_panel_open = false;
@@ -530,9 +833,7 @@ impl AppState {
         });
         let mut node = studynodes_graph::model::Node::new(NodeKind::Document, "New Document", pos);
         node.size = node_base_size(NodeKind::Document);
-        node.content =
-            "# Research Document\n\nIngest a PDF, EPUB, or markdown file, or paste source text here."
-                .into();
+        node.content = "# New Document\n\nIngest a `.pdf`, `.docx`, `.epub`, `.odt`, `.pptx`, `.xlsx`, `.md`, `.html`, or `.rtf` file to read it here.\n\n- [ ] Ingest source file\n- [ ] Summarize key takeaways\n".into();
         let id = node.id.clone();
         self.graph.add_node(node);
         self.select_node(id.clone(), false);
@@ -548,102 +849,90 @@ impl AppState {
         if let Some(node) = self.graph.get_node_mut(node_id) {
             node.title = "Attention Is All You Need (Excerpt)".into();
             node.content = r#"# Attention Is All You Need
-Vaswani et al., 2017
+*Vaswani et al., NeurIPS 2017*
 
-## Abstract
-The dominant sequence transduction models are based on complex recurrent or convolutional neural networks that include an encoder and a decoder. The best performing models also connect the encoder and decoder through an attention mechanism. We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely.
+> We propose a new simple network architecture, the **Transformer**, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely.
 
-## Model Architecture
-The Transformer follows an encoder-decoder structure using stacked self-attention and point-wise, fully connected layers for both the encoder and decoder.
+## Scaled Dot-Product Attention
 
-### Multi-Head Attention
-Multi-head attention allows the model to jointly attend to information from different representation subspaces at different positions:
-MultiHead(Q, K, V) = Concat(head_1, ..., head_h) W^O
-where head_i = Attention(Q W_i^Q, K W_i^K, V W_i^V)
+```text
+Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
+```
 
-### Scaled Dot-Product Attention
-Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V"#
+## Architecture Comparison
+
+| Mechanism | Complexity / Layer | Max Path Length |
+| --- | --- | --- |
+| Self-Attention | `O(n^2 * d)` | `O(1)` |
+| Recurrent | `O(n * d^2)` | `O(n)` |
+| Convolutional | `O(k * n * d^2)` | `O(log_k(n))` |
+
+## Study Checklist
+- [x] Understand scaled `1 / sqrt(d_k)` variance stabilization
+- [ ] Trace multi-head projections across `h = 8` heads"#
                 .into();
             self.canvas_title_edit = TextEdit::new(&node.title);
             self.canvas_content_edit = TextEdit::new(&node.content);
             self.inspector_title_edit = TextEdit::new(&node.title);
             self.inspector_content_edit = TextEdit::new(&node.content);
-            self.status_message = "Loaded sample academic paper".into();
+            self.active_pdf = None;
+            self.active_image = None;
+            self.doc_view_tab = DocViewTab::Preview;
+            self.status_message = "Loaded styled Markdown paper".into();
         }
         if let Some(bundle) = &self.bundle {
             let _ = bundle.save_graph_atomic(&self.graph);
         }
     }
 
-    /// Ingest a file into a specific node.
-    pub fn ingest_file_into_node(&mut self, node_id: &NodeId, path: &PathBuf) {
+    /// Ingest a file (PDF, DOCX, ODT, PPTX, XLSX, EPUB, MD, HTML, RTF, CSV, Image, Code) into a node.
+    pub fn ingest_file_into_node(&mut self, node_id: &NodeId, path: &Path) {
         let filename = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Imported Document".into());
 
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
+        let extracted = extract_document_markdown(path).unwrap_or_else(|err| doc_reader::ExtractedDoc {
+            format: doc_reader::detect_format(path),
+            markdown: format!("# {}\n\n> Failed to parse file cleanly: {}", filename, err),
+            page_count: None,
+        });
 
-        let text_content =
-            if matches!(ext.as_str(), "txt" | "md" | "json" | "rs" | "toml" | "csv" | "tex") {
-                std::fs::read_to_string(path).ok()
-            } else {
-                None
-            };
+        let hash_opt = if let Some(bundle) = &self.bundle {
+            bundle.ingest_asset(path).ok().map(|(h, _)| {
+                let _ = bundle.save_extracted_text(&h, &extracted.markdown);
+                h
+            })
+        } else {
+            None
+        };
+
+        if let Some(node) = self.graph.get_node_mut(node_id) {
+            if let Some(hash) = hash_opt {
+                node.asset_hash = Some(hash);
+            }
+            if node.title.is_empty()
+                || node.title == "New Document"
+                || node.title == "New Note"
+            {
+                node.title = filename.clone();
+            }
+            node.content = extracted.markdown;
+            self.canvas_title_edit = TextEdit::new(&node.title);
+            self.canvas_content_edit = TextEdit::new(&node.content);
+            self.inspector_title_edit = TextEdit::new(&node.title);
+            self.inspector_content_edit = TextEdit::new(&node.content);
+        }
 
         if let Some(bundle) = &self.bundle {
-            if let Ok((hash, _)) = bundle.ingest_asset(path) {
-                if let Some(node) = self.graph.get_node_mut(node_id) {
-                    node.asset_hash = Some(hash.clone());
-                    if node.title.is_empty()
-                        || node.title == "New Document"
-                        || node.title == "New Note"
-                    {
-                        node.title = filename.clone();
-                    }
-                    if let Some(content) = text_content {
-                        node.content = content;
-                    } else if node.content.is_empty()
-                        || node.content.starts_with("# Research Document")
-                    {
-                        node.content = format!(
-                            "# Document: {}\n\n• File: {}\n• SHA-256: {}\n• Ingested into project assets library.\n",
-                            filename,
-                            path.display(),
-                            hash
-                        );
-                    }
-                    self.canvas_title_edit = TextEdit::new(&node.title);
-                    self.canvas_content_edit = TextEdit::new(&node.content);
-                    self.inspector_title_edit = TextEdit::new(&node.title);
-                    self.inspector_content_edit = TextEdit::new(&node.content);
-                }
-                let _ = bundle.save_graph_atomic(&self.graph);
-                self.status_message = format!("Ingested '{}'", filename);
-                return;
-            }
+            let _ = bundle.save_graph_atomic(&self.graph);
         }
 
-        // Fallback without bundle:
-        if let Some(content) = text_content {
-            if let Some(node) = self.graph.get_node_mut(node_id) {
-                if node.title.is_empty() || node.title == "New Document" || node.title == "New Note" {
-                    node.title = filename.clone();
-                }
-                node.content = content;
-                self.canvas_title_edit = TextEdit::new(&node.title);
-                self.canvas_content_edit = TextEdit::new(&node.content);
-                self.inspector_title_edit = TextEdit::new(&node.title);
-                self.inspector_content_edit = TextEdit::new(&node.content);
-            }
-            self.status_message = format!("Loaded '{}'", filename);
-        } else {
-            self.status_message = format!("Ingested '{}'", filename);
-        }
+        self.ensure_reader_media_for_node(node_id, true);
+        self.status_message = match extracted.page_count {
+            Some(pages) => format!("Ingested '{}' ({} · {} pages)", filename, doc_reader::format_badge(extracted.format), pages),
+            None => format!("Ingested '{}' ({})", filename, doc_reader::format_badge(extracted.format)),
+        };
     }
 
     /// Ingest dropped files into active project.
@@ -655,6 +944,7 @@ Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V"#
 
         let drop_world = self.graph.viewport.screen_to_world(drop_screen_pos);
         let mut offset_x = 0.0;
+        let mut last_id = None;
 
         for path in files {
             if let Ok((hash, _)) = bundle.ingest_asset(path) {
@@ -663,29 +953,18 @@ Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V"#
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "Imported File".into());
 
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-
-                let kind = match ext.as_str() {
-                    "png" | "jpg" | "jpeg" | "gif" | "svg" => NodeKind::Image,
-                    "pdf" | "epub" => NodeKind::Document,
-                    "md" | "txt" => {
-                        let content = std::fs::read_to_string(path).unwrap_or_default();
-                        let mut node = studynodes_graph::model::Node::new(
-                            NodeKind::Note,
-                            filename.clone(),
-                            WorldPos::new(drop_world.x + offset_x, drop_world.y),
-                        );
-                        node.size = node_base_size(NodeKind::Note);
-                        node.content = content;
-                        node.asset_hash = Some(hash.clone());
-                        self.graph.add_node(node);
-                        offset_x += 300.0;
-                        continue;
+                let extracted = extract_document_markdown(path).unwrap_or_else(|_| {
+                    doc_reader::ExtractedDoc {
+                        format: doc_reader::detect_format(path),
+                        markdown: format!("# {}", filename),
+                        page_count: None,
                     }
+                });
+                let _ = bundle.save_extracted_text(&hash, &extracted.markdown);
+
+                let kind = match extracted.format {
+                    DocFormat::Image => NodeKind::Image,
+                    DocFormat::PlainText => NodeKind::Note,
                     _ => NodeKind::Document,
                 };
 
@@ -695,13 +974,19 @@ Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V"#
                     WorldPos::new(drop_world.x + offset_x, drop_world.y),
                 );
                 node.size = node_base_size(kind);
+                node.content = extracted.markdown;
                 node.asset_hash = Some(hash);
+                let id = node.id.clone();
                 self.graph.add_node(node);
+                last_id = Some(id);
                 offset_x += 300.0;
             }
         }
 
         let _ = bundle.save_graph_atomic(&self.graph);
+        if let Some(id) = last_id {
+            self.select_node(id, false);
+        }
         self.status_message = format!("Ingested {} file(s)", files.len());
     }
 

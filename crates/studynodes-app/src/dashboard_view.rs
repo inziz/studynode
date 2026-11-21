@@ -1,4 +1,4 @@
-use rune::tok::{radius, space};
+use rune::tok::space;
 use rune::{
     Color, Cursor, Cx, El, ScrollSpec, TextStyle, col, el, row, text, text_input,
 };
@@ -6,13 +6,13 @@ use rune::{
 use crate::state::AppState;
 use crate::theme;
 
-const HERO_TITLE: TextStyle = TextStyle::new(16.0, 600.0);
-const PROJECT_TITLE: TextStyle = TextStyle::new(14.0, 500.0);
+const HERO_TITLE: TextStyle = TextStyle::new(15.5, 600.0).mono();
+const PROJECT_TITLE: TextStyle = TextStyle::new(13.5, 500.0);
 
 pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
     let insets = cx.chrome_insets();
 
-    // Custom 40px Antigravity Titlebar
+    // Custom 40px Monochrome Claude Code-style Titlebar
     let titlebar = row()
         .key("dashboard_topbar")
         .w_full()
@@ -25,24 +25,17 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
         .border_sides([0.0, 0.0, 1.0, 0.0], theme::border_subtle())
         .window_drag()
         .child(
-            el().size(20.0, 20.0)
-                .radius(5.0)
-                .fill(theme::accent_blue().alpha(0.18))
-                .border(1.0, theme::accent_blue().alpha(0.45))
-                .center()
-                .child(
-                    text("✦")
-                        .font(TextStyle::new(11.0, 700.0))
-                        .color(theme::accent_blue()),
-                ),
+            text("✦")
+                .font(TextStyle::new(12.5, 700.0).mono())
+                .color(theme::accent_claude()),
         )
         .child(
-            text("StudyNodes")
+            text("studynodes")
                 .font(theme::TITLE_BAR)
                 .color(theme::text_primary()),
         )
         .child(
-            text("Visual Knowledge Graph")
+            text("/ visual knowledge workspace")
                 .font(theme::STATUS_TEXT)
                 .color(theme::text_muted()),
         )
@@ -54,20 +47,20 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
         .w_full()
         .padding(20.0)
         .gap(12.0)
-        .radius(12.0)
+        .radius(6.0)
         .continuous_corners()
         .fill(theme::bg_card())
-        .border(1.0, theme::border_subtle())
+        .border(1.0, theme::border_default())
         .child(
             col()
                 .gap(4.0)
                 .child(
-                    text("Start a Study Workspace")
+                    text("> new workspace")
                         .font(HERO_TITLE)
                         .color(theme::text_primary()),
                 )
                 .child(
-                    text("Create an infinite canvas to connect documents, notes, and AI synthesis.")
+                    text("Create an infinite canvas to connect PDFs, Office docs, Markdown notes, and AI synthesis.")
                         .font(theme::BODY_TEXT)
                         .color(theme::text_secondary())
                         .w_full()
@@ -84,18 +77,22 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                         .grow(1.0)
                         .h(34.0)
                         .px(12.0)
-                        .radius(radius::SM)
+                        .radius(4.0)
                         .fill(theme::bg_input())
                         .border(1.0, theme::border_default())
                         .center_y()
                         .child(
-                            text_input(&s.new_project_input, theme::BODY_TEXT)
+                            text_input(&s.new_project_input, theme::MONO_BODY)
                                 .key("new_project_input")
+                                .label("Project name")
                                 .single_line()
                                 .w_full()
                                 .color(theme::text_primary())
-                                .caret(theme::accent_blue(), theme::accent_blue().alpha(0.25))
-                                .placeholder("Project name (e.g. Cognitive Neuroscience)...", theme::text_muted())
+                                .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                                .placeholder(
+                                    "Project name (e.g. Cognitive Neuroscience)...",
+                                    theme::text_muted(),
+                                )
                                 .on_edit(|s: &mut AppState| &mut s.new_project_input)
                                 .on_submit(|s: &mut AppState, _| {
                                     let raw = s.new_project_input.text.trim().to_string();
@@ -114,10 +111,10 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                         .key("btn_create_project")
                         .h(34.0)
                         .px(16.0)
-                        .radius(radius::SM)
-                        .fill(theme::accent_blue())
-                        .hover(Color::WHITE.alpha(0.10))
-                        .press(Color::BLACK.alpha(0.10))
+                        .radius(4.0)
+                        .fill(theme::accent_primary())
+                        .hover(theme::accent_primary().alpha(0.88))
+                        .press(Color::BLACK.alpha(0.15))
                         .center()
                         .cursor(Cursor::Pointer)
                         .on_press(|s: &mut AppState| {
@@ -132,8 +129,8 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                         })
                         .child(
                             text("Create")
-                                .font(TextStyle::new(13.0, 600.0))
-                                .color(Color::WHITE),
+                                .font(theme::CONTROL_TEXT)
+                                .color(theme::text_inverted()),
                         ),
                 ),
         )
@@ -142,7 +139,7 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(
-                    text("Templates:")
+                    text("templates:")
                         .font(theme::STATUS_TEXT)
                         .color(theme::text_muted()),
                 )
@@ -150,8 +147,8 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                     el()
                         .key("btn_tpl_lit")
                         .px(10.0)
-                        .py(5.0)
-                        .radius(6.0)
+                        .py(4.5)
+                        .radius(4.0)
                         .fill(theme::bg_control())
                         .hover(theme::hover_subtle())
                         .border(1.0, theme::border_subtle())
@@ -169,8 +166,8 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                     el()
                         .key("btn_tpl_exam")
                         .px(10.0)
-                        .py(5.0)
-                        .radius(6.0)
+                        .py(4.5)
+                        .radius(4.0)
                         .fill(theme::bg_control())
                         .hover(theme::hover_subtle())
                         .border(1.0, theme::border_subtle())
@@ -196,7 +193,7 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 .padding(24.0)
                 .center()
                 .gap(6.0)
-                .radius(12.0)
+                .radius(6.0)
                 .continuous_corners()
                 .fill(theme::bg_card())
                 .border(1.0, theme::border_subtle())
@@ -218,10 +215,10 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 .key(format!("proj_row_{}_{}", idx, proj.folder_name))
                 .w_full()
                 .px(16.0)
-                .py(13.0)
+                .py(12.0)
                 .gap(14.0)
                 .center_y()
-                .radius(10.0)
+                .radius(6.0)
                 .continuous_corners()
                 .fill(theme::bg_card())
                 .hover(theme::hover_subtle())
@@ -232,9 +229,9 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                     s.open_project(path_clone.clone());
                 })
                 .child(
-                    el().size(8.0, 8.0)
-                        .radius(4.0)
-                        .fill(theme::accent_blue().alpha(0.75)),
+                    text("▤")
+                        .font(theme::CONTROL_TEXT)
+                        .color(theme::text_secondary()),
                 )
                 .child(
                     col()
@@ -268,14 +265,14 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 .child(
                     el()
                         .px(10.0)
-                        .py(5.0)
-                        .radius(6.0)
-                        .fill(theme::accent_blue().alpha(0.12))
-                        .border(1.0, theme::accent_blue().alpha(0.28))
+                        .py(4.5)
+                        .radius(4.0)
+                        .fill(theme::bg_control())
+                        .border(1.0, theme::border_default())
                         .child(
                             text("Open →")
                                 .font(theme::STATUS_TEXT)
-                                .color(theme::accent_blue()),
+                                .color(theme::text_primary()),
                         ),
                 );
 
@@ -302,7 +299,7 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                         .w_full()
                         .gap(10.0)
                         .child(
-                            text("EXISTING PROJECTS")
+                            text("EXISTING WORKSPACES")
                                 .font(theme::SECTION_LABEL)
                                 .color(theme::text_muted()),
                         )

@@ -2,6 +2,7 @@
 
 mod canvas_view;
 mod dashboard_view;
+mod doc_reader;
 mod inspector_view;
 mod state;
 mod theme;
@@ -45,7 +46,7 @@ fn view(s: &AppState, cx: &mut Cx<AppState>) -> El {
         }
     };
 
-    // Sleek Antigravity 26px Bottom Status Bar
+    // Sleek Monochrome 26px Bottom Status Bar (Claude Code-esque)
     let status_bar = row()
         .key("status_bar")
         .w_full()
@@ -56,14 +57,14 @@ fn view(s: &AppState, cx: &mut Cx<AppState>) -> El {
         .fill(theme::bg_chrome())
         .border_sides([1.0, 0.0, 0.0, 0.0], theme::border_subtle())
         .child(
-            el().size(6.0, 6.0)
-                .radius(3.0)
-                .fill(theme::accent_blue()),
+            text("✦")
+                .font(theme::STATUS_TEXT)
+                .color(theme::accent_claude()),
         )
         .child(
-            text("StudyNodes")
+            text("studynodes")
                 .font(theme::STATUS_TEXT)
-                .color(theme::text_secondary()),
+                .color(theme::text_primary()),
         )
         .child(text("·").font(theme::STATUS_TEXT).color(theme::text_muted()))
         .child(
@@ -74,7 +75,7 @@ fn view(s: &AppState, cx: &mut Cx<AppState>) -> El {
         .child(el().grow(1.0))
         .child(
             text(match s.screen {
-                AppScreen::Dashboard => "Projects".into(),
+                AppScreen::Dashboard => "workspaces".into(),
                 AppScreen::Workspace => format!(
                     "{} nodes · {} links",
                     s.graph.nodes.len(),
@@ -109,10 +110,34 @@ fn setup_workspace_demo(s: &mut AppState) {
     let mut n1 = studynodes_graph::model::Node::new(
         studynodes_graph::model::NodeKind::Document,
         "Hebbian Learning (1949)",
-        studynodes_graph::coords::WorldPos::new(36.0, 70.0),
+        studynodes_graph::coords::WorldPos::new(30.0, 65.0),
     );
     n1.size = node_base_size(n1.kind);
-    n1.content = "# The Organization of Behavior\nDonald O. Hebb (1949)\n\nNeurons that fire together wire together. When an axon of cell A is near enough to excite a cell B and repeatedly or persistently takes part in firing it, some growth process or metabolic change takes place in one or both cells such that A's efficiency, as one of the cells firing B, is increased.\n\n## Key Implications\n- Activity-dependent synaptic plasticity forms the cellular basis for associative learning.\n- Cell assemblies store distributed representations across neocortical networks.".into();
+    n1.content = r#"# The Organization of Behavior
+*Donald O. Hebb (1949)*
+
+> **Core Postulate:** Cells that fire together wire together when axon A persistently excites cell B.
+
+## Synaptic Update Rule
+
+```rust
+// Δw_ij proportional to correlated pre/post activity
+fn hebbian_delta(pre: f32, post: f32, lr: f32) -> f32 {
+    lr * pre * post
+}
+```
+
+## Biological Substrates
+
+| Mechanism | Role | Timescale |
+| --- | --- | --- |
+| NMDA Receptor | Coincidence detector | `~20 ms` |
+| AMPA Insertion | Structural potentiation | `Hours+` |
+
+## Study Checklist
+- [x] Connect **Hebbian Rule** to NMDA gating
+- [ ] Review hippocampal consolidation notes"#
+        .into();
     n1.summary = Some("Foundational postulate linking correlated pre/post-synaptic spiking to lasting synaptic strengthening.".into());
     let id1 = n1.id.clone();
     s.graph.add_node(n1);
@@ -120,7 +145,7 @@ fn setup_workspace_demo(s: &mut AppState) {
     let mut n2 = studynodes_graph::model::Node::new(
         studynodes_graph::model::NodeKind::Note,
         "LTP Mechanism",
-        studynodes_graph::coords::WorldPos::new(525.0, 60.0),
+        studynodes_graph::coords::WorldPos::new(490.0, 50.0),
     );
     n2.size = node_base_size(n2.kind);
     n2.content = "Long-Term Potentiation validates Hebb's postulate via NMDA coincidence detection and AMPA receptor insertion.".into();
@@ -145,7 +170,7 @@ fn setup_workspace_demo(s: &mut AppState) {
     let mut synth = studynodes_graph::model::Node::new(
         studynodes_graph::model::NodeKind::LlmSynthesis,
         "Memory Consolidation",
-        studynodes_graph::coords::WorldPos::new(450.0, 340.0),
+        studynodes_graph::coords::WorldPos::new(430.0, 340.0),
     );
     synth.size = node_base_size(synth.kind);
     synth.content = "Hebbian plasticity provides the local synaptic substrate for hippocampal-neocortical consolidation.".into();
@@ -180,8 +205,9 @@ fn main() {
         view,
     );
     spec.scenes = &[("dashboard", |_s| {}), ("workspace", setup_workspace_demo)];
-    spec.setup = Some(|_s, waker| {
-        touchpad_win32::set_waker(waker);
+    spec.setup = Some(|s, waker| {
+        touchpad_win32::set_waker(waker.clone());
+        s.set_image_waker(waker);
     });
     spec.poll = Some(|s, _dt, _tx| {
         touchpad_win32::pump_updates();
@@ -507,6 +533,59 @@ mod tests {
             (rt.state.graph.viewport.offset.y - 20.0).abs() < 1e-3,
             "expected offset.y 20, got {}",
             rt.state.graph.viewport.offset.y
+        );
+    }
+
+    #[test]
+    fn test_short_edge_pill_renders_above_nodes_and_centered() {
+        let mut rt = make_test_runtime();
+        rt.state.create_project("Edge Layering & Center Test");
+
+        // Place two nodes close together so the connecting edge pill overlaps the short span.
+        let id1 = rt.state.add_note_node(Some(WorldPos::new(100.0, 150.0)));
+        let id2 = rt.state.add_document_node(Some(WorldPos::new(440.0, 110.0)));
+        rt.state.inspector_open = false;
+        rt.state.connect_nodes(&id1, &id2);
+        let edge_id = rt
+            .state
+            .graph
+            .edges
+            .keys()
+            .next()
+            .expect("connected edge must exist")
+            .clone();
+
+        rt.invalidate();
+        settle_frames(&mut rt, 3);
+
+        let elements = rt.elements();
+        let pos1 = elements
+            .iter()
+            .position(|e| e.key.as_deref() == Some(id1.as_str()))
+            .expect("node 1 element");
+        let pos2 = elements
+            .iter()
+            .position(|e| e.key.as_deref() == Some(id2.as_str()))
+            .expect("node 2 element");
+        let pill_key = format!("edge_pill_{}", edge_id.as_str());
+        let pill_pos = elements
+            .iter()
+            .position(|e| e.key.as_deref() == Some(pill_key.as_str()))
+            .expect("edge pill element");
+
+        assert!(
+            pill_pos > pos1 && pill_pos > pos2,
+            "edge pill (index {pill_pos}) must render ABOVE both node cards ({pos1}, {pos2})"
+        );
+
+        let r1 = elements[pos1].rect;
+        let r2 = elements[pos2].rect;
+        let pr = elements[pill_pos].rect;
+        let wire_mid_x = ((r1[0] + r1[2]) + r2[0]) * 0.5;
+        let pill_mid_x = pr[0] + pr[2] * 0.5;
+        assert!(
+            (pill_mid_x - wire_mid_x).abs() < 18.0,
+            "edge pill center ({pill_mid_x}) must sit near wire midpoint ({wire_mid_x})"
         );
     }
 }

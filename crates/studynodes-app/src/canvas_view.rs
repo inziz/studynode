@@ -7,6 +7,7 @@ use studynodes_graph::bezier::CubicBezier;
 use studynodes_graph::coords::{ScreenPos, WorldPos};
 use studynodes_graph::model::{Edge, EdgeStatus, Node, NodeKind, PortDirection, PortId};
 
+use crate::doc_reader;
 use crate::state::{AppState, CanvasMode, node_base_size};
 use crate::theme;
 
@@ -29,13 +30,13 @@ pub fn render_canvas_view(s: &AppState) -> El {
     let cam = s.graph.viewport;
     let zoom = cam.zoom;
 
-    // 1. Vector Canvas Layer (Infinite Grid + Bézier Wires)
+    // 1. Vector Canvas Layer (Subtle Monochrome Grid + Bezier Wires)
     let mut canvas_shape = Shape::new();
 
     let base_spacing = 48.0 * zoom;
     if base_spacing >= 10.0 {
-        let minor_color = Color::WHITE.alpha(0.028);
-        let major_color = Color::WHITE.alpha(0.055);
+        let minor_color = Color::WHITE.alpha(0.025);
+        let major_color = Color::WHITE.alpha(0.052);
 
         let world_left_idx = (cam.offset.x / 48.0).floor() as i32;
         let offset_x = (cam.offset.x * zoom).rem_euclid(base_spacing);
@@ -85,11 +86,11 @@ pub fn render_canvas_view(s: &AppState) -> El {
             let is_ghost = edge.status == EdgeStatus::Proposed;
 
             let (wire_color, wire_w) = if is_selected {
-                (theme::accent_blue(), 2.6 * zoom.clamp(0.7, 1.4))
+                (theme::wire_selected(), 2.2 * zoom.clamp(0.7, 1.4))
             } else if is_ghost {
-                (theme::accent_violet().alpha(0.85), 2.2 * zoom.clamp(0.7, 1.4))
+                (theme::wire_proposed().alpha(0.82), 2.0 * zoom.clamp(0.7, 1.4))
             } else {
-                (theme::wire_default(), 1.8 * zoom.clamp(0.7, 1.4))
+                (theme::wire_default(), 1.6 * zoom.clamp(0.7, 1.4))
             };
 
             canvas_shape = canvas_shape.stroke(segments, wire_w, wire_color);
@@ -117,13 +118,13 @@ pub fn render_canvas_view(s: &AppState) -> El {
 
             canvas_shape = canvas_shape.stroke(
                 segments,
-                2.4 * zoom.clamp(0.7, 1.4),
-                theme::accent_amber(),
+                2.2 * zoom.clamp(0.7, 1.4),
+                theme::accent_claude(),
             );
         }
     }
 
-    // 2. Interactive Canvas Container (grow(1.0).min_w(0.0) so right-side Inspector fits on screen!)
+    // 2. Interactive Canvas Container (grow(1.0).min_w(0.0) so right-side Reader fits on screen!)
     let mut canvas_container = el()
         .key("graph_canvas")
         .grow(1.0)
@@ -185,10 +186,28 @@ pub fn render_canvas_view(s: &AppState) -> El {
             }
         });
 
-    // 4. Edge Annotation Pills (rendered below nodes cleanly)
-    if zoom >= 0.55 {
+    // 3. Node Cards (deterministic z-order: unselected sorted by id, selected on top)
+    let mut ordered_nodes: Vec<&Node> = s.graph.nodes.values().collect();
+    ordered_nodes.sort_by(|a, b| {
+        s.selected_nodes
+            .contains(&a.id)
+            .cmp(&s.selected_nodes.contains(&b.id))
+            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+    });
+
+    for node in ordered_nodes {
+        let card = render_node_card(s, node, cam.world_to_screen(node.pos), zoom);
+        canvas_container = canvas_container.child(card);
+    }
+
+    // 4. Edge Annotation Pills (rendered AFTER nodes so short-wire relation pills NEVER hide behind cards!)
+    if zoom >= 0.45 {
         let mut edges: Vec<&Edge> = s.graph.edges.values().collect();
-        edges.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+        edges.sort_by(|a, b| {
+            let a_sel = s.selected_edge.as_ref() == Some(&a.id);
+            let b_sel = s.selected_edge.as_ref() == Some(&b.id);
+            a_sel.cmp(&b_sel).then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
         for edge in edges {
             if let (Some(from_node), Some(to_node)) = (
                 s.graph.get_node(&edge.from.node),
@@ -208,31 +227,21 @@ pub fn render_canvas_view(s: &AppState) -> El {
         }
     }
 
-    // 5. Node Cards (deterministic z-order: unselected sorted by id, selected on top)
-    let mut ordered_nodes: Vec<&Node> = s.graph.nodes.values().collect();
-    ordered_nodes.sort_by(|a, b| {
-        s.selected_nodes
-            .contains(&a.id)
-            .cmp(&s.selected_nodes.contains(&b.id))
-            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
-    });
-
-    for node in ordered_nodes {
-        let card = render_node_card(s, node, cam.world_to_screen(node.pos), zoom);
-        canvas_container = canvas_container.child(card);
-    }
-
     canvas_container
 }
 
 fn topbar_pill_btn(
     key: &'static str,
-    dot_color: Option<Color>,
+    prefix_glyph: Option<(&'static str, Color)>,
     label: &'static str,
 ) -> El {
-    let mut content = row().center_y().gap(6.0);
-    if let Some(c) = dot_color {
-        content = content.child(el().size(6.0, 6.0).radius(3.0).fill(c));
+    let mut content = row().center_y().gap(5.0);
+    if let Some((glyph, color)) = prefix_glyph {
+        content = content.child(
+            text(glyph)
+                .font(theme::CONTROL_TEXT)
+                .color(color),
+        );
     }
     content = content.child(
         text(label)
@@ -244,7 +253,7 @@ fn topbar_pill_btn(
         .key(key)
         .h(26.0)
         .px(10.0)
-        .radius(6.0)
+        .radius(4.0)
         .fill(theme::bg_control())
         .hover(theme::hover_subtle())
         .press(theme::press_subtle())
@@ -275,7 +284,7 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 .key("btn_back")
                 .h(26.0)
                 .px(8.0)
-                .radius(6.0)
+                .radius(4.0)
                 .fill(theme::bg_control())
                 .hover(theme::hover_subtle())
                 .press(theme::press_subtle())
@@ -305,48 +314,61 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
         )
         // Middle draggable window band spacer
         .child(el().grow(1.0))
-        // Right: concise creation + AI + Zoom + Inspector toggle
+        // Right: concise monochrome creation + Claude AI + Zoom + Reader toggle
         .child(
-            topbar_pill_btn("btn_add_note", Some(theme::accent_amber()), "+ Note").on_press_tx(
-                |s: &mut AppState, tx: &mut Tx| {
-                    let offset_x = (s.graph.nodes.len() as f32 * 32.0) % 160.0;
-                    let offset_y = (s.graph.nodes.len() as f32 * 24.0) % 120.0;
-                    let pos = s
-                        .graph
-                        .viewport
-                        .screen_to_world(ScreenPos::new(200.0 + offset_x, 120.0 + offset_y));
-                    let id = s.add_note_node(Some(pos));
-                    tx.focus_when_shown(format!("note_body_{}", id.as_str()), false);
-                },
-            ),
+            topbar_pill_btn(
+                "btn_add_note",
+                Some(("▪", theme::text_secondary())),
+                "+ Note",
+            )
+            .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+                let offset_x = (s.graph.nodes.len() as f32 * 32.0) % 160.0;
+                let offset_y = (s.graph.nodes.len() as f32 * 24.0) % 120.0;
+                let pos = s
+                    .graph
+                    .viewport
+                    .screen_to_world(ScreenPos::new(200.0 + offset_x, 120.0 + offset_y));
+                let id = s.add_note_node(Some(pos));
+                tx.focus_when_shown(format!("note_body_{}", id.as_str()), false);
+            }),
         )
         .child(
-            topbar_pill_btn("btn_add_doc", Some(theme::accent_blue()), "+ Doc").on_press(
-                |s: &mut AppState| {
-                    let offset_x = (s.graph.nodes.len() as f32 * 32.0) % 160.0;
-                    let offset_y = (s.graph.nodes.len() as f32 * 24.0) % 120.0;
-                    let pos = s
-                        .graph
-                        .viewport
-                        .screen_to_world(ScreenPos::new(240.0 + offset_x, 150.0 + offset_y));
-                    s.add_document_node(Some(pos));
-                },
-            ),
+            topbar_pill_btn(
+                "btn_add_doc",
+                Some(("▤", theme::text_secondary())),
+                "+ Doc",
+            )
+            .on_press(|s: &mut AppState| {
+                let offset_x = (s.graph.nodes.len() as f32 * 32.0) % 160.0;
+                let offset_y = (s.graph.nodes.len() as f32 * 24.0) % 120.0;
+                let pos = s
+                    .graph
+                    .viewport
+                    .screen_to_world(ScreenPos::new(240.0 + offset_x, 150.0 + offset_y));
+                s.add_document_node(Some(pos));
+            }),
         )
         .child(
             el()
                 .key("btn_ai")
                 .h(26.0)
                 .px(10.0)
-                .radius(6.0)
+                .radius(4.0)
                 .fill(if s.ai_panel_open {
-                    theme::accent_violet().alpha(0.24)
+                    theme::accent_claude().alpha(0.18)
                 } else {
-                    theme::accent_violet().alpha(0.13)
+                    theme::bg_control()
                 })
-                .hover(theme::accent_violet().alpha(0.22))
-                .press(theme::accent_violet().alpha(0.30))
-                .border(1.0, theme::accent_violet().alpha(0.35))
+                .hover(theme::hover_subtle())
+                .press(theme::press_subtle())
+                .border(
+                    1.0,
+                    if s.ai_panel_open {
+                        theme::accent_claude().alpha(0.55)
+                    } else {
+                        theme::border_subtle()
+                    },
+                )
                 .center()
                 .cursor(Cursor::Pointer)
                 .no_window_drag()
@@ -354,13 +376,23 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                     s.ai_panel_open = !s.ai_panel_open;
                     if s.ai_panel_open {
                         s.inspector_open = true;
-                        s.status_message = "AI Synthesis ready".into();
+                        s.status_message = "✦ AI Synthesis ready".into();
                     }
                 })
                 .child(
-                    text("✦ AI")
-                        .font(theme::CONTROL_TEXT)
-                        .color(theme::accent_violet()),
+                    row()
+                        .center_y()
+                        .gap(4.0)
+                        .child(
+                            text("✦")
+                                .font(theme::CONTROL_TEXT)
+                                .color(theme::accent_claude()),
+                        )
+                        .child(
+                            text("AI")
+                                .font(theme::CONTROL_TEXT)
+                                .color(theme::text_primary()),
+                        ),
                 ),
         )
         // Compact segmented zoom pill
@@ -369,7 +401,7 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 .key("zoom_pill")
                 .h(26.0)
                 .center_y()
-                .radius(6.0)
+                .radius(4.0)
                 .fill(theme::bg_control())
                 .border(1.0, theme::border_subtle())
                 .no_window_drag()
@@ -434,9 +466,9 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
             el()
                 .key("btn_toggle_panel")
                 .size(26.0, 26.0)
-                .radius(6.0)
+                .radius(4.0)
                 .fill(if s.inspector_open {
-                    theme::accent_blue().alpha(0.16)
+                    theme::accent_primary().alpha(0.14)
                 } else {
                     theme::bg_control()
                 })
@@ -444,7 +476,7 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 .border(
                     1.0,
                     if s.inspector_open {
-                        theme::accent_blue().alpha(0.35)
+                        theme::border_strong()
                     } else {
                         theme::border_subtle()
                     },
@@ -459,7 +491,7 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                     text("◧")
                         .font(theme::CONTROL_TEXT)
                         .color(if s.inspector_open {
-                            theme::accent_blue()
+                            theme::text_primary()
                         } else {
                             theme::text_secondary()
                         }),
@@ -495,9 +527,9 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
 
     let kind_accent = theme::kind_accent(node.kind);
     let border_color = if is_snap_target {
-        theme::accent_amber()
+        theme::accent_claude()
     } else if is_selected {
-        kind_accent.alpha(0.85)
+        theme::border_strong()
     } else {
         theme::border_default()
     };
@@ -511,8 +543,8 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
     let title_size = (12.5 * zoom).clamp(8.5, 19.0);
     let body_size = (12.0 * zoom).clamp(8.0, 16.0);
     let badge_size = (9.5 * zoom).clamp(7.0, 13.0);
-    let card_radius = (10.0 * zoom).clamp(5.0, 14.0);
-    let socket_r = (5.0 * zoom).clamp(3.0, 8.5);
+    let card_radius = (6.0 * zoom).clamp(3.0, 10.0);
+    let socket_r = (4.5 * zoom).clamp(3.0, 8.0);
     let socket_d = socket_r * 2.0;
 
     let node_id_for_drag = node.id.clone();
@@ -521,6 +553,19 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
     let note_click_id = node.id.clone();
     let doc_click_id = node.id.clone();
     let other_click_id = node.id.clone();
+
+    let socket_rim = if is_selected {
+        theme::accent_primary().alpha(0.75)
+    } else {
+        theme::text_muted().alpha(0.75)
+    };
+    let socket_core = if node.kind == NodeKind::LlmSynthesis {
+        theme::accent_claude()
+    } else if is_selected {
+        theme::accent_primary()
+    } else {
+        theme::text_secondary()
+    };
 
     // Sockets straddle left & right card boundaries outside the rounded inner clip wrapper
     let in_socket = if is_snap_target {
@@ -531,13 +576,13 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
             .absolute(-snap_r, h * 0.5 - snap_r)
             .size(snap_d, snap_d)
             .radius(snap_r)
-            .fill(theme::accent_amber().alpha(0.35))
-            .border(1.5, theme::accent_amber())
+            .fill(theme::accent_claude().alpha(0.32))
+            .border(1.5, theme::accent_claude())
             .center()
             .child(
                 el().size(snap_r, snap_r)
                     .radius(snap_r * 0.5)
-                    .fill(theme::accent_amber()),
+                    .fill(theme::accent_claude()),
             )
     } else {
         el()
@@ -546,12 +591,12 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
             .size(socket_d, socket_d)
             .radius(socket_r)
             .fill(theme::bg_canvas())
-            .border(1.5, kind_accent.alpha(0.85))
+            .border(1.25, socket_rim)
             .center()
             .child(
-                el().size(socket_r * 0.75, socket_r * 0.75)
-                    .radius(socket_r * 0.375)
-                    .fill(kind_accent),
+                el().size(socket_r * 0.72, socket_r * 0.72)
+                    .radius(socket_r * 0.36)
+                    .fill(socket_core),
             )
     };
 
@@ -561,13 +606,13 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
         .size(socket_d, socket_d)
         .radius(socket_r)
         .fill(theme::bg_canvas())
-        .border(1.5, kind_accent.alpha(0.85))
+        .border(1.25, socket_rim)
         .cursor(Cursor::Crosshair)
         .center()
         .child(
-            el().size(socket_r * 0.75, socket_r * 0.75)
-                .radius(socket_r * 0.375)
-                .fill(kind_accent),
+            el().size(socket_r * 0.72, socket_r * 0.72)
+                .radius(socket_r * 0.36)
+                .fill(socket_core),
         )
         .on_drag(move |s: &mut AppState, d, _| match d.phase {
             Phase::Down => {
@@ -694,11 +739,11 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                 s.canvas_mode = CanvasMode::Idle;
             }
         })
-        // Minimal luminous kind dot
+        // Monochrome geometric kind glyph
         .child(
-            el().size((7.0 * zoom).clamp(4.0, 9.0), (7.0 * zoom).clamp(4.0, 9.0))
-                .radius(4.0 * zoom)
-                .fill(kind_accent),
+            text(theme::kind_glyph(node.kind))
+                .font(TextStyle::new((10.5 * zoom).clamp(7.5, 14.0), 600.0).mono())
+                .color(kind_accent),
         )
         // Title (directly editable inline when Note is selected, capped so right-center header stays draggable)
         .child(if is_selected && node.kind == NodeKind::Note {
@@ -707,7 +752,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                     .key(format!("note_title_{}", node.id.as_str()))
                     .single_line()
                     .color(theme::text_primary())
-                    .caret(kind_accent, kind_accent.alpha(0.25))
+                    .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
                     .on_edit(|s: &mut AppState| &mut s.canvas_title_edit)
                     .on_input_change(|s: &mut AppState, _| {
                         s.sync_from_canvas_edits();
@@ -733,7 +778,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                 .px((5.0 * zoom).clamp(3.0, 7.0))
                 .py((1.5 * zoom).clamp(1.0, 4.0))
                 .radius(4.0 * zoom)
-                .hover(theme::accent_rose().alpha(0.18))
+                .hover(theme::accent_danger().alpha(0.18))
                 .cursor(Cursor::Pointer)
                 .on_press(move |s: &mut AppState| {
                     s.delete_node(&del_node_id);
@@ -763,7 +808,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                             .w_full()
                             .grow(1.0)
                             .min_h(0.0)
-                            .radius(6.0 * zoom)
+                            .radius(4.0 * zoom)
                             .fill(theme::bg_input())
                             .border(1.0, theme::border_default())
                             .px(7.0 * zoom)
@@ -778,7 +823,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                                 .w_full()
                                 .min_h(body_min_h)
                                 .color(theme::text_primary())
-                                .caret(kind_accent, kind_accent.alpha(0.25))
+                                .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
                                 .placeholder("Write your notes...", theme::text_muted())
                                 .on_edit(|s: &mut AppState| &mut s.canvas_content_edit)
                                 .on_input_change(|s: &mut AppState, _| {
@@ -826,6 +871,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
         }
         NodeKind::Document => {
             let word_count = node.content.split_whitespace().count();
+            let fmt_badge = doc_reader::format_badge(s.node_doc_format(&node.id));
             col()
                 .key(format!("node_body_{}", node.id.as_str()))
                 .w_full()
@@ -851,18 +897,18 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                             el()
                                 .px(6.0 * zoom)
                                 .py(2.0 * zoom)
-                                .radius(4.0 * zoom)
-                                .fill(theme::accent_blue().alpha(0.14))
-                                .border(1.0, theme::accent_blue().alpha(0.30))
+                                .radius(3.0 * zoom)
+                                .fill(theme::bg_control())
+                                .border(1.0, theme::border_default())
                                 .child(
-                                    text("DOC")
-                                        .font(TextStyle::new(badge_size, 700.0))
-                                        .color(theme::accent_blue()),
+                                    text(fmt_badge)
+                                        .font(TextStyle::new(badge_size, 600.0).mono())
+                                        .color(theme::text_primary()),
                                 ),
                         )
                         .child(
                             text(format!("{} words", word_count))
-                                .font(TextStyle::new(badge_size, 500.0))
+                                .font(TextStyle::new(badge_size, 400.0).mono())
                                 .color(theme::text_muted()),
                         ),
                 )
@@ -873,13 +919,13 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                         .justify_between()
                         .child(
                             text("Open reader")
-                                .font(TextStyle::new(body_size * 0.9, 500.0))
-                                .color(theme::accent_blue()),
+                                .font(TextStyle::new((body_size * 0.9).max(7.5), 500.0).mono())
+                                .color(theme::text_secondary()),
                         )
                         .child(
                             text("→")
-                                .font(TextStyle::new(body_size * 0.9, 600.0))
-                                .color(theme::accent_blue()),
+                                .font(TextStyle::new((body_size * 0.9).max(7.5), 600.0).mono())
+                                .color(theme::text_primary()),
                         ),
                 )
         }
@@ -927,7 +973,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
         .radius(card_radius)
         .continuous_corners()
         .fill(card_bg)
-        .border(if is_selected || is_snap_target { 1.5 } else { 1.0 }, border_color)
+        .border(if is_selected || is_snap_target { 1.25 } else { 1.0 }, border_color)
         .shadow(6.0, 18.0, Color::BLACK.alpha(0.45))
         .child(
             col()
@@ -948,37 +994,45 @@ fn render_edge_pill(edge: &Edge, is_selected: bool, screen_pos: ScreenPos, zoom:
     let edge_id_for_reject = edge.id.clone();
 
     let is_ghost = edge.status == EdgeStatus::Proposed;
+    // Opaque matte surfaces so neither the wire nor card borders bleed through underneath.
     let pill_bg = if is_ghost {
-        theme::accent_violet().alpha(0.16)
+        theme::hex("#1C1715")
     } else if is_selected {
-        theme::accent_blue().alpha(0.16)
+        theme::bg_control()
     } else {
         theme::bg_chrome()
     };
 
     let pill_border = if is_ghost {
-        theme::accent_violet().alpha(0.55)
+        theme::accent_claude().alpha(0.65)
     } else if is_selected {
-        theme::accent_blue().alpha(0.75)
+        theme::border_strong()
     } else {
         theme::border_default()
     };
 
-    let font_size = (10.5 * zoom).clamp(8.0, 12.5);
+    let font_size = (10.0 * zoom).clamp(7.5, 12.0);
     let label_str = if edge.label.is_empty() {
         format!("[{}]", edge.relation.display_label())
     } else {
         format!("[{}] {}", edge.relation.display_label(), edge.label)
     };
 
+    let char_w = font_size * 0.60;
+    let action_w = if is_ghost { 46.0 * zoom } else { 0.0 };
+    let est_w = (label_str.chars().count() as f32 * char_w + 18.0 * zoom + action_w).max(52.0 * zoom);
+    let est_h = font_size + 9.0 * zoom;
+
     let mut content = row()
         .center_y()
         .gap(4.0 * zoom)
         .child(
             text(label_str)
-                .font(TextStyle::new(font_size, 500.0))
+                .font(TextStyle::new(font_size, 500.0).mono())
                 .color(if is_ghost {
-                    theme::accent_violet()
+                    theme::accent_claude()
+                } else if is_selected {
+                    theme::text_primary()
                 } else {
                     theme::text_secondary()
                 }),
@@ -990,9 +1044,9 @@ fn render_edge_pill(edge: &Edge, is_selected: bool, screen_pos: ScreenPos, zoom:
                 el()
                     .px(5.0 * zoom)
                     .py(1.5 * zoom)
-                    .radius(4.0)
-                    .fill(theme::accent_emerald().alpha(0.18))
-                    .border(1.0, theme::accent_emerald().alpha(0.45))
+                    .radius(3.0)
+                    .fill(theme::accent_primary().alpha(0.14))
+                    .border(1.0, theme::border_strong())
                     .cursor(Cursor::Pointer)
                     .on_press(move |s: &mut AppState| {
                         s.graph.accept_edge(&edge_id_for_accept);
@@ -1003,17 +1057,17 @@ fn render_edge_pill(edge: &Edge, is_selected: bool, screen_pos: ScreenPos, zoom:
                     })
                     .child(
                         text("✓")
-                            .font(TextStyle::new(font_size, 700.0))
-                            .color(theme::accent_emerald()),
+                            .font(TextStyle::new(font_size, 700.0).mono())
+                            .color(theme::text_primary()),
                     ),
             )
             .child(
                 el()
                     .px(5.0 * zoom)
                     .py(1.5 * zoom)
-                    .radius(4.0)
-                    .fill(theme::accent_rose().alpha(0.16))
-                    .border(1.0, theme::accent_rose().alpha(0.40))
+                    .radius(3.0)
+                    .fill(theme::accent_danger().alpha(0.16))
+                    .border(1.0, theme::accent_danger().alpha(0.42))
                     .cursor(Cursor::Pointer)
                     .on_press(move |s: &mut AppState| {
                         s.graph.reject_edge(&edge_id_for_reject);
@@ -1024,21 +1078,22 @@ fn render_edge_pill(edge: &Edge, is_selected: bool, screen_pos: ScreenPos, zoom:
                     })
                     .child(
                         text("×")
-                            .font(TextStyle::new(font_size, 700.0))
-                            .color(theme::accent_rose()),
+                            .font(TextStyle::new(font_size, 700.0).mono())
+                            .color(theme::accent_danger()),
                     ),
             );
     }
 
     el()
         .key(format!("edge_pill_{}", edge.id.as_str()))
-        .absolute(screen_pos.x - 68.0 * zoom, screen_pos.y - 12.0 * zoom)
+        .absolute(screen_pos.x - est_w * 0.5, screen_pos.y - est_h * 0.5)
         .px(8.0 * zoom)
         .py(3.5 * zoom)
-        .radius(10.0)
+        .radius(4.0)
         .fill(pill_bg)
         .hover(theme::hover_subtle())
         .border(1.0, pill_border)
+        .shadow(3.0, 10.0, Color::BLACK.alpha(0.45))
         .cursor(Cursor::Pointer)
         .on_press(move |s: &mut AppState| {
             s.select_edge(edge_id_clone.clone());
