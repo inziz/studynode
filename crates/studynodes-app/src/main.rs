@@ -1438,16 +1438,42 @@ mod tests {
         rt.invalidate();
         settle_frames(rt, 20);
 
-        // Switching to Tier 2 Neural reveals the Download Neural Models control when not cached
-        click_key(rt, "ocr_engine_neural");
+        // Cycling OCR engine Auto -> LocalPpOcrV5 -> CloudVision reveals/hides btn_download_neural_models,
+        // and toggling btn_toggle_vision_settings reveals vision_api_settings_panel.
+        assert!(rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some("btn_download_neural_models") && !e.exiting));
+        click_key(rt, "btn_cycle_ocr_engine");
         assert_eq!(
             rt.state.reader_prefs.ocr_engine,
-            studynodes_vision::OcrEnginePreference::NeuralCrossPlatform
+            studynodes_vision::OcrEnginePreference::LocalPpOcrV5
         );
         assert!(rt
             .elements()
             .iter()
             .any(|e| e.key.as_deref() == Some("btn_download_neural_models") && !e.exiting));
+        click_key(rt, "btn_cycle_ocr_engine");
+        assert_eq!(
+            rt.state.reader_prefs.ocr_engine,
+            studynodes_vision::OcrEnginePreference::CloudVision
+        );
+        assert!(!rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some("btn_download_neural_models") && !e.exiting));
+
+        click_key(rt, "btn_toggle_vision_settings");
+        settle_frames(rt, 10);
+        assert!(rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some("vision_api_settings_panel") && !e.exiting));
+        click_key(rt, "btn_toggle_vision_settings");
+        settle_frames(rt, 10);
+
+        // Verify shared decoded_images cache warms a single handle
+        assert_eq!(rt.state.decoded_images.len(), 1);
 
         // Extract Text (non-blocking worker -> poll -> meta.extracted_text)
         click_key(rt, "btn_img_ocr_text");
@@ -1511,6 +1537,15 @@ mod tests {
                 && e.relation == studynodes_graph::model::EdgeRelation::DerivedFrom
                 && e.label == "Equation OCR"
         }));
+
+        // Clearing extracted text hides ocr_extracted_preview
+        click_key(rt, "btn_ocr_clear");
+        settle_frames(rt, 20);
+        assert!(rt.state.graph.get_node(&img_id).unwrap().meta.extracted_text.is_none());
+        assert!(!rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some("ocr_extracted_preview") && !e.exiting));
     }
 
     #[test]
@@ -1569,5 +1604,96 @@ mod tests {
                 && e.relation == studynodes_graph::model::EdgeRelation::DerivedFrom
                 && e.label == "Translation"
         }));
+    }
+
+    #[test]
+    fn test_image_node_empty_content_hides_empty_document_placeholder() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Empty Image Source Test");
+
+        let mut img_node = studynodes_graph::model::Node::new(
+            NodeKind::Image,
+            "Lecture Slide",
+            WorldPos::new(100.0, 100.0),
+        );
+        img_node.size = crate::state::node_base_size(NodeKind::Image);
+        img_node.content = String::new();
+        let img_id = img_node.id.clone();
+        rt.state.graph.add_node(img_node);
+        rt.state.select_node(img_id, false);
+        rt.state.inspector_open = true;
+        rt.invalidate();
+        settle_frames(rt, 30);
+
+        // Read-only mode: no empty-document placeholder when image content is empty
+        assert!(!rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some("empty_doc_placeholder") && !e.exiting));
+        assert!(!rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some("image_caption_markdown") && !e.exiting));
+
+        // Edit mode: still no empty-document placeholder when image content is empty
+        click_key(rt, "btn_toggle_readonly");
+        settle_frames(rt, 30);
+        assert!(!rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some("empty_doc_placeholder") && !e.exiting));
+        assert!(!rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some("image_caption_markdown") && !e.exiting));
+    }
+
+    #[test]
+    fn test_low_zoom_renders_title_only_lod() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Low Zoom LOD Test");
+        rt.state.inspector_open = false;
+
+        let sec_id = rt
+            .state
+            .add_study_node(NodeKind::Section, Some(WorldPos::new(60.0, 60.0)));
+        let note_id = rt
+            .state
+            .add_study_node(NodeKind::Flashcard, Some(WorldPos::new(100.0, 120.0)));
+
+        // At zoom = 1.0 -> full card chrome rendered (no node_title_lod_*, sec_toggle_frame_* visible)
+        rt.invalidate();
+        settle_frames(rt, 20);
+        assert!(!rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some(&format!("node_title_lod_{}", note_id.as_str()))));
+        assert!(rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some(&format!("sec_toggle_frame_{}", sec_id.as_str()))));
+
+        // Zoom out to 0.30 -> title-only LOD enabled, inner card clutter hidden
+        rt.state.graph.viewport.zoom = 0.30;
+        rt.invalidate();
+        settle_frames(rt, 45);
+        assert!(rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some(&format!("node_title_lod_{}", note_id.as_str())) && !e.exiting));
+        assert!(!rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some(&format!("node_body_{}", note_id.as_str())) && !e.exiting));
+        assert!(!rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some(&format!("node_del_{}", note_id.as_str())) && !e.exiting));
+        assert!(!rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some(&format!("sec_toggle_frame_{}", sec_id.as_str())) && !e.exiting));
     }
 }

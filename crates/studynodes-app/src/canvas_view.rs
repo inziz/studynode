@@ -12,6 +12,8 @@ use crate::formula_math;
 use crate::state::{AppState, CanvasMode, node_world_size};
 use crate::theme;
 
+const LOW_ZOOM_TITLE_ONLY: f32 = 0.48;
+
 fn port_world_pos_for(node: &Node, port_id: &PortId) -> WorldPos {
     let (w, h) = node_world_size(node);
     let y_center = node.pos.y + h * 0.5;
@@ -92,9 +94,9 @@ fn build_wire_shape(s: &AppState) -> Shape {
     let cam = s.graph.viewport;
     let zoom = cam.zoom;
     let mut wire_shape = Shape::new();
-    let socket_r = (4.5 * zoom).clamp(3.0, 8.0);
-    let arrow_len = (8.5 * zoom).clamp(5.5, 13.0);
-    let arrow_hw = (4.0 * zoom).clamp(2.6, 6.2);
+    let socket_r = (4.5 * zoom).clamp(2.2, 8.0);
+    let arrow_len = (8.5 * zoom).clamp(4.0, 13.0);
+    let arrow_hw = (4.0 * zoom).clamp(2.0, 6.2);
 
     for edge in s.graph.edges.values() {
         if let (Some(from_node), Some(to_node)) = (
@@ -919,7 +921,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
     let body_size = (12.0 * zoom).clamp(8.0, 16.0);
     let badge_size = (9.5 * zoom).clamp(7.0, 13.0);
     let card_radius = (6.0 * zoom).clamp(3.0, 10.0);
-    let socket_r = (4.5 * zoom).clamp(3.0, 8.0);
+    let socket_r = (4.5 * zoom).clamp(2.2, 8.0);
     let socket_d = socket_r * 2.0;
 
     let node_id_for_drag = node.id.clone();
@@ -1054,6 +1056,102 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                 s.canvas_mode = CanvasMode::Idle;
             }
         });
+
+    if zoom < LOW_ZOOM_TITLE_ONLY {
+        let drag_id_lod = node_id_for_drag.clone();
+        let lod_title_size = (11.5 * (zoom / LOW_ZOOM_TITLE_ONLY).max(0.76)).clamp(9.0, 12.5);
+        let lod_title = if node.title.trim().is_empty() {
+            theme::kind_label(node.kind)
+        } else {
+            node.title.as_str()
+        };
+        return col()
+            .key(node.id.as_str())
+            .size(w, h)
+            .absolute(screen_pos.x, screen_pos.y)
+            .radius(card_radius)
+            .continuous_corners()
+            .fill(card_bg)
+            .border(if is_selected || is_snap_target { 1.25 } else { 1.0 }, border_color)
+            .child(
+                row()
+                    .key(format!("node_title_lod_{}", node.id.as_str()))
+                    .w_full()
+                    .h_full()
+                    .clip_rounded(card_radius)
+                    .px((7.0 * zoom).clamp(4.0, 10.0))
+                    .py((6.0 * zoom).clamp(3.0, 8.0))
+                    .gap((4.0 * zoom).clamp(3.0, 6.0))
+                    .center()
+                    .cursor(Cursor::Grab)
+                    .pointer_buttons([PointerButton::Primary, PointerButton::Middle])
+                    .on_drag(move |s: &mut AppState, d, tx| match d.phase {
+                        Phase::Down => {
+                            if tx.button() == PointerButton::Middle || s.space_held {
+                                s.canvas_mode = CanvasMode::Panning {
+                                    start_screen: ScreenPos::new(d.x, d.y),
+                                    start_offset: s.graph.viewport.offset,
+                                };
+                                return;
+                            }
+                            s.select_node(drag_id_lod.clone(), false);
+                            if let Some(n) = s.graph.get_node(&drag_id_lod) {
+                                s.canvas_mode = CanvasMode::DraggingNode {
+                                    node_id: drag_id_lod.clone(),
+                                    start_pos: n.pos,
+                                };
+                            }
+                        }
+                        Phase::Move => {
+                            let z = s.graph.viewport.zoom.max(0.01);
+                            match &s.canvas_mode {
+                                CanvasMode::DraggingNode { node_id, start_pos } => {
+                                    let node_id = node_id.clone();
+                                    let start_pos = *start_pos;
+                                    if let Some(n) = s.graph.get_node_mut(&node_id) {
+                                        n.pos = WorldPos::new(
+                                            start_pos.x + (d.dx / z),
+                                            start_pos.y + (d.dy / z),
+                                        );
+                                    }
+                                }
+                                CanvasMode::Panning { start_offset, .. } => {
+                                    let start_offset = *start_offset;
+                                    s.graph.viewport.offset.x = start_offset.x - (d.dx / z);
+                                    s.graph.viewport.offset.y = start_offset.y - (d.dy / z);
+                                }
+                                _ => {}
+                            }
+                        }
+                        Phase::Up => {
+                            if !d.cancelled()
+                                && matches!(s.canvas_mode, CanvasMode::DraggingNode { .. })
+                            {
+                                if let Some(bundle) = &s.bundle {
+                                    let _ = bundle.save_graph_atomic(&s.graph);
+                                }
+                            }
+                            s.canvas_mode = CanvasMode::Idle;
+                        }
+                    })
+                    .child(
+                        text(theme::kind_glyph(node.kind))
+                            .font(TextStyle::new(lod_title_size, 600.0).mono())
+                            .color(kind_accent),
+                    )
+                    .child(
+                        el().grow(1.0).min_w(0.0).child(
+                            text(lod_title)
+                                .font(TextStyle::new(lod_title_size, 600.0))
+                                .color(theme::text_primary())
+                                .w_full()
+                                .wrap(),
+                        ),
+                    ),
+            )
+            .child(in_socket)
+            .child(out_socket);
+    }
 
     // Drag Handle = Header ONLY (leaves card body clicks/inputs completely unblocked!)
     let header_bar = row()
@@ -2337,7 +2435,8 @@ fn render_section_node(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f
         theme::border_default()
     };
 
-    let header_bar = row()
+    let low_zoom_lod = zoom < LOW_ZOOM_TITLE_ONLY;
+    let mut header_bar = row()
         .key(format!("node_header_{}", node.id.as_str()))
         .w_full()
         .h(header_h)
@@ -2422,64 +2521,68 @@ fn render_section_node(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f
                     .color(theme::text_primary())
                     .truncate(),
             ),
-        )
-        .child(
-            el()
-                .key(format!("sec_toggle_frame_{}", node.id.as_str()))
-                .px(6.0 * zoom)
-                .py(2.0 * zoom)
-                .radius(4.0 * zoom)
-                .fill(theme::bg_control())
-                .hover(theme::hover_subtle())
-                .border(1.0, theme::border_subtle())
-                .cursor(Cursor::Pointer)
-                .on_press(move |s: &mut AppState| {
-                    s.toggle_section_framed(&sec_toggle_id);
-                })
-                .child(
-                    text(if framed { "▭ Frame" } else { "— Banner" })
-                        .font(TextStyle::new(badge_size, 600.0))
-                        .color(theme::text_secondary()),
-                ),
-        )
-        .child(
-            el()
-                .key(format!("node_inspect_{}", node.id.as_str()))
-                .px(5.0 * zoom)
-                .py(2.0 * zoom)
-                .radius(4.0 * zoom)
-                .hover(theme::hover_subtle())
-                .cursor(Cursor::Pointer)
-                .on_press(move |s: &mut AppState| {
-                    s.select_node(sec_edit_id.clone(), false);
-                    if !s.inspector_popped_out {
-                        s.inspector_open = true;
-                    }
-                    s.ai_panel_open = false;
-                })
-                .child(
-                    text("✎")
-                        .font(TextStyle::new(badge_size, 600.0))
-                        .color(theme::text_muted()),
-                ),
-        )
-        .child(
-            el()
-                .key(format!("node_del_{}", node.id.as_str()))
-                .px(5.0 * zoom)
-                .py(2.0 * zoom)
-                .radius(4.0 * zoom)
-                .hover(theme::accent_danger().alpha(0.18))
-                .cursor(Cursor::Pointer)
-                .on_press(move |s: &mut AppState| {
-                    s.delete_node(&sec_del_id);
-                })
-                .child(
-                    text("×")
-                        .font(TextStyle::new((13.0 * zoom).clamp(10.0, 18.0), 600.0))
-                        .color(theme::text_muted()),
-                ),
         );
+
+    if !low_zoom_lod {
+        header_bar = header_bar
+            .child(
+                el()
+                    .key(format!("sec_toggle_frame_{}", node.id.as_str()))
+                    .px(6.0 * zoom)
+                    .py(2.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_control())
+                    .hover(theme::hover_subtle())
+                    .border(1.0, theme::border_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.toggle_section_framed(&sec_toggle_id);
+                    })
+                    .child(
+                        text(if framed { "▭ Frame" } else { "— Banner" })
+                            .font(TextStyle::new(badge_size, 600.0))
+                            .color(theme::text_secondary()),
+                    ),
+            )
+            .child(
+                el()
+                    .key(format!("node_inspect_{}", node.id.as_str()))
+                    .px(5.0 * zoom)
+                    .py(2.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.select_node(sec_edit_id.clone(), false);
+                        if !s.inspector_popped_out {
+                            s.inspector_open = true;
+                        }
+                        s.ai_panel_open = false;
+                    })
+                    .child(
+                        text("✎")
+                            .font(TextStyle::new(badge_size, 600.0))
+                            .color(theme::text_muted()),
+                    ),
+            )
+            .child(
+                el()
+                    .key(format!("node_del_{}", node.id.as_str()))
+                    .px(5.0 * zoom)
+                    .py(2.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .hover(theme::accent_danger().alpha(0.18))
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.delete_node(&sec_del_id);
+                    })
+                    .child(
+                        text("×")
+                            .font(TextStyle::new((13.0 * zoom).clamp(10.0, 18.0), 600.0))
+                            .color(theme::text_muted()),
+                    ),
+            );
+    }
 
     let radius = (8.0 * zoom).clamp(4.0, 12.0);
     let mut container = el()
@@ -2496,7 +2599,7 @@ fn render_section_node(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f
         .border(if is_selected { 1.25 } else { 1.0 }, border_color)
         .child(header_bar);
 
-    if framed {
+    if framed && !low_zoom_lod {
         let grip = (16.0 * zoom).clamp(12.0, 22.0);
         container = container.child(
             el()

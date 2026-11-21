@@ -49,7 +49,7 @@ pub struct ReaderPreferences {
     /// Distraction-free read-only mode hiding editing controls behind a minimal toolbar.
     #[serde(default = "default_read_only")]
     pub read_only: bool,
-    /// Selected OCR backend tier (`Auto`, `WindowsNative`, or `NeuralCrossPlatform`).
+    /// Selected OCR backend (`Auto`, `LocalPpOcrV5`, or `CloudVision`).
     #[serde(default)]
     pub ocr_engine: studynodes_vision::OcrEnginePreference,
     /// Preferred target language ISO code (`en`, `es`, `fr`, `de`, `pt`, `ja`).
@@ -61,6 +61,15 @@ pub struct ReaderPreferences {
     /// Preferred Ollama translation model name.
     #[serde(default = "default_ollama_model")]
     pub ollama_model: String,
+    /// Optional Cloud Vision API key (Gemini / DeepInfra / SiliconFlow / OpenAI).
+    #[serde(default)]
+    pub vision_api_key: String,
+    /// Optional OpenAI-compatible Cloud Vision base URL (blank = Gemini / provider auto-detect).
+    #[serde(default)]
+    pub vision_base_url: String,
+    /// Optional Cloud Vision model identifier (e.g. `deepseek-ai/DeepSeek-OCR` or `gemini-2.5-flash`).
+    #[serde(default)]
+    pub vision_model: String,
 }
 
 impl Default for ReaderPreferences {
@@ -74,6 +83,9 @@ impl Default for ReaderPreferences {
             target_language: default_target_language(),
             ollama_url: default_ollama_url(),
             ollama_model: default_ollama_model(),
+            vision_api_key: String::new(),
+            vision_base_url: String::new(),
+            vision_model: String::new(),
         }
     }
 }
@@ -1783,16 +1795,18 @@ mod tests {
         assert_eq!(loaded_legacy.target_language, "es");
 
         let updated = ReaderPreferences {
-            ocr_engine: studynodes_vision::OcrEnginePreference::NeuralCrossPlatform,
+            ocr_engine: studynodes_vision::OcrEnginePreference::LocalPpOcrV5,
             target_language: "ja".into(),
+            vision_model: "deepseek-ai/DeepSeek-OCR".into(),
             ..loaded_legacy
         };
         save_preferences(dir.path(), &updated).unwrap();
         let reloaded = load_preferences(dir.path());
         assert_eq!(
             reloaded.ocr_engine,
-            studynodes_vision::OcrEnginePreference::NeuralCrossPlatform
+            studynodes_vision::OcrEnginePreference::LocalPpOcrV5
         );
         assert_eq!(reloaded.target_language, "ja");
+        assert_eq!(reloaded.vision_model, "deepseek-ai/DeepSeek-OCR");
     }
 }

@@ -1,11 +1,10 @@
 #![deny(unsafe_code)]
 
-pub mod neural_ocr;
+pub mod cloud_ocr;
 pub mod postprocess;
+pub mod ppocr;
 pub mod translator;
 pub mod types;
-#[cfg(target_os = "windows")]
-pub mod win_ocr;
 
 use std::path::Path;
 
@@ -16,7 +15,7 @@ pub use types::{
     TranslationOutput, VisionConfig, VisionError, language_display_name,
 };
 
-/// Unified abstraction for local image-to-text OCR, formula extraction, and translation.
+/// Unified abstraction for image-to-text OCR, formula extraction, and translation.
 pub trait VisionService: Send + Sync {
     fn extract_image(
         &self,
@@ -32,7 +31,7 @@ pub trait VisionService: Send + Sync {
     fn download_neural_models(&self) -> Result<NeuralModelStatus, VisionError>;
 }
 
-/// Real Tier 1 (Windows Native OCR) + Tier 2 (Cross-Platform Pure-Rust Neural OCR) implementation.
+/// Real PP-OCRv5 (Local Offline ONNX) + Cloud Vision API (DeepSeek-OCR / Gemini Vision / OpenAI-compatible).
 #[derive(Clone, Debug)]
 pub struct LocalVisionService {
     pub config: VisionConfig,
@@ -49,52 +48,29 @@ impl VisionService for LocalVisionService {
         &self,
         image_path: &Path,
         mode: OcrMode,
-        language_hint: Option<&str>,
+        _language_hint: Option<&str>,
     ) -> Result<OcrOutput, VisionError> {
         match self.config.engine {
-            OcrEnginePreference::WindowsNative => {
-                #[cfg(target_os = "windows")]
-                {
-                    win_ocr::extract_text_windows(image_path, mode, language_hint)
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = (image_path, mode, language_hint);
-                    Err(VisionError::UnsupportedOnPlatform(
-                        "Windows Native OCR is only available on Windows. Switch engine to Auto or Neural."
-                            .into(),
-                    ))
-                }
-            }
-            OcrEnginePreference::NeuralCrossPlatform => neural_ocr::extract_text_neural(
+            OcrEnginePreference::LocalPpOcrV5 => ppocr::extract_text_ppocr(
                 image_path,
                 &self.config.models_dir,
                 mode,
                 true,
             ),
+            OcrEnginePreference::CloudVision => {
+                cloud_ocr::extract_text_cloud(image_path, &self.config, mode)
+            }
             OcrEnginePreference::Auto => {
-                #[cfg(target_os = "windows")]
-                {
-                    match win_ocr::extract_text_windows(image_path, mode, language_hint) {
-                        Ok(out) => Ok(out),
-                        Err(_win_err) => neural_ocr::extract_text_neural(
-                            image_path,
-                            &self.config.models_dir,
-                            mode,
-                            true,
-                        ),
+                if self.config.has_cloud_vision() {
+                    if let Ok(cloud_out) =
+                        cloud_ocr::extract_text_cloud(image_path, &self.config, mode)
+                    {
+                        if !cloud_out.text.trim().is_empty() {
+                            return Ok(cloud_out);
+                        }
                     }
                 }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = language_hint;
-                    neural_ocr::extract_text_neural(
-                        image_path,
-                        &self.config.models_dir,
-                        mode,
-                        true,
-                    )
-                }
+                ppocr::extract_text_ppocr(image_path, &self.config.models_dir, mode, true)
             }
         }
     }
@@ -104,11 +80,11 @@ impl VisionService for LocalVisionService {
     }
 
     fn model_status(&self) -> NeuralModelStatus {
-        neural_ocr::model_status(&self.config.models_dir)
+        ppocr::model_status(&self.config.models_dir)
     }
 
     fn download_neural_models(&self) -> Result<NeuralModelStatus, VisionError> {
-        neural_ocr::ensure_models_downloaded(&self.config.models_dir)
+        ppocr::ensure_models_downloaded(&self.config.models_dir)
     }
 }
 
@@ -174,6 +150,7 @@ impl VisionService for MockVisionService {
         NeuralModelStatus {
             detection_ready: self.models_ready,
             recognition_ready: self.models_ready,
+            dict_ready: self.models_ready,
             models_dir: Path::new(".").to_path_buf(),
         }
     }
@@ -182,6 +159,7 @@ impl VisionService for MockVisionService {
         Ok(NeuralModelStatus {
             detection_ready: true,
             recognition_ready: true,
+            dict_ready: true,
             models_dir: Path::new(".").to_path_buf(),
         })
     }
@@ -261,34 +239,117 @@ mod tests {
     #[test]
     fn test_neural_model_status_detects_missing_and_valid_files() {
         let dir = tempdir().unwrap();
-        let st0 = neural_ocr::model_status(dir.path());
+        let st0 = ppocr::model_status(dir.path());
         assert!(!st0.is_ready());
 
-        let sub = dir.path().join("ocrs");
+        let sub = ppocr::ppocr_subdir(dir.path());
         fs::create_dir_all(&sub).unwrap();
-        fs::write(sub.join("text-detection.rten"), vec![1u8; 120_000]).unwrap();
-        fs::write(sub.join("text-recognition.rten"), vec![2u8; 120_000]).unwrap();
+        fs::write(sub.join("pp-ocrv5_mobile_det.onnx"), vec![1u8; 120_000]).unwrap();
+        fs::write(sub.join("pp-ocrv5_mobile_rec.onnx"), vec![2u8; 120_000]).unwrap();
+        fs::write(sub.join("ppocrv5_dict.txt"), vec![b'a'; 12_000]).unwrap();
 
-        let st1 = neural_ocr::model_status(dir.path());
+        let st1 = ppocr::model_status(dir.path());
         assert!(st1.is_ready());
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
-    fn test_windows_ocr_smoke_on_synthetic_png() {
-        if !win_ocr::is_available() {
-            return;
-        }
+    fn test_preprocess_upscales_and_inverts_dark_images() {
         let dir = tempdir().unwrap();
-        let img_path = dir.path().join("blank.png");
-        let img = image::RgbImage::from_pixel(160, 60, image::Rgb([255, 255, 255]));
+        let img_path = dir.path().join("dark_small.png");
+        let img = image::RgbImage::from_pixel(200, 100, image::Rgb([16, 16, 20]));
         img.save(&img_path).unwrap();
 
-        let res = win_ocr::extract_text_windows(&img_path, OcrMode::PlainText, None);
+        let prepared = postprocess::prepare_ocr_rgb(&img_path, 2400).unwrap();
+        assert_eq!(prepared.dimensions(), (400, 200));
+        assert!(postprocess::mean_luminance(&prepared) < 30.0);
+
+        let inverted = postprocess::invert_rgb(&prepared);
+        assert!(postprocess::mean_luminance(&inverted) > 220.0);
+    }
+
+    #[test]
+    fn test_cloud_endpoint_resolution_and_response_parsing() {
+        let base_cfg = VisionConfig {
+            models_dir: Path::new(".").to_path_buf(),
+            engine: OcrEnginePreference::CloudVision,
+            ollama_url: "http://127.0.0.1:11434".into(),
+            ollama_model: "qwen2.5:3b".into(),
+            gemini_api_key: None,
+            cloud_vision_api_key: Some("AIzaSyTestGeminiKey123".into()),
+            cloud_vision_base_url: String::new(),
+            cloud_vision_model: String::new(),
+        };
+        assert_eq!(
+            cloud_ocr::resolve_cloud_endpoint(&base_cfg).unwrap(),
+            cloud_ocr::ResolvedCloudEndpoint::Gemini {
+                api_key: "AIzaSyTestGeminiKey123".into(),
+                model: "gemini-2.5-flash".into(),
+            }
+        );
+
+        let custom_cfg = VisionConfig {
+            models_dir: Path::new(".").to_path_buf(),
+            engine: OcrEnginePreference::CloudVision,
+            ollama_url: "http://127.0.0.1:11434".into(),
+            ollama_model: "qwen2.5:3b".into(),
+            gemini_api_key: None,
+            cloud_vision_api_key: Some("sk-test-token".into()),
+            cloud_vision_base_url: "http://127.0.0.1:11434/v1/".into(),
+            cloud_vision_model: "deepseek-ocr".into(),
+        };
+        assert_eq!(
+            cloud_ocr::resolve_cloud_endpoint(&custom_cfg).unwrap(),
+            cloud_ocr::ResolvedCloudEndpoint::OpenAiCompatible {
+                chat_url: "http://127.0.0.1:11434/v1/chat/completions".into(),
+                api_key: Some("sk-test-token".into()),
+                model: "deepseek-ocr".into(),
+            }
+        );
+
+        let stripped = cloud_ocr::strip_deepseek_grounding_tags(
+            "<|ref|>text<|/ref|><|det|>[[12,34,560,78]]<|/det|>Action potential fires at -55 mV.",
+        );
+        assert_eq!(stripped, "Action potential fires at -55 mV.");
+
+        let gemini_json = serde_json::json!({
+            "candidates": [{
+                "content": { "parts": [{ "text": "Hodgkin-Huxley model" }] }
+            }]
+        });
+        assert_eq!(
+            cloud_ocr::parse_gemini_vision_response(&gemini_json).unwrap(),
+            "Hodgkin-Huxley model"
+        );
+
+        let openai_json = serde_json::json!({
+            "choices": [{
+                "message": { "content": "Synaptic plasticity" }
+            }]
+        });
+        assert_eq!(
+            cloud_ocr::parse_openai_vision_response(&openai_json).unwrap(),
+            "Synaptic plasticity"
+        );
+    }
+
+    #[ignore = "Downloads & runs PP-OCRv5 models (~21 MB) on the local screenshot fixture"]
+    #[test]
+    fn test_real_ppocrv5_extraction_on_uploaded_screenshot() {
+        let sample_png = Path::new(
+            "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/.user_uploaded/media_1795248497980_f60658b9.png",
+        );
+        let models_dir = Path::new("c:/Users/pelotadewindows11/Desktop/StudyNodes/study_projects/models");
+        assert!(sample_png.exists(), "missing sample png");
+
+        let t0 = std::time::Instant::now();
+        let out = ppocr::extract_text_ppocr(sample_png, models_dir, OcrMode::PlainText, true)
+            .expect("PP-OCRv5 extraction must succeed cleanly");
+        let elapsed = t0.elapsed();
+        println!("PP-OCRv5 ({:.2?}):\n{}", elapsed, out.text);
         assert!(
-            res.is_ok(),
-            "Expected Windows OCR smoke test to run cleanly, got: {:?}",
-            res
+            out.text.contains("Extract Text") || out.text.contains("Extract Formula"),
+            "unexpected PP-OCRv5 output: {}",
+            out.text
         );
     }
 }

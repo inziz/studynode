@@ -924,38 +924,64 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                         .max_h(470.0)
                         .scroll(ScrollSpec { stick_bottom: false });
 
-                    if let Some((img_nid, _, img)) = &s.active_image {
-                        if img_nid == &node.id && doc_format == DocFormat::Image {
-                            preview_col = preview_col.child(
-                                el()
-                                    .key("integrated_image_preview")
-                                    .w_full()
-                                    .min_h(220.0)
-                                    .max_h(340.0)
-                                    .radius(4.0)
-                                    .border(1.0, theme::border_default())
-                                    .pixels_fit(img.pixels(), SurfaceFit::Fit),
-                            );
+                    let panel_width = s.inspector_width.clamp(300.0, 860.0);
+                    let md_w = (panel_width - 76.0).max(220.0);
+                    let preview_img = s
+                        .active_image
+                        .as_ref()
+                        .filter(|(img_nid, _, _)| img_nid == &node.id)
+                        .map(|(_, _, img)| img)
+                        .or_else(|| s.card_image_previews.get(&node.id));
+                    if doc_format == DocFormat::Image {
+                        if let Some(img) = preview_img {
+                            let img_h = preview_image_height(img, md_w, 160.0, 320.0, 220.0);
+                            preview_col = preview_col.child(render_image_preview_box(
+                                "integrated_image_preview",
+                                img,
+                                img_h,
+                            ));
                         }
                     }
 
-                    let md_src = if node.content.trim().is_empty() {
-                        "*Empty document. Click **Ingest** to load `.pdf`, `.docx`, `.epub`, `.md`, `.odt`, `.pptx`, `.xlsx`, `.html`, `.rtf`, `.csv`, or switch to **Source** to write Markdown.*".to_string()
+                    if node.kind == NodeKind::Image {
+                        if !node.content.trim().is_empty() {
+                            let md_src = doc_reader::wrap_for_preview(&node.content, doc_format);
+                            let md_style = theme::markdown_style().text_width(md_w);
+                            let md_el = Markdown::new(&md_src)
+                                .selectable(true)
+                                .on_task(|s: &mut AppState, _block_key, offset, checked| {
+                                    s.toggle_selected_doc_task(offset, checked);
+                                })
+                                .render(&md_style);
+                            preview_col = preview_col.child(
+                                el().key("image_caption_markdown").w_full().child(md_el),
+                            );
+                        }
+                        preview_col
                     } else {
-                        doc_reader::wrap_for_preview(&node.content, doc_format)
-                    };
+                        let is_empty = node.content.trim().is_empty();
+                        let md_src = if is_empty {
+                            "*Empty document. Click **Ingest** to load `.pdf`, `.docx`, `.epub`, `.md`, `.odt`, `.pptx`, `.xlsx`, `.html`, `.rtf`, `.csv`, or switch to **Source** to write Markdown.*".to_string()
+                        } else {
+                            doc_reader::wrap_for_preview(&node.content, doc_format)
+                        };
 
-                    let panel_width = s.inspector_width.clamp(300.0, 860.0);
-                    let md_w = (panel_width - 76.0).max(220.0);
-                    let md_style = theme::markdown_style().text_width(md_w);
-                    let md_el = Markdown::new(&md_src)
-                        .selectable(true)
-                        .on_task(|s: &mut AppState, _block_key, offset, checked| {
-                            s.toggle_selected_doc_task(offset, checked);
-                        })
-                        .render(&md_style);
+                        let md_style = theme::markdown_style().text_width(md_w);
+                        let md_el = Markdown::new(&md_src)
+                            .selectable(true)
+                            .on_task(|s: &mut AppState, _block_key, offset, checked| {
+                                s.toggle_selected_doc_task(offset, checked);
+                            })
+                            .render(&md_style);
 
-                    preview_col.child(md_el)
+                        if is_empty {
+                            preview_col.child(
+                                el().key("empty_doc_placeholder").w_full().child(md_el),
+                            )
+                        } else {
+                            preview_col.child(md_el)
+                        }
+                    }
                 };
 
                 content = content.child(
@@ -1891,36 +1917,52 @@ fn render_readonly_doc_panel(
             .gap(10.0)
             .scroll(ScrollSpec { stick_bottom: false });
 
-        if let Some((img_nid, _, img)) = &s.active_image {
-            if img_nid == &node.id && doc_format == DocFormat::Image {
-                preview_col = preview_col.child(
-                    el()
-                        .key("integrated_image_preview")
-                        .w_full()
-                        .min_h(150.0)
-                        .max_h(220.0)
-                        .radius(4.0)
-                        .border(1.0, theme::border_default())
-                        .pixels_fit(img.pixels(), SurfaceFit::Fit),
-                );
+        let md_w = (panel_width - 56.0).max(220.0);
+        let preview_img = s
+            .active_image
+            .as_ref()
+            .filter(|(img_nid, _, _)| img_nid == &node.id)
+            .map(|(_, _, img)| img)
+            .or_else(|| s.card_image_previews.get(&node.id));
+        if doc_format == DocFormat::Image {
+            if let Some(img) = preview_img {
+                let img_h = preview_image_height(img, md_w, 150.0, 260.0, 190.0);
+                preview_col = preview_col.child(render_image_preview_box(
+                    "integrated_image_preview",
+                    img,
+                    img_h,
+                ));
             }
         }
 
         if node.kind == NodeKind::Image {
             preview_col = preview_col.child(render_image_vision_section(s, node));
-        }
-
-        let md_src = if node.content.trim().is_empty() {
-            "*Read-only mode. Click **✎ Edit** in the toolbar to ingest a file or write Markdown.*".to_string()
+            if !node.content.trim().is_empty() {
+                let md_src = doc_reader::wrap_for_preview(&node.content, doc_format);
+                let md_style = theme::markdown_style().text_width(md_w);
+                let md_el = Markdown::new(&md_src).selectable(true).render(&md_style);
+                preview_col = preview_col.child(
+                    el().key("image_caption_markdown").w_full().child(md_el),
+                );
+            }
+            preview_col
         } else {
-            doc_reader::wrap_for_preview(&node.content, doc_format)
-        };
+            let is_empty = node.content.trim().is_empty();
+            let md_src = if is_empty {
+                "*Read-only mode. Click **✎ Edit** in the toolbar to ingest a file or write Markdown.*".to_string()
+            } else {
+                doc_reader::wrap_for_preview(&node.content, doc_format)
+            };
 
-        let md_w = (panel_width - 56.0).max(220.0);
-        let md_style = theme::markdown_style().text_width(md_w);
-        let md_el = Markdown::new(&md_src).selectable(true).render(&md_style);
+            let md_style = theme::markdown_style().text_width(md_w);
+            let md_el = Markdown::new(&md_src).selectable(true).render(&md_style);
 
-        preview_col.child(md_el)
+            if is_empty {
+                preview_col.child(el().key("empty_doc_placeholder").w_full().child(md_el))
+            } else {
+                preview_col.child(md_el)
+            }
+        }
     };
 
     col()
@@ -2282,105 +2324,178 @@ fn render_specialized_node_inspector(
     }
 }
 
+fn preview_image_height(
+    img: &rune::Image,
+    avail_w: f32,
+    min_h: f32,
+    max_h: f32,
+    fallback_h: f32,
+) -> f32 {
+    if let Some([iw, ih]) = img.size() {
+        if iw > 0 && ih > 0 {
+            return (avail_w * (ih as f32 / iw as f32)).clamp(min_h, max_h);
+        }
+    }
+    fallback_h
+}
+
+fn render_image_preview_box(key: &'static str, img: &rune::Image, height: f32) -> El {
+    if let Some(err) = img.error() {
+        col()
+            .key(key)
+            .w_full()
+            .h(120.0)
+            .padding(10.0)
+            .radius(4.0)
+            .fill(theme::bg_input())
+            .border(1.0, theme::accent_danger().alpha(0.45))
+            .center()
+            .child(
+                text(format!("Image error: {}", err))
+                    .font(theme::STATUS_TEXT)
+                    .color(theme::accent_danger())
+                    .wrap(),
+            )
+    } else if img.is_ready() {
+        el()
+            .key(key)
+            .w_full()
+            .h(height)
+            .radius(4.0)
+            .fill(theme::bg_input())
+            .border(1.0, theme::border_default())
+            .pixels_fit(img.pixels(), SurfaceFit::Fit)
+    } else {
+        el()
+            .key(key)
+            .w_full()
+            .h(height)
+            .radius(4.0)
+            .fill(theme::bg_input())
+            .border(1.0, theme::border_subtle())
+            .center()
+            .child(
+                text("Loading image...")
+                    .font(theme::STATUS_TEXT)
+                    .color(theme::text_muted()),
+            )
+    }
+}
+
+fn vision_input_field(
+    key: &'static str,
+    state: &rune::TextEdit,
+    placeholder_text: &'static str,
+    on_edit_fn: impl Fn(&mut AppState) -> &mut rune::TextEdit + 'static,
+) -> El {
+    el()
+        .w_full()
+        .px(8.0)
+        .py(5.0)
+        .radius(4.0)
+        .fill(theme::bg_input())
+        .border(1.0, theme::border_default())
+        .child(
+            text_input(state, theme::STATUS_TEXT)
+                .key(key)
+                .single_line()
+                .w_full()
+                .color(theme::text_primary())
+                .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                .placeholder(placeholder_text, theme::text_muted())
+                .on_edit(on_edit_fn)
+                .on_input_change(|s: &mut AppState, _| {
+                    s.save_vision_api_settings();
+                })
+                .on_submit(|s: &mut AppState, _| {
+                    s.save_vision_api_settings();
+                }),
+        )
+}
+
 fn render_image_vision_section(s: &AppState, node: &Node) -> El {
     let nid_text = node.id.clone();
     let nid_formula = node.id.clone();
     let nid_spawn_note = node.id.clone();
     let nid_spawn_formula = node.id.clone();
+    let nid_clear_ocr = node.id.clone();
 
     let engine = s.reader_prefs.ocr_engine;
     let is_busy = s.vision_pending_nodes.contains(&node.id);
-    let neural_selected = engine == OcrEnginePreference::NeuralCrossPlatform
-        || (!cfg!(target_os = "windows") && engine == OcrEnginePreference::Auto);
+    let local_selected = engine != OcrEnginePreference::CloudVision;
 
-    let (status_lbl, status_color) = if is_busy {
-        ("Extracting...", theme::accent_claude())
-    } else if engine == OcrEnginePreference::WindowsNative {
-        if cfg!(target_os = "windows") {
-            ("Win OCR", theme::text_secondary())
-        } else {
-            ("Win Only", theme::text_muted())
-        }
-    } else if s.neural_models_ready {
-        ("Neural Ready", theme::accent_claude())
-    } else if cfg!(target_os = "windows") && engine == OcrEnginePreference::Auto {
-        ("Win OCR", theme::text_secondary())
-    } else {
-        ("Neural Not Cached", theme::text_muted())
-    };
-
-    let mut sec = col()
+    let mut action_row = row()
         .key("image_vision_section")
         .w_full()
-        .gap(8.0)
-        .padding(10.0)
-        .radius(4.0)
-        .fill(theme::bg_card())
-        .border(1.0, theme::border_subtle())
+        .center_y()
+        .gap(5.0)
         .child(
-            row()
-                .w_full()
-                .center_y()
-                .gap(6.0)
+            el()
+                .key("btn_img_ocr_text")
+                .h(26.0)
+                .px(10.0)
+                .radius(4.0)
+                .fill(theme::accent_primary())
+                .hover(theme::accent_primary().alpha(0.88))
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.run_image_ocr(&nid_text, OcrMode::PlainText);
+                })
                 .child(
-                    text("IMAGE OCR")
-                        .font(theme::SECTION_LABEL)
-                        .color(theme::text_muted()),
-                )
-                .child(el().grow(1.0))
-                .child(subtle_badge(status_lbl, status_color)),
+                    text(if is_busy { "Extracting..." } else { "Extract Text" })
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_inverted()),
+                ),
         )
         .child(
-            row()
-                .key("ocr_engine_selector")
-                .w_full()
-                .padding(2.0)
-                .gap(2.0)
+            el()
+                .key("btn_img_ocr_formula")
+                .h(26.0)
+                .px(9.0)
                 .radius(4.0)
-                .fill(theme::bg_input())
+                .fill(theme::bg_control())
+                .hover(theme::hover_subtle())
+                .border(1.0, theme::border_default())
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.run_image_ocr(&nid_formula, OcrMode::EquationFormula);
+                })
+                .child(
+                    text("Formula")
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_primary()),
+                ),
+        )
+        .child(el().grow(1.0))
+        .child(
+            el()
+                .key("btn_cycle_ocr_engine")
+                .h(24.0)
+                .px(7.0)
+                .radius(4.0)
+                .fill(theme::bg_control())
+                .hover(theme::hover_subtle())
                 .border(1.0, theme::border_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut AppState| {
+                    s.cycle_ocr_engine();
+                })
                 .child(
-                    seg_tab(
-                        "ocr_engine_auto",
-                        "Auto",
-                        engine == OcrEnginePreference::Auto,
-                    )
-                    .grow(1.0)
-                    .on_press(|s: &mut AppState| {
-                        s.set_ocr_engine(OcrEnginePreference::Auto);
-                    }),
-                )
-                .child(
-                    seg_tab(
-                        "ocr_engine_win",
-                        "Win OCR",
-                        engine == OcrEnginePreference::WindowsNative,
-                    )
-                    .grow(1.0)
-                    .on_press(|s: &mut AppState| {
-                        s.set_ocr_engine(OcrEnginePreference::WindowsNative);
-                    }),
-                )
-                .child(
-                    seg_tab(
-                        "ocr_engine_neural",
-                        "Neural",
-                        engine == OcrEnginePreference::NeuralCrossPlatform,
-                    )
-                    .grow(1.0)
-                    .on_press(|s: &mut AppState| {
-                        s.set_ocr_engine(OcrEnginePreference::NeuralCrossPlatform);
-                    }),
+                    text(engine.short_label())
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_secondary()),
                 ),
         );
 
-    if neural_selected && !s.neural_models_ready {
-        sec = sec.child(
+    if local_selected && !s.neural_models_ready {
+        action_row = action_row.child(
             el()
                 .key("btn_download_neural_models")
-                .w_full()
-                .h(28.0)
-                .px(8.0)
+                .h(24.0)
+                .px(7.0)
                 .radius(4.0)
                 .fill(theme::bg_control())
                 .hover(theme::hover_subtle())
@@ -2392,79 +2507,110 @@ fn render_image_vision_section(s: &AppState, node: &Node) -> El {
                 })
                 .child(
                     text(if s.vision_downloading_models {
-                        "Downloading models..."
+                        "..."
                     } else {
-                        "↓ Download Neural Models (~12 MB)"
+                        "↓ Models"
                     })
                     .font(theme::BADGE_TEXT)
-                    .color(theme::text_primary()),
+                    .color(theme::accent_claude()),
                 ),
         );
     }
 
-    sec = sec.child(
-        row()
-            .w_full()
-            .gap(6.0)
-            .child(
-                el()
-                    .key("btn_img_ocr_text")
-                    .grow(1.0)
-                    .h(28.0)
-                    .px(8.0)
-                    .radius(4.0)
-                    .fill(theme::accent_primary())
-                    .hover(theme::accent_primary().alpha(0.88))
-                    .center()
-                    .cursor(Cursor::Pointer)
-                    .on_press(move |s: &mut AppState| {
-                        s.run_image_ocr(&nid_text, OcrMode::PlainText);
-                    })
-                    .child(
-                        text(if is_busy { "Extracting..." } else { "Extract Text" })
-                            .font(theme::CONTROL_TEXT)
-                            .color(theme::text_inverted()),
-                    ),
+    action_row = action_row.child(
+        el()
+            .key("btn_toggle_vision_settings")
+            .size(24.0, 24.0)
+            .radius(4.0)
+            .fill(if s.vision_settings_open {
+                theme::bg_card_selected()
+            } else {
+                theme::bg_control()
+            })
+            .hover(theme::hover_subtle())
+            .border(
+                1.0,
+                if s.vision_settings_open {
+                    theme::border_strong()
+                } else {
+                    theme::border_subtle()
+                },
             )
+            .center()
+            .cursor(Cursor::Pointer)
+            .on_press(|s: &mut AppState| {
+                s.vision_settings_open = !s.vision_settings_open;
+            })
             .child(
-                el()
-                    .key("btn_img_ocr_formula")
-                    .grow(1.0)
-                    .h(28.0)
-                    .px(8.0)
-                    .radius(4.0)
-                    .fill(theme::bg_control())
-                    .hover(theme::hover_subtle())
-                    .border(1.0, theme::border_default())
-                    .center()
-                    .cursor(Cursor::Pointer)
-                    .on_press(move |s: &mut AppState| {
-                        s.run_image_ocr(&nid_formula, OcrMode::EquationFormula);
-                    })
-                    .child(
-                        text("Extract Formula")
-                            .font(theme::CONTROL_TEXT)
-                            .color(theme::text_primary()),
-                    ),
+                text("⚙")
+                    .font(theme::BADGE_TEXT)
+                    .color(if s.vision_settings_open || s.cloud_vision_configured() {
+                        theme::text_primary()
+                    } else {
+                        theme::text_muted()
+                    }),
             ),
     );
 
-    if let Some(err) = &s.vision_last_error {
+    let mut sec = col().w_full().gap(6.0).child(action_row);
+
+    if s.vision_settings_open {
+        let cloud_status = if s.cloud_vision_configured() {
+            "Ready"
+        } else {
+            "Not set"
+        };
+        let local_status = if s.neural_models_ready {
+            "Ready"
+        } else {
+            "~21 MB"
+        };
         sec = sec.child(
-            el()
-                .key("ocr_error_banner")
+            col()
+                .key("vision_api_settings_panel")
                 .w_full()
+                .gap(5.0)
                 .padding(8.0)
                 .radius(4.0)
-                .fill(theme::bg_input())
-                .border(1.0, theme::accent_danger().alpha(0.45))
+                .fill(theme::bg_card())
+                .border(1.0, theme::border_subtle())
+                .child(vision_input_field(
+                    "input_vision_api_key",
+                    &s.vision_api_key_edit,
+                    "API key (Gemini / DeepInfra / SiliconFlow / OpenAI)",
+                    |s| &mut s.vision_api_key_edit,
+                ))
+                .child(vision_input_field(
+                    "input_vision_base_url",
+                    &s.vision_base_url_edit,
+                    "Base URL (blank = Gemini, or https://.../v1)",
+                    |s| &mut s.vision_base_url_edit,
+                ))
+                .child(vision_input_field(
+                    "input_vision_model",
+                    &s.vision_model_edit,
+                    "Model (gemini-2.5-flash or deepseek-ai/DeepSeek-OCR)",
+                    |s| &mut s.vision_model_edit,
+                ))
                 .child(
-                    text(err)
-                        .font(theme::STATUS_TEXT)
-                        .color(theme::accent_danger())
-                        .w_full()
-                        .wrap(),
+                    text(format!(
+                        "Cloud AI: {} · PP-OCRv5: {}",
+                        cloud_status, local_status
+                    ))
+                    .font(theme::BADGE_TEXT)
+                    .color(theme::text_muted()),
                 ),
+        );
+    }
+
+    if let Some(err) = &s.vision_last_error {
+        sec = sec.child(
+            text(err)
+                .key("ocr_error_banner")
+                .font(theme::STATUS_TEXT)
+                .color(theme::accent_danger())
+                .w_full()
+                .wrap(),
         );
     }
 
@@ -2474,26 +2620,16 @@ fn render_image_vision_section(s: &AppState, node: &Node) -> El {
         .as_deref()
         .filter(|t| !t.trim().is_empty())
     {
-        let engine_badge = node
-            .meta
-            .ocr_engine
-            .as_deref()
-            .unwrap_or("OCR Output");
+        let engine_badge = node.meta.ocr_engine.as_deref().unwrap_or("OCR");
         sec = sec.child(
             col()
                 .key("ocr_extracted_preview")
                 .w_full()
                 .gap(6.0)
-                .padding(10.0)
+                .padding(8.0)
                 .radius(4.0)
                 .fill(theme::bg_input())
                 .border(1.0, theme::border_default())
-                .child(
-                    row()
-                        .w_full()
-                        .center_y()
-                        .child(subtle_badge(engine_badge, theme::accent_claude())),
-                )
                 .child(
                     text(extracted)
                         .font(theme::BODY_TEXT)
@@ -2504,49 +2640,34 @@ fn render_image_vision_section(s: &AppState, node: &Node) -> El {
                 .child(
                     row()
                         .w_full()
-                        .gap(6.0)
+                        .center_y()
+                        .gap(5.0)
                         .child(
-                            el()
-                                .key("btn_ocr_spawn_note")
-                                .grow(1.0)
-                                .h(26.0)
-                                .px(8.0)
-                                .radius(4.0)
-                                .fill(theme::bg_control())
-                                .hover(theme::hover_subtle())
-                                .border(1.0, theme::border_subtle())
-                                .center()
-                                .cursor(Cursor::Pointer)
-                                .on_press(move |s: &mut AppState| {
-                                    s.spawn_note_from_extracted_text(&nid_spawn_note);
-                                })
-                                .child(
-                                    text("Spawn Note →")
-                                        .font(theme::BADGE_TEXT)
-                                        .color(theme::text_primary()),
-                                ),
+                            text(engine_badge)
+                                .font(theme::BADGE_TEXT)
+                                .color(theme::text_muted())
+                                .truncate(),
                         )
-                        .child(
-                            el()
-                                .key("btn_ocr_spawn_formula")
-                                .grow(1.0)
-                                .h(26.0)
-                                .px(8.0)
-                                .radius(4.0)
-                                .fill(theme::bg_control())
-                                .hover(theme::hover_subtle())
-                                .border(1.0, theme::border_subtle())
-                                .center()
-                                .cursor(Cursor::Pointer)
-                                .on_press(move |s: &mut AppState| {
-                                    s.spawn_formula_from_extracted_text(&nid_spawn_formula);
-                                })
-                                .child(
-                                    text("Spawn Formula →")
-                                        .font(theme::BADGE_TEXT)
-                                        .color(theme::text_primary()),
-                                ),
-                        ),
+                        .child(el().grow(1.0))
+                        .child(quick_chip(
+                            "btn_ocr_spawn_note",
+                            "+ Note",
+                            theme::text_primary(),
+                            move |s| {
+                                s.spawn_note_from_extracted_text(&nid_spawn_note);
+                            },
+                        ))
+                        .child(quick_chip(
+                            "btn_ocr_spawn_formula",
+                            "+ Formula",
+                            theme::text_primary(),
+                            move |s| {
+                                s.spawn_formula_from_extracted_text(&nid_spawn_formula);
+                            },
+                        ))
+                        .child(quick_chip("btn_ocr_clear", "×", theme::text_muted(), move |s| {
+                            s.clear_extracted_text(&nid_clear_ocr);
+                        })),
                 ),
         );
     }
@@ -2557,10 +2678,17 @@ fn render_image_vision_section(s: &AppState, node: &Node) -> El {
 fn render_translation_section(s: &AppState, node: &Node) -> El {
     let nid_trans = node.id.clone();
     let nid_spawn_tr = node.id.clone();
+    let nid_clear_tr = node.id.clone();
     let active_lang = s.reader_prefs.target_language.to_ascii_lowercase();
     let is_busy = s.vision_pending_nodes.contains(&node.id);
 
-    let mut lang_row = row().key("translation_lang_chips").w_full().gap(4.0);
+    let mut lang_strip = row()
+        .key("translation_lang_chips")
+        .padding(2.0)
+        .gap(2.0)
+        .radius(4.0)
+        .fill(theme::bg_input())
+        .border(1.0, theme::border_subtle());
     for &(code, label) in SUPPORTED_LANGUAGES {
         let selected = active_lang == code;
         let key: &'static str = match code {
@@ -2572,45 +2700,47 @@ fn render_translation_section(s: &AppState, node: &Node) -> El {
             "ja" => "lang_ja",
             _ => "lang_en",
         };
-        lang_row = lang_row.child(
-            seg_tab(key, label, selected)
-                .grow(1.0)
+        lang_strip = lang_strip.child(
+            el()
+                .key(key)
+                .px(5.0)
+                .py(2.5)
+                .radius(3.0)
+                .fill(if selected {
+                    theme::bg_card_selected()
+                } else {
+                    Color::TRANSPARENT
+                })
+                .hover(theme::hover_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
                 .on_press(move |s: &mut AppState| {
                     s.set_target_language(code);
-                }),
+                })
+                .child(
+                    text(label)
+                        .font(theme::BADGE_TEXT)
+                        .color(if selected {
+                            theme::text_primary()
+                        } else {
+                            theme::text_muted()
+                        }),
+                ),
         );
     }
 
-    let mut tr_col = col()
+    let action_row = row()
         .key("translation_section")
         .w_full()
+        .center_y()
         .gap(6.0)
-        .padding(10.0)
-        .radius(4.0)
-        .fill(theme::bg_card())
-        .border(1.0, theme::border_subtle())
-        .child(
-            row()
-                .w_full()
-                .center_y()
-                .child(
-                    text("TRANSLATE")
-                        .font(theme::SECTION_LABEL)
-                        .color(theme::text_muted()),
-                )
-                .child(el().grow(1.0))
-                .child(subtle_badge(
-                    &active_lang.to_uppercase(),
-                    theme::text_secondary(),
-                )),
-        )
-        .child(lang_row)
+        .child(lang_strip)
+        .child(el().grow(1.0))
         .child(
             el()
                 .key("btn_translate_node")
-                .w_full()
-                .h(28.0)
-                .px(8.0)
+                .h(26.0)
+                .px(9.0)
                 .radius(4.0)
                 .fill(theme::bg_control())
                 .hover(theme::accent_claude().alpha(0.18))
@@ -2621,15 +2751,13 @@ fn render_translation_section(s: &AppState, node: &Node) -> El {
                     s.run_node_translation(&nid_trans, None);
                 })
                 .child(
-                    text(if is_busy {
-                        "Translating...".to_string()
-                    } else {
-                        format!("Translate → {}", active_lang.to_uppercase())
-                    })
-                    .font(theme::CONTROL_TEXT)
-                    .color(theme::text_primary()),
+                    text(if is_busy { "Translating..." } else { "Translate" })
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_primary()),
                 ),
         );
+
+    let mut tr_col = col().w_full().gap(6.0).child(action_row);
 
     if let Some(translated) = node
         .meta
@@ -2648,16 +2776,10 @@ fn render_translation_section(s: &AppState, node: &Node) -> El {
                 .key("translated_text_preview")
                 .w_full()
                 .gap(6.0)
-                .padding(10.0)
+                .padding(8.0)
                 .radius(4.0)
                 .fill(theme::bg_input())
                 .border(1.0, theme::accent_claude().alpha(0.35))
-                .child(
-                    row()
-                        .w_full()
-                        .center_y()
-                        .child(subtle_badge(&lang_badge, theme::accent_claude())),
-                )
                 .child(
                     text(translated)
                         .font(theme::BODY_TEXT)
@@ -2666,25 +2788,28 @@ fn render_translation_section(s: &AppState, node: &Node) -> El {
                         .wrap(),
                 )
                 .child(
-                    el()
-                        .key("btn_translate_spawn_note")
+                    row()
                         .w_full()
-                        .h(26.0)
-                        .px(8.0)
-                        .radius(4.0)
-                        .fill(theme::bg_control())
-                        .hover(theme::hover_subtle())
-                        .border(1.0, theme::border_subtle())
-                        .center()
-                        .cursor(Cursor::Pointer)
-                        .on_press(move |s: &mut AppState| {
-                            s.spawn_note_from_translation(&nid_spawn_tr);
-                        })
-                        .child(
-                            text("Spawn Translated Note →")
-                                .font(theme::BADGE_TEXT)
-                                .color(theme::text_primary()),
-                        ),
+                        .center_y()
+                        .gap(5.0)
+                        .child(subtle_badge(&lang_badge, theme::accent_claude()))
+                        .child(el().grow(1.0))
+                        .child(quick_chip(
+                            "btn_translate_spawn_note",
+                            "+ Note",
+                            theme::text_primary(),
+                            move |s| {
+                                s.spawn_note_from_translation(&nid_spawn_tr);
+                            },
+                        ))
+                        .child(quick_chip(
+                            "btn_translate_clear",
+                            "×",
+                            theme::text_muted(),
+                            move |s| {
+                                s.clear_translated_text(&nid_clear_tr);
+                            },
+                        )),
                 ),
         );
     }

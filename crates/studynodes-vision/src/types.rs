@@ -6,30 +6,30 @@ use thiserror::Error;
 /// Selectable OCR backend strategy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum OcrEnginePreference {
-    /// On Windows tries Tier 1 Windows Native OCR first and falls back to Tier 2 Neural OCR;
-    /// on macOS/Linux uses Tier 2 Neural OCR directly.
+    /// Uses Cloud Vision API when configured, otherwise falls back seamlessly to local PP-OCRv5.
     #[default]
     Auto,
-    /// Tier 1: Built-in `Windows.Media.Ocr` WinRT API (0 MB download, Windows 10/11 only).
-    WindowsNative,
-    /// Tier 2: Cross-platform pure-Rust neural OCR (`ocrs` + `rten`).
-    NeuralCrossPlatform,
+    /// Offline cross-platform PP-OCRv5 ONNX engine (auto-downloads ~21 MB once).
+    #[serde(alias = "NeuralCrossPlatform", alias = "WindowsNative")]
+    LocalPpOcrV5,
+    /// Cloud Vision API (DeepSeek-OCR / Gemini Vision / OpenAI-compatible endpoint).
+    CloudVision,
 }
 
 impl OcrEnginePreference {
     pub fn display_name(&self) -> &'static str {
         match self {
-            Self::Auto => "Auto (Tier 1 -> Tier 2)",
-            Self::WindowsNative => "Windows Native OCR (Tier 1)",
-            Self::NeuralCrossPlatform => "Neural OCR (Tier 2 Cross-Platform)",
+            Self::Auto => "Auto (Cloud AI -> PP-OCRv5)",
+            Self::LocalPpOcrV5 => "PP-OCRv5 (Local Offline)",
+            Self::CloudVision => "Cloud Vision API",
         }
     }
 
     pub fn short_label(&self) -> &'static str {
         match self {
             Self::Auto => "Auto",
-            Self::WindowsNative => "Win OCR",
-            Self::NeuralCrossPlatform => "Neural",
+            Self::LocalPpOcrV5 => "PP-OCRv5",
+            Self::CloudVision => "Cloud AI",
         }
     }
 }
@@ -58,21 +58,34 @@ pub struct TranslationOutput {
     pub backend_label: String,
 }
 
-/// On-disk availability of Tier 2 neural OCR weights.
+/// On-disk availability of local PP-OCRv5 ONNX weights and character dictionary.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NeuralModelStatus {
     pub detection_ready: bool,
     pub recognition_ready: bool,
+    pub dict_ready: bool,
     pub models_dir: PathBuf,
 }
 
 impl NeuralModelStatus {
     pub fn is_ready(&self) -> bool {
-        self.detection_ready && self.recognition_ready
+        self.detection_ready && self.recognition_ready && self.dict_ready
     }
 }
 
-/// Runtime configuration for local OCR and cross-platform translation.
+fn non_empty_env(names: &[&str]) -> Option<String> {
+    for name in names {
+        if let Ok(val) = std::env::var(name) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Runtime configuration for local OCR, Cloud Vision APIs, and cross-platform translation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VisionConfig {
     pub models_dir: PathBuf,
@@ -80,6 +93,9 @@ pub struct VisionConfig {
     pub ollama_url: String,
     pub ollama_model: String,
     pub gemini_api_key: Option<String>,
+    pub cloud_vision_api_key: Option<String>,
+    pub cloud_vision_base_url: String,
+    pub cloud_vision_model: String,
 }
 
 impl VisionConfig {
@@ -89,10 +105,32 @@ impl VisionConfig {
             engine: OcrEnginePreference::Auto,
             ollama_url: "http://127.0.0.1:11434".into(),
             ollama_model: "qwen2.5:3b".into(),
-            gemini_api_key: std::env::var("GEMINI_API_KEY")
-                .ok()
-                .filter(|k| !k.trim().is_empty()),
+            gemini_api_key: non_empty_env(&["GEMINI_API_KEY"]),
+            cloud_vision_api_key: non_empty_env(&[
+                "VISION_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "OPENAI_API_KEY",
+            ]),
+            cloud_vision_base_url: non_empty_env(&["VISION_API_URL"]).unwrap_or_default(),
+            cloud_vision_model: non_empty_env(&["VISION_MODEL"]).unwrap_or_default(),
         }
+    }
+
+    pub fn effective_cloud_api_key(&self) -> Option<&str> {
+        self.cloud_vision_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .or_else(|| {
+                self.gemini_api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|k| !k.is_empty())
+            })
+    }
+
+    pub fn has_cloud_vision(&self) -> bool {
+        !self.cloud_vision_base_url.trim().is_empty() || self.effective_cloud_api_key().is_some()
     }
 }
 
@@ -118,16 +156,16 @@ pub fn language_display_name(code: &str) -> &'static str {
     }
 }
 
-/// Errors returned by Tier 1 / Tier 2 OCR and translation pipelines.
+/// Errors returned by local PP-OCRv5, Cloud Vision API, and translation pipelines.
 #[derive(Debug, Error)]
 pub enum VisionError {
     #[error("Failed to read image: {0}")]
     ImageRead(String),
     #[error("OCR backend unavailable on this platform: {0}")]
     UnsupportedOnPlatform(String),
-    #[error("Tier 2 neural OCR models are not downloaded yet ({0})")]
+    #[error("PP-OCRv5 local models are not downloaded yet ({0})")]
     ModelsNotDownloaded(String),
-    #[error("Failed to download neural OCR model: {0}")]
+    #[error("Failed to download PP-OCRv5 model: {0}")]
     ModelDownloadFailed(String),
     #[error("OCR extraction failed: {0}")]
     OcrFailed(String),

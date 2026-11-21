@@ -236,6 +236,7 @@ pub struct AppState {
     pub doc_view_tab: DocViewTab,
     pub active_pdf: Option<ActivePdfState>,
     pub image_cache: ImageCache,
+    pub decoded_images: HashMap<PathBuf, rune::Image>,
     pub active_image: Option<(NodeId, PathBuf, rune::Image)>,
     pub card_pdf_previews: HashMap<(NodeId, usize), CardPdfPreview>,
     pub card_image_previews: HashMap<NodeId, rune::Image>,
@@ -259,6 +260,10 @@ pub struct AppState {
     pub vision_downloading_models: bool,
     pub neural_models_ready: bool,
     pub vision_last_error: Option<String>,
+    pub vision_settings_open: bool,
+    pub vision_api_key_edit: TextEdit,
+    pub vision_base_url_edit: TextEdit,
+    pub vision_model_edit: TextEdit,
 }
 
 impl Default for AppState {
@@ -321,8 +326,11 @@ impl AppState {
         let custom_reader_edit = TextEdit::new(&reader_prefs.custom_reader_path);
         let inspector_width = reader_prefs.inspector_width.clamp(300.0, 860.0);
         let reader_read_only = reader_prefs.read_only;
+        let vision_api_key_edit = TextEdit::new(&reader_prefs.vision_api_key);
+        let vision_base_url_edit = TextEdit::new(&reader_prefs.vision_base_url);
+        let vision_model_edit = TextEdit::new(&reader_prefs.vision_model);
         let neural_models_ready =
-            studynodes_vision::neural_ocr::model_status(&projects_dir.join("models")).is_ready();
+            studynodes_vision::ppocr::model_status(&projects_dir.join("models")).is_ready();
         let (vision_tx, vision_rx) = mpsc::channel();
 
         let mut state = Self {
@@ -367,6 +375,7 @@ impl AppState {
             doc_view_tab: DocViewTab::Preview,
             active_pdf: None,
             image_cache: ImageCache::new(Arc::new(|| {})),
+            decoded_images: HashMap::new(),
             active_image: None,
             card_pdf_previews: HashMap::new(),
             card_image_previews: HashMap::new(),
@@ -385,6 +394,10 @@ impl AppState {
             vision_downloading_models: false,
             neural_models_ready,
             vision_last_error: None,
+            vision_settings_open: false,
+            vision_api_key_edit,
+            vision_base_url_edit,
+            vision_model_edit,
         };
 
         state.refresh_recent_projects();
@@ -397,6 +410,30 @@ impl AppState {
         if let Ok(mut b) = self.reader_bridge.lock() {
             b.main_waker = Some(waker);
         }
+        // Rebind any pre-setup handles so background image decodes wake the real window.
+        if !self.decoded_images.is_empty()
+            || !self.card_image_previews.is_empty()
+            || self.active_image.is_some()
+        {
+            self.decoded_images.clear();
+            self.card_image_previews.clear();
+            self.active_image = None;
+            self.refresh_card_previews();
+            if let Some(nid) = self.selected_nodes.iter().next().cloned() {
+                self.ensure_reader_media_for_node(&nid, false);
+                self.push_reader_snapshot();
+            }
+        }
+    }
+
+    /// Return a cached `rune::Image` handle for `path`, decoding only once per asset path.
+    pub fn get_or_load_image(&mut self, path: &Path) -> rune::Image {
+        if let Some(img) = self.decoded_images.get(path) {
+            return img.clone();
+        }
+        let img = self.image_cache.file(path, 1024.0, 2.0);
+        self.decoded_images.insert(path.to_path_buf(), img.clone());
+        img
     }
 
     /// Scan `projects_dir` for existing `.studynodes` folders.
@@ -1041,8 +1078,9 @@ impl AppState {
                     .as_ref()
                     .is_some_and(|(id, p, _)| id == node_id && p == &asset_path);
                 if !already_loaded {
-                    let img = self.image_cache.file(&asset_path, 760.0, 2.0);
-                    self.active_image = Some((node_id.clone(), asset_path, img));
+                    let img = self.get_or_load_image(&asset_path);
+                    self.active_image = Some((node_id.clone(), asset_path.clone(), img.clone()));
+                    self.card_image_previews.insert(node_id.clone(), img);
                 }
                 if switch_tab {
                     self.doc_view_tab = DocViewTab::Preview;
@@ -1161,7 +1199,7 @@ impl AppState {
             }
             DocFormat::Image => {
                 if !self.card_image_previews.contains_key(node_id) {
-                    let img = self.image_cache.file(&asset_path, 280.0, 2.0);
+                    let img = self.get_or_load_image(&asset_path);
                     self.card_image_previews.insert(node_id.clone(), img);
                 }
             }
@@ -1256,6 +1294,13 @@ impl AppState {
                             let rel = (cn.pos.x - n.pos.x, cn.pos.y - n.pos.y);
                             let sz = node_world_size(cn);
                             child_map.insert(cid.clone(), (rel, sz));
+                            let c_asset = self.resolved_node_asset_path(&cn.id);
+                            let c_img = c_asset.as_ref().and_then(|p| {
+                                self.card_image_previews
+                                    .get(&cn.id)
+                                    .cloned()
+                                    .or_else(|| self.decoded_images.get(p).cloned())
+                            });
                             children_snaps.push(SectionChildSnapshot {
                                 id: cn.id.clone(),
                                 kind: cn.kind,
@@ -1265,7 +1310,8 @@ impl AppState {
                                 size: sz,
                                 meta: cn.meta.clone(),
                                 flipped: self.flipped_flashcards.contains(&cn.id),
-                                asset_path: self.resolved_node_asset_path(&cn.id),
+                                asset_path: c_asset,
+                                image_handle: c_img,
                             });
                         }
                     }
@@ -1319,6 +1365,15 @@ impl AppState {
                     (Vec::new(), Vec::new())
                 };
 
+                let active_image_handle = asset.as_ref().and_then(|p| {
+                    self.active_image
+                        .as_ref()
+                        .filter(|(aid, _, _)| aid == &n.id)
+                        .map(|(_, _, img)| img.clone())
+                        .or_else(|| self.card_image_previews.get(&n.id).cloned())
+                        .or_else(|| self.decoded_images.get(p).cloned())
+                });
+
                 (
                     n.id.clone(),
                     n.kind,
@@ -1332,6 +1387,7 @@ impl AppState {
                     sec_edges,
                     fmt,
                     asset,
+                    active_image_handle,
                 )
             })
         });
@@ -1358,6 +1414,7 @@ impl AppState {
                     section_edges,
                     doc_format,
                     asset_path,
+                    active_image_handle,
                 )) => ReaderSnapshot {
                     revision: rev,
                     project_title: self.graph.title.clone(),
@@ -1374,6 +1431,7 @@ impl AppState {
                     section_edges,
                     doc_format,
                     asset_path,
+                    active_image_handle,
                     doc_view_tab: self.doc_view_tab,
                     pdf_page_index,
                     pdf_page_count,
@@ -1638,6 +1696,14 @@ impl AppState {
                 }
                 ReaderCommand::SpawnNoteFromTranslation(node_id) => {
                     self.spawn_note_from_translation(&node_id);
+                    push_snap = true;
+                }
+                ReaderCommand::ClearExtractedText(node_id) => {
+                    self.clear_extracted_text(&node_id);
+                    push_snap = true;
+                }
+                ReaderCommand::ClearTranslatedText(node_id) => {
+                    self.clear_translated_text(&node_id);
                     push_snap = true;
                 }
             }
@@ -2799,19 +2865,85 @@ Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
         self.push_reader_snapshot();
     }
 
-    fn active_vision_service(&self) -> Arc<dyn VisionService> {
-        if let Some(over) = &self.vision_service_override {
-            return Arc::clone(over);
-        }
-        Arc::new(LocalVisionService::new(VisionConfig {
+    fn build_vision_config(&self) -> VisionConfig {
+        let env_cloud_key = ["VISION_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"]
+            .iter()
+            .find_map(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+            });
+        let pref_key = {
+            let trimmed = self.reader_prefs.vision_api_key.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        };
+        let cloud_vision_api_key = pref_key.clone().or(env_cloud_key);
+
+        let gemini_api_key = std::env::var("GEMINI_API_KEY")
+            .ok()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .or_else(|| pref_key.filter(|k| k.starts_with("AIza")));
+
+        let cloud_vision_base_url = {
+            let trimmed = self.reader_prefs.vision_base_url.trim();
+            if trimmed.is_empty() {
+                std::env::var("VISION_API_URL")
+                    .ok()
+                    .map(|v| v.trim().to_string())
+                    .unwrap_or_default()
+            } else {
+                trimmed.to_string()
+            }
+        };
+
+        let cloud_vision_model = {
+            let trimmed = self.reader_prefs.vision_model.trim();
+            if trimmed.is_empty() {
+                std::env::var("VISION_MODEL")
+                    .ok()
+                    .map(|v| v.trim().to_string())
+                    .unwrap_or_default()
+            } else {
+                trimmed.to_string()
+            }
+        };
+
+        VisionConfig {
             models_dir: self.projects_dir.join("models"),
             engine: self.reader_prefs.ocr_engine,
             ollama_url: self.reader_prefs.ollama_url.clone(),
             ollama_model: self.reader_prefs.ollama_model.clone(),
-            gemini_api_key: std::env::var("GEMINI_API_KEY")
-                .ok()
-                .filter(|k| !k.trim().is_empty()),
-        }))
+            gemini_api_key,
+            cloud_vision_api_key,
+            cloud_vision_base_url,
+            cloud_vision_model,
+        }
+    }
+
+    pub fn cloud_vision_configured(&self) -> bool {
+        self.build_vision_config().has_cloud_vision()
+    }
+
+    fn active_vision_service(&self) -> Arc<dyn VisionService> {
+        if let Some(over) = &self.vision_service_override {
+            return Arc::clone(over);
+        }
+        Arc::new(LocalVisionService::new(self.build_vision_config()))
+    }
+
+    pub fn save_vision_api_settings(&mut self) {
+        self.reader_prefs.vision_api_key = self.vision_api_key_edit.text.trim().to_string();
+        self.reader_prefs.vision_base_url = self.vision_base_url_edit.text.trim().to_string();
+        self.reader_prefs.vision_model = self.vision_model_edit.text.trim().to_string();
+        self.vision_last_error = None;
+        let _ = doc_reader::save_preferences(&self.projects_dir, &self.reader_prefs);
+        self.push_reader_snapshot();
     }
 
     pub fn set_ocr_engine(&mut self, engine: OcrEnginePreference) {
@@ -2821,6 +2953,33 @@ Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
         let _ = doc_reader::save_preferences(&self.projects_dir, &self.reader_prefs);
         self.status_message = format!("OCR Engine: {}", engine.display_name());
         self.push_reader_snapshot();
+    }
+
+    pub fn cycle_ocr_engine(&mut self) {
+        let next = match self.reader_prefs.ocr_engine {
+            OcrEnginePreference::Auto => OcrEnginePreference::LocalPpOcrV5,
+            OcrEnginePreference::LocalPpOcrV5 => OcrEnginePreference::CloudVision,
+            OcrEnginePreference::CloudVision => OcrEnginePreference::Auto,
+        };
+        self.set_ocr_engine(next);
+    }
+
+    pub fn clear_extracted_text(&mut self, node_id: &NodeId) {
+        if let Some(node) = self.graph.get_node_mut(node_id) {
+            node.meta.extracted_text = None;
+            node.meta.ocr_engine = None;
+        }
+        self.persist_graph_and_snapshot();
+        self.status_message = "Cleared extracted OCR text".into();
+    }
+
+    pub fn clear_translated_text(&mut self, node_id: &NodeId) {
+        if let Some(node) = self.graph.get_node_mut(node_id) {
+            node.meta.translated_text = None;
+            node.meta.target_language = None;
+        }
+        self.persist_graph_and_snapshot();
+        self.status_message = "Cleared translated text".into();
     }
 
     pub fn set_target_language(&mut self, lang: &str) {
@@ -2837,7 +2996,7 @@ Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
         self.push_reader_snapshot();
     }
 
-    /// Download Tier 2 cross-platform pure-Rust neural OCR weights in a non-blocking thread.
+    /// Download local PP-OCRv5 ONNX weights (~21 MB) in a non-blocking thread.
     pub fn download_neural_ocr_models(&mut self) {
         if self.vision_downloading_models {
             return;
@@ -2845,14 +3004,14 @@ Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
         let svc = self.active_vision_service();
         if svc.model_status().is_ready() {
             self.neural_models_ready = true;
-            self.status_message = "Tier 2 neural OCR models already cached".into();
+            self.status_message = "PP-OCRv5 models already cached".into();
             self.push_reader_snapshot();
             return;
         }
 
         self.vision_downloading_models = true;
         self.vision_last_error = None;
-        self.status_message = "Downloading Tier 2 neural OCR weights (~12 MB)...".into();
+        self.status_message = "Downloading PP-OCRv5 models (~21 MB)...".into();
         self.push_reader_snapshot();
 
         let tx = self.vision_tx.clone();
@@ -3006,7 +3165,7 @@ Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
                             self.neural_models_ready = st.is_ready();
                             self.vision_last_error = None;
                             self.status_message =
-                                "Tier 2 neural OCR models downloaded and cached".into();
+                                "PP-OCRv5 models downloaded and cached".into();
                         }
                         Err(err) => {
                             self.vision_last_error = Some(err.clone());

@@ -34,6 +34,7 @@ pub struct SectionChildSnapshot {
     pub meta: NodeMeta,
     pub flipped: bool,
     pub asset_path: Option<PathBuf>,
+    pub image_handle: Option<rune::Image>,
 }
 
 #[derive(Clone, Debug)]
@@ -61,6 +62,7 @@ pub struct ReaderSnapshot {
     pub section_edges: Vec<SectionEdgeSnapshot>,
     pub doc_format: DocFormat,
     pub asset_path: Option<PathBuf>,
+    pub active_image_handle: Option<rune::Image>,
     pub doc_view_tab: DocViewTab,
     pub pdf_page_index: usize,
     pub pdf_page_count: usize,
@@ -91,6 +93,7 @@ impl Default for ReaderSnapshot {
             section_edges: Vec::new(),
             doc_format: DocFormat::Markdown,
             asset_path: None,
+            active_image_handle: None,
             doc_view_tab: DocViewTab::Preview,
             pdf_page_index: 0,
             pdf_page_count: 1,
@@ -169,6 +172,8 @@ pub enum ReaderCommand {
     SetTargetLanguage(String),
     RunNodeTranslation(NodeId),
     SpawnNoteFromTranslation(NodeId),
+    ClearExtractedText(NodeId),
+    ClearTranslatedText(NodeId),
 }
 
 pub struct ReaderBridge {
@@ -299,13 +304,16 @@ impl PopoutReaderState {
             });
             for child in &snap.section_children {
                 if child.kind == NodeKind::Image {
-                    if let Some(path) = &child.asset_path {
+                    if let Some(handle) = &child.image_handle {
+                        let p = child.asset_path.clone().unwrap_or_default();
+                        self.section_images.insert(child.id.clone(), (p, handle.clone()));
+                    } else if let Some(path) = &child.asset_path {
                         let already = self
                             .section_images
                             .get(&child.id)
                             .is_some_and(|(p, _)| p == path);
                         if !already {
-                            let img = self.image_cache.file(path, 360.0, 2.0);
+                            let img = self.image_cache.file(path, 1024.0, 2.0);
                             self.section_images.insert(child.id.clone(), (path.clone(), img));
                         }
                     }
@@ -337,10 +345,13 @@ impl PopoutReaderState {
             }
         } else if snap.doc_format == DocFormat::Image {
             self.pdf_rendered_key = None;
-            if let Some(path) = &snap.asset_path {
+            if let Some(handle) = &snap.active_image_handle {
+                let p = snap.asset_path.clone().unwrap_or_default();
+                self.active_image = Some((p, handle.clone()));
+            } else if let Some(path) = &snap.asset_path {
                 let already = self.active_image.as_ref().is_some_and(|(p, _)| p == path);
                 if !already {
-                    let img = self.image_cache.file(path, 1000.0, 2.0);
+                    let img = self.image_cache.file(path, 1024.0, 2.0);
                     self.active_image = Some((path.clone(), img));
                 }
             } else {
@@ -373,6 +384,11 @@ pub fn open_reader_window(bridge: Arc<Mutex<ReaderBridge>>) -> WindowHandle {
             b.popout_waker = Some(waker);
             b.is_open = true;
         }
+        s.applied_revision = 0;
+        if s.snapshot.active_image_handle.is_none() {
+            s.active_image = None;
+        }
+        s.section_images.clear();
         s.sync_from_bridge();
     });
     spec.poll = Some(|s, _dt, _tx| s.sync_from_bridge());
@@ -2089,22 +2105,65 @@ fn render_popout_image(
     }
 
     if let Some((_, img)) = &s.active_image {
-        box_col = box_col.child(
-            el()
-                .key("popout_image_preview")
-                .w_full()
-                .min_h(340.0)
-                .max_h(540.0)
-                .radius(6.0)
-                .fill(theme::bg_input())
-                .border(1.0, theme::border_default())
-                .pixels_fit(img.pixels(), SurfaceFit::Fit),
-        );
+        let img_h = if let Some([iw, ih]) = img.size() {
+            if iw > 0 && ih > 0 {
+                (820.0 * (ih as f32 / iw as f32)).clamp(260.0, 520.0)
+            } else {
+                360.0
+            }
+        } else {
+            360.0
+        };
+        if let Some(err) = img.error() {
+            box_col = box_col.child(
+                col()
+                    .key("popout_image_preview")
+                    .w_full()
+                    .h(180.0)
+                    .radius(6.0)
+                    .fill(theme::bg_input())
+                    .border(1.0, theme::accent_danger().alpha(0.45))
+                    .center()
+                    .child(
+                        text(format!("Image error: {}", err))
+                            .font(theme::STATUS_TEXT)
+                            .color(theme::accent_danger())
+                            .wrap(),
+                    ),
+            );
+        } else if img.is_ready() {
+            box_col = box_col.child(
+                el()
+                    .key("popout_image_preview")
+                    .w_full()
+                    .h(img_h)
+                    .radius(6.0)
+                    .fill(theme::bg_input())
+                    .border(1.0, theme::border_default())
+                    .pixels_fit(img.pixels(), SurfaceFit::Fit),
+            );
+        } else {
+            box_col = box_col.child(
+                el()
+                    .key("popout_image_preview")
+                    .w_full()
+                    .h(img_h)
+                    .radius(6.0)
+                    .fill(theme::bg_input())
+                    .border(1.0, theme::border_subtle())
+                    .center()
+                    .child(
+                        text("Loading image...")
+                            .font(theme::STATUS_TEXT)
+                            .color(theme::text_muted()),
+                    ),
+            );
+        }
     } else {
         box_col = box_col.child(
             col()
                 .w_full()
-                .h(260.0)
+                .h(220.0)
                 .radius(6.0)
                 .fill(theme::bg_input())
                 .border(1.0, theme::border_default())
@@ -2117,156 +2176,106 @@ fn render_popout_image(
         );
     }
 
-    // OCR Engine Selector + Extract Text / Formula + Spawn + Translation
+    // Minimal 1-row OCR + Engine + Translation strip
     let nid_ocr_txt = node_id.clone();
     let nid_ocr_eq = node_id.clone();
     let nid_spawn_note = node_id.clone();
     let nid_spawn_eq = node_id.clone();
+    let nid_clear_ocr = node_id.clone();
     let nid_tr = node_id.clone();
     let nid_spawn_tr = node_id.clone();
+    let nid_clear_tr = node_id.clone();
     let engine = snap.ocr_engine;
     let is_busy = snap.vision_pending;
-    let neural_selected = engine == OcrEnginePreference::NeuralCrossPlatform
-        || (!cfg!(target_os = "windows") && engine == OcrEnginePreference::Auto);
+    let local_selected = engine != OcrEnginePreference::CloudVision;
 
-    let mut ocr_card = col()
+    let mut ocr_row = row()
         .key("popout_image_ocr_panel")
         .w_full()
-        .gap(10.0)
-        .padding(14.0)
-        .radius(6.0)
-        .fill(theme::bg_card())
-        .border(1.0, theme::border_default())
+        .center_y()
+        .gap(8.0)
         .child(
-            row()
-                .w_full()
-                .center_y()
-                .gap(8.0)
+            el()
+                .key("btn_popout_img_ocr_text")
+                .px(11.0)
+                .py(5.5)
+                .radius(4.0)
+                .fill(theme::accent_primary())
+                .hover(theme::accent_primary().alpha(0.88))
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut PopoutReaderState| {
+                    s.snapshot.vision_pending = true;
+                    s.send_cmd(ReaderCommand::RunImageOcr {
+                        node_id: nid_ocr_txt.clone(),
+                        mode: OcrMode::PlainText,
+                    });
+                })
                 .child(
-                    text("OCR & TRANSLATION")
-                        .font(theme::SECTION_LABEL)
-                        .color(theme::text_muted()),
-                )
-                .child(el().grow(1.0))
-                .child(
-                    row()
-                        .key("popout_ocr_engine_selector")
-                        .padding(2.0)
-                        .gap(2.0)
-                        .radius(4.0)
-                        .fill(theme::bg_input())
-                        .border(1.0, theme::border_subtle())
-                        .child(
-                            seg_btn(
-                                "popout_ocr_engine_auto",
-                                "Auto",
-                                engine == OcrEnginePreference::Auto,
-                            )
-                            .on_press(|s: &mut PopoutReaderState| {
-                                s.snapshot.ocr_engine = OcrEnginePreference::Auto;
-                                s.send_cmd(ReaderCommand::SetOcrEngine(OcrEnginePreference::Auto));
-                            }),
-                        )
-                        .child(
-                            seg_btn(
-                                "popout_ocr_engine_win",
-                                "Win OCR",
-                                engine == OcrEnginePreference::WindowsNative,
-                            )
-                            .on_press(|s: &mut PopoutReaderState| {
-                                s.snapshot.ocr_engine = OcrEnginePreference::WindowsNative;
-                                s.send_cmd(ReaderCommand::SetOcrEngine(
-                                    OcrEnginePreference::WindowsNative,
-                                ));
-                            }),
-                        )
-                        .child(
-                            seg_btn(
-                                "popout_ocr_engine_neural",
-                                "Neural",
-                                engine == OcrEnginePreference::NeuralCrossPlatform,
-                            )
-                            .on_press(|s: &mut PopoutReaderState| {
-                                s.snapshot.ocr_engine = OcrEnginePreference::NeuralCrossPlatform;
-                                s.send_cmd(ReaderCommand::SetOcrEngine(
-                                    OcrEnginePreference::NeuralCrossPlatform,
-                                ));
-                            }),
-                        ),
+                    text(if is_busy { "Extracting..." } else { "Extract Text" })
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_inverted()),
                 ),
         )
-        .child({
-            let mut action_bar = row()
-                .w_full()
-                .center_y()
-                .gap(8.0)
-                .child(
-                    el()
-                        .key("btn_popout_img_ocr_text")
-                        .px(12.0)
-                        .py(6.0)
-                        .radius(4.0)
-                        .fill(theme::accent_primary())
-                        .hover(theme::accent_primary().alpha(0.88))
-                        .cursor(Cursor::Pointer)
-                        .on_press(move |s: &mut PopoutReaderState| {
-                            s.snapshot.vision_pending = true;
-                            s.send_cmd(ReaderCommand::RunImageOcr {
-                                node_id: nid_ocr_txt.clone(),
-                                mode: OcrMode::PlainText,
-                            });
-                        })
-                        .child(
-                            text(if is_busy { "Extracting..." } else { "Extract Text" })
-                                .font(theme::CONTROL_TEXT)
-                                .color(theme::text_inverted()),
-                        ),
-                )
-                .child(toolbar_chip(
-                    "btn_popout_img_ocr_formula",
-                    "Extract Formula",
-                    theme::text_primary(),
-                    move |s| {
-                        s.snapshot.vision_pending = true;
-                        s.send_cmd(ReaderCommand::RunImageOcr {
-                            node_id: nid_ocr_eq.clone(),
-                            mode: OcrMode::EquationFormula,
-                        });
-                    },
-                ));
-            if neural_selected && !snap.neural_models_ready {
-                action_bar = action_bar.child(toolbar_chip(
-                    "btn_popout_download_neural",
-                    if snap.vision_downloading_models {
-                        "Downloading..."
-                    } else {
-                        "↓ Neural Models (~12 MB)"
-                    },
-                    theme::accent_claude(),
-                    |s| {
-                        s.snapshot.vision_downloading_models = true;
-                        s.send_cmd(ReaderCommand::DownloadNeuralModels);
-                    },
-                ));
-            }
-            action_bar
-        });
+        .child(toolbar_chip(
+            "btn_popout_img_ocr_formula",
+            "Formula",
+            theme::text_primary(),
+            move |s| {
+                s.snapshot.vision_pending = true;
+                s.send_cmd(ReaderCommand::RunImageOcr {
+                    node_id: nid_ocr_eq.clone(),
+                    mode: OcrMode::EquationFormula,
+                });
+            },
+        ))
+        .child(el().grow(1.0))
+        .child(toolbar_chip(
+            "btn_popout_cycle_ocr_engine",
+            engine.short_label(),
+            theme::text_secondary(),
+            |s| {
+                let next = match s.snapshot.ocr_engine {
+                    OcrEnginePreference::Auto => OcrEnginePreference::LocalPpOcrV5,
+                    OcrEnginePreference::LocalPpOcrV5 => OcrEnginePreference::CloudVision,
+                    OcrEnginePreference::CloudVision => OcrEnginePreference::Auto,
+                };
+                s.snapshot.ocr_engine = next;
+                s.send_cmd(ReaderCommand::SetOcrEngine(next));
+            },
+        ));
+
+    if local_selected && !snap.neural_models_ready {
+        ocr_row = ocr_row.child(toolbar_chip(
+            "btn_popout_download_neural",
+            if snap.vision_downloading_models {
+                "..."
+            } else {
+                "↓ Models"
+            },
+            theme::accent_claude(),
+            |s| {
+                s.snapshot.vision_downloading_models = true;
+                s.send_cmd(ReaderCommand::DownloadNeuralModels);
+            },
+        ));
+    }
+
+    let mut ocr_card = col()
+        .w_full()
+        .gap(8.0)
+        .padding(12.0)
+        .radius(6.0)
+        .fill(theme::bg_card())
+        .border(1.0, theme::border_subtle())
+        .child(ocr_row);
 
     if let Some(err) = &snap.vision_error {
         ocr_card = ocr_card.child(
-            el()
+            text(err)
+                .font(theme::STATUS_TEXT)
+                .color(theme::accent_danger())
                 .w_full()
-                .padding(8.0)
-                .radius(4.0)
-                .fill(theme::bg_input())
-                .border(1.0, theme::accent_danger().alpha(0.45))
-                .child(
-                    text(err)
-                        .font(theme::STATUS_TEXT)
-                        .color(theme::accent_danger())
-                        .w_full()
-                        .wrap(),
-                ),
+                .wrap(),
         );
     }
 
@@ -2276,21 +2285,16 @@ fn render_popout_image(
         .as_deref()
         .filter(|t| !t.trim().is_empty())
     {
-        let eng = snap.meta.ocr_engine.as_deref().unwrap_or("OCR Output");
+        let eng = snap.meta.ocr_engine.as_deref().unwrap_or("OCR");
         ocr_card = ocr_card.child(
             col()
                 .key("popout_ocr_extracted_preview")
                 .w_full()
                 .gap(8.0)
-                .padding(12.0)
+                .padding(10.0)
                 .radius(4.0)
                 .fill(theme::bg_input())
-                .border(1.0, theme::border_subtle())
-                .child(
-                    text(eng)
-                        .font(theme::BADGE_TEXT)
-                        .color(theme::accent_claude()),
-                )
+                .border(1.0, theme::border_default())
                 .child(
                     text(extracted)
                         .font(theme::BODY_TEXT)
@@ -2301,10 +2305,17 @@ fn render_popout_image(
                 .child(
                     row()
                         .w_full()
-                        .gap(8.0)
+                        .center_y()
+                        .gap(6.0)
+                        .child(
+                            text(eng)
+                                .font(theme::BADGE_TEXT)
+                                .color(theme::text_muted()),
+                        )
+                        .child(el().grow(1.0))
                         .child(toolbar_chip(
                             "btn_popout_ocr_spawn_note",
-                            "Spawn Note →",
+                            "+ Note",
                             theme::text_primary(),
                             move |s| {
                                 s.send_cmd(ReaderCommand::SpawnNoteFromOcr(nid_spawn_note.clone()));
@@ -2312,29 +2323,34 @@ fn render_popout_image(
                         ))
                         .child(toolbar_chip(
                             "btn_popout_ocr_spawn_formula",
-                            "Spawn Formula →",
+                            "+ Formula",
                             theme::text_primary(),
                             move |s| {
                                 s.send_cmd(ReaderCommand::SpawnFormulaFromOcr(
                                     nid_spawn_eq.clone(),
                                 ));
                             },
+                        ))
+                        .child(toolbar_chip(
+                            "btn_popout_ocr_clear",
+                            "×",
+                            theme::text_muted(),
+                            move |s| {
+                                s.snapshot.meta.extracted_text = None;
+                                s.send_cmd(ReaderCommand::ClearExtractedText(nid_clear_ocr.clone()));
+                            },
                         )),
                 ),
         );
     }
 
-    // Pop-Out Target Language + Translate strip
     let active_lang = snap.target_language.to_ascii_lowercase();
-    let mut lang_bar = row()
-        .w_full()
-        .center_y()
-        .gap(6.0)
-        .child(
-            text("TRANSLATE")
-                .font(theme::SECTION_LABEL)
-                .color(theme::text_muted()),
-        );
+    let mut lang_strip = row()
+        .padding(2.0)
+        .gap(2.0)
+        .radius(4.0)
+        .fill(theme::bg_input())
+        .border(1.0, theme::border_subtle());
     for &(code, label) in SUPPORTED_LANGUAGES {
         let key: &'static str = match code {
             "en" => "popout_lang_en",
@@ -2345,22 +2361,28 @@ fn render_popout_image(
             "ja" => "popout_lang_ja",
             _ => "popout_lang_en",
         };
-        lang_bar = lang_bar.child(seg_btn(key, label, active_lang == code).on_press(
+        lang_strip = lang_strip.child(seg_btn(key, label, active_lang == code).on_press(
             move |s: &mut PopoutReaderState| {
                 s.snapshot.target_language = code.to_string();
                 s.send_cmd(ReaderCommand::SetTargetLanguage(code.to_string()));
             },
         ));
     }
-    lang_bar = lang_bar.child(el().grow(1.0)).child(toolbar_chip(
-        "btn_popout_translate_node",
-        &format!("Translate → {}", active_lang.to_uppercase()),
-        theme::text_primary(),
-        move |s| {
-            s.snapshot.vision_pending = true;
-            s.send_cmd(ReaderCommand::RunNodeTranslation(nid_tr.clone()));
-        },
-    ));
+    let lang_bar = row()
+        .w_full()
+        .center_y()
+        .gap(8.0)
+        .child(lang_strip)
+        .child(el().grow(1.0))
+        .child(toolbar_chip(
+            "btn_popout_translate_node",
+            if is_busy { "Translating..." } else { "Translate" },
+            theme::text_primary(),
+            move |s| {
+                s.snapshot.vision_pending = true;
+                s.send_cmd(ReaderCommand::RunNodeTranslation(nid_tr.clone()));
+            },
+        ));
     ocr_card = ocr_card.child(lang_bar);
 
     if let Some(tr) = snap
@@ -2380,14 +2402,22 @@ fn render_popout_image(
                 .key("popout_translated_preview")
                 .w_full()
                 .gap(8.0)
-                .padding(12.0)
+                .padding(10.0)
                 .radius(4.0)
                 .fill(theme::bg_input())
                 .border(1.0, theme::accent_claude().alpha(0.35))
                 .child(
+                    text(tr)
+                        .font(theme::BODY_TEXT)
+                        .color(theme::text_primary())
+                        .w_full()
+                        .wrap(),
+                )
+                .child(
                     row()
                         .w_full()
                         .center_y()
+                        .gap(6.0)
                         .child(
                             text(tr_lang)
                                 .font(theme::BADGE_TEXT)
@@ -2396,21 +2426,25 @@ fn render_popout_image(
                         .child(el().grow(1.0))
                         .child(toolbar_chip(
                             "btn_popout_translate_spawn_note",
-                            "Spawn Translated Note →",
+                            "+ Note",
                             theme::text_primary(),
                             move |s| {
                                 s.send_cmd(ReaderCommand::SpawnNoteFromTranslation(
                                     nid_spawn_tr.clone(),
                                 ));
                             },
+                        ))
+                        .child(toolbar_chip(
+                            "btn_popout_translate_clear",
+                            "×",
+                            theme::text_muted(),
+                            move |s| {
+                                s.snapshot.meta.translated_text = None;
+                                s.send_cmd(ReaderCommand::ClearTranslatedText(
+                                    nid_clear_tr.clone(),
+                                ));
+                            },
                         )),
-                )
-                .child(
-                    text(tr)
-                        .font(theme::BODY_TEXT)
-                        .color(theme::text_primary())
-                        .w_full()
-                        .wrap(),
                 ),
         );
     }
@@ -2533,6 +2567,7 @@ mod tests {
                         },
                         flipped: false,
                         asset_path: None,
+                        image_handle: None,
                     },
                     SectionChildSnapshot {
                         id: NodeId::from_str("chk-1"),
@@ -2544,6 +2579,7 @@ mod tests {
                         meta: NodeMeta::default(),
                         flipped: false,
                         asset_path: None,
+                        image_handle: None,
                     },
                 ],
                 section_edges: vec![SectionEdgeSnapshot {
@@ -2716,10 +2752,10 @@ mod tests {
                 doc_format: DocFormat::Image,
                 meta: NodeMeta {
                     extracted_text: Some("Δ wᵢⱼ = η · xᵢ · yⱼ".into()),
-                    ocr_engine: Some("Tier 1 · Windows OCR (en-US)".into()),
+                    ocr_engine: Some("PP-OCRv5 (Local)".into()),
                     ..Default::default()
                 },
-                ocr_engine: OcrEnginePreference::NeuralCrossPlatform,
+                ocr_engine: OcrEnginePreference::LocalPpOcrV5,
                 neural_models_ready: false,
                 target_language: "es".into(),
                 read_only: true,
@@ -2743,7 +2779,9 @@ mod tests {
         for key in [
             "btn_popout_img_ocr_text",
             "btn_popout_download_neural",
+            "btn_popout_cycle_ocr_engine",
             "btn_popout_ocr_spawn_note",
+            "btn_popout_ocr_clear",
             "popout_lang_ja",
             "btn_popout_translate_node",
         ] {
@@ -2764,12 +2802,19 @@ mod tests {
             c,
             ReaderCommand::RunImageOcr { node_id, mode: OcrMode::PlainText } if node_id.as_str() == "img-1"
         )));
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            ReaderCommand::SetOcrEngine(OcrEnginePreference::CloudVision)
+        )));
         assert!(cmds
             .iter()
             .any(|c| matches!(c, ReaderCommand::DownloadNeuralModels)));
         assert!(cmds
             .iter()
             .any(|c| matches!(c, ReaderCommand::SpawnNoteFromOcr(id) if id.as_str() == "img-1")));
+        assert!(cmds
+            .iter()
+            .any(|c| matches!(c, ReaderCommand::ClearExtractedText(id) if id.as_str() == "img-1")));
         assert!(cmds
             .iter()
             .any(|c| matches!(c, ReaderCommand::SetTargetLanguage(l) if l == "ja")));
