@@ -7,14 +7,18 @@ use rune::{ImageCache, Pixels, TextEdit, Waker, WindowHandle};
 use serde::{Deserialize, Serialize};
 
 use studynodes_graph::coords::{ScreenPos, WorldPos};
-use studynodes_graph::model::{EdgeId, NodeId, NodeKind, PortId};
+use studynodes_graph::model::{EdgeId, EdgeStatus, NodeId, NodeKind, PortDirection, PortId};
 use studynodes_graph::{CommandHistory, ProjectBundle, StudyGraph};
 use studynodes_llm::LlmProvider;
 
 use crate::doc_reader::{
     self, DocFormat, ReaderMode, ReaderPreferences, extract_document_markdown, render_pdf_page,
 };
-use crate::reader_window::{ReaderBridge, ReaderCommand, ReaderSnapshot, open_reader_window};
+use crate::formula_math;
+use crate::reader_window::{
+    ReaderBridge, ReaderCommand, ReaderSnapshot, SectionChildSnapshot, SectionEdgeSnapshot,
+    can_pop_out, open_reader_window,
+};
 use crate::touchpad_win32::TouchpadEvent;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,13 +123,13 @@ pub fn node_base_size(kind: NodeKind) -> (f32, f32) {
     match kind {
         NodeKind::Note => (280.0, 170.0),
         NodeKind::Document => (272.0, 214.0),
-        NodeKind::Image => (248.0, 180.0),
+        NodeKind::Image => (264.0, 200.0),
         NodeKind::LlmSynthesis => (260.0, 130.0),
         NodeKind::Concept => (240.0, 110.0),
         NodeKind::Section => (640.0, 400.0),
         NodeKind::Excerpt => (265.0, 165.0),
         NodeKind::Flashcard => (270.0, 185.0),
-        NodeKind::Formula => (256.0, 140.0),
+        NodeKind::Formula => (272.0, 168.0),
         NodeKind::Checklist => (260.0, 195.0),
         NodeKind::Sequence => (248.0, 145.0),
     }
@@ -220,6 +224,9 @@ pub struct AppState {
     pub show_block_menu: bool,
     pub flipped_flashcards: HashSet<NodeId>,
     pub inspector_answer_edit: TextEdit,
+    pub hide_all_edge_labels: bool,
+    pub wire_anim_phase: f32,
+    pub popped_out_node_id: Option<NodeId>,
 }
 
 impl Default for AppState {
@@ -332,6 +339,9 @@ impl AppState {
             show_block_menu: false,
             flipped_flashcards: HashSet::new(),
             inspector_answer_edit: TextEdit::new(""),
+            hide_all_edge_labels: false,
+            wire_anim_phase: 0.35,
+            popped_out_node_id: None,
         };
 
         state.refresh_recent_projects();
@@ -427,6 +437,7 @@ impl AppState {
         self.ai_panel_open = tab.ai_panel_open;
         self.show_block_menu = false;
         self.flipped_flashcards.clear();
+        self.popped_out_node_id = None;
         self.active_pdf = None;
         self.active_image = None;
         self.card_pdf_previews.clear();
@@ -1174,15 +1185,107 @@ impl AppState {
     /// Push the active document/node snapshot to the pop-out reader bridge and wake it.
     pub fn push_reader_snapshot(&mut self) {
         let selected_id = self.selected_nodes.iter().next().cloned();
-        let node_snap = selected_id.as_ref().and_then(|id| {
+        let target_id = selected_id
+            .as_ref()
+            .filter(|id| self.graph.get_node(id).is_some_and(|n| can_pop_out(n.kind)))
+            .cloned()
+            .or_else(|| {
+                self.popped_out_node_id
+                    .as_ref()
+                    .filter(|id| self.graph.get_node(id).is_some_and(|n| can_pop_out(n.kind)))
+                    .cloned()
+            });
+
+        let snapshot_data = target_id.as_ref().and_then(|id| {
             self.graph.get_node(id).map(|n| {
                 let fmt = self.node_doc_format(id);
                 let asset = self.resolved_node_asset_path(id);
+                let flipped = self.flipped_flashcards.contains(id);
+                let sec_size = node_world_size(n);
+
+                let (sec_children, sec_edges) = if n.kind == NodeKind::Section {
+                    let captured = self.capture_section_children(&n.id);
+                    let mut child_map: HashMap<NodeId, ((f32, f32), (f32, f32))> = HashMap::new();
+                    let mut children_snaps = Vec::new();
+                    for (cid, _) in &captured {
+                        if let Some(cn) = self.graph.get_node(cid) {
+                            let rel = (cn.pos.x - n.pos.x, cn.pos.y - n.pos.y);
+                            let sz = node_world_size(cn);
+                            child_map.insert(cid.clone(), (rel, sz));
+                            children_snaps.push(SectionChildSnapshot {
+                                id: cn.id.clone(),
+                                kind: cn.kind,
+                                title: cn.title.clone(),
+                                content: cn.content.clone(),
+                                rel_pos: rel,
+                                size: sz,
+                                meta: cn.meta.clone(),
+                                flipped: self.flipped_flashcards.contains(&cn.id),
+                                asset_path: self.resolved_node_asset_path(&cn.id),
+                            });
+                        }
+                    }
+                    children_snaps.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+
+                    let mut edges_snaps = Vec::new();
+                    let mut sorted_edges: Vec<_> = self.graph.edges.values().collect();
+                    sorted_edges.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+                    for edge in sorted_edges {
+                        if let (Some((f_rel, f_sz)), Some((t_rel, t_sz))) = (
+                            child_map.get(&edge.from.node),
+                            child_map.get(&edge.to.node),
+                        ) {
+                            let from_is_in = self
+                                .graph
+                                .get_node(&edge.from.node)
+                                .and_then(|fn_node| fn_node.ports.iter().find(|p| p.id == edge.from.port))
+                                .is_some_and(|p| p.direction == PortDirection::Input);
+                            let to_is_out = self
+                                .graph
+                                .get_node(&edge.to.node)
+                                .and_then(|tn_node| tn_node.ports.iter().find(|p| p.id == edge.to.port))
+                                .is_some_and(|p| p.direction == PortDirection::Output);
+
+                            let from_xy = (
+                                if from_is_in { f_rel.0 } else { f_rel.0 + f_sz.0 },
+                                f_rel.1 + f_sz.1 * 0.5,
+                            );
+                            let to_xy = (
+                                if to_is_out { t_rel.0 + t_sz.0 } else { t_rel.0 },
+                                t_rel.1 + t_sz.1 * 0.5,
+                            );
+                            let is_ghost = edge.status == EdgeStatus::Proposed;
+                            let label = if edge.label.is_empty() {
+                                format!("[{}]", edge.relation.display_label())
+                            } else {
+                                format!("[{}] {}", edge.relation.display_label(), edge.label)
+                            };
+                            edges_snaps.push(SectionEdgeSnapshot {
+                                from_rel: from_xy,
+                                to_rel: to_xy,
+                                label,
+                                is_ghost,
+                                hide_label: (edge.hide_label || self.hide_all_edge_labels) && !is_ghost,
+                            });
+                        }
+                    }
+
+                    (children_snaps, edges_snaps)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+
                 (
                     n.id.clone(),
+                    n.kind,
                     n.title.clone(),
                     n.content.clone(),
                     n.summary.clone(),
+                    n.meta.clone(),
+                    flipped,
+                    sec_size,
+                    sec_children,
+                    sec_edges,
                     fmt,
                     asset,
                 )
@@ -1192,43 +1295,52 @@ impl AppState {
         if let Ok(mut b) = self.reader_bridge.lock() {
             let rev = b.snapshot.revision.saturating_add(1);
             let (pdf_page_index, pdf_page_count, pdf_zoom) = match &self.active_pdf {
-                Some(p) if selected_id.as_ref() == Some(&p.node_id) => {
+                Some(p) if target_id.as_ref() == Some(&p.node_id) => {
                     (p.page_index, p.page_count.max(1), p.zoom)
                 }
                 _ => (0, 1, 1.5),
             };
-            b.snapshot = match node_snap {
-                Some((id, title, content, summary, doc_format, asset_path)) => {
-                    ReaderSnapshot {
-                        revision: rev,
-                        project_title: self.graph.title.clone(),
-                        node_id: Some(id),
-                        title,
-                        content,
-                        summary,
-                        doc_format,
-                        asset_path,
-                        doc_view_tab: self.doc_view_tab,
-                        pdf_page_index,
-                        pdf_page_count,
-                        pdf_zoom,
-                        read_only: self.reader_read_only,
-                    }
-                }
+            b.snapshot = match snapshot_data {
+                Some((
+                    id,
+                    node_kind,
+                    title,
+                    content,
+                    summary,
+                    meta,
+                    flashcard_flipped,
+                    section_size,
+                    section_children,
+                    section_edges,
+                    doc_format,
+                    asset_path,
+                )) => ReaderSnapshot {
+                    revision: rev,
+                    project_title: self.graph.title.clone(),
+                    node_id: Some(id),
+                    node_kind,
+                    title,
+                    content,
+                    summary,
+                    meta,
+                    flashcard_flipped,
+                    section_size,
+                    section_children,
+                    section_edges,
+                    doc_format,
+                    asset_path,
+                    doc_view_tab: self.doc_view_tab,
+                    pdf_page_index,
+                    pdf_page_count,
+                    pdf_zoom,
+                    read_only: self.reader_read_only,
+                },
                 None => ReaderSnapshot {
                     revision: rev,
                     project_title: self.graph.title.clone(),
-                    node_id: None,
-                    title: String::new(),
-                    content: String::new(),
-                    summary: None,
-                    doc_format: DocFormat::Markdown,
-                    asset_path: None,
                     doc_view_tab: self.doc_view_tab,
-                    pdf_page_index: 0,
-                    pdf_page_count: 1,
-                    pdf_zoom: 1.5,
                     read_only: self.reader_read_only,
+                    ..ReaderSnapshot::default()
                 },
             };
             if b.is_open {
@@ -1241,6 +1353,17 @@ impl AppState {
     /// directly in Read-Only Focus Mode.
     pub fn pop_out_reader(&mut self) {
         self.sync_node_edits();
+        let selected_id = self.selected_nodes.iter().next().cloned();
+        if let Some(ref sid) = selected_id {
+            if let Some(n) = self.graph.get_node(sid) {
+                if !can_pop_out(n.kind) {
+                    self.status_message =
+                        "Checklists and Excerpts stay inline on canvas".into();
+                    return;
+                }
+            }
+        }
+        self.popped_out_node_id = selected_id;
         self.reader_read_only = true;
         self.reader_prefs.read_only = true;
         let _ = doc_reader::save_preferences(&self.projects_dir, &self.reader_prefs);
@@ -1297,6 +1420,7 @@ impl AppState {
                     self.inspector_popped_out = false;
                     self.inspector_open = true;
                     self.popout_window = None;
+                    self.popped_out_node_id = None;
                     self.status_message = "Docked reader back into workspace".into();
                 }
                 ReaderCommand::WindowClosed => {
@@ -1305,6 +1429,7 @@ impl AppState {
                         self.inspector_open = true;
                     }
                     self.popout_window = None;
+                    self.popped_out_node_id = None;
                 }
                 ReaderCommand::SetReadOnly(ro) => {
                     self.set_reader_read_only(ro);
@@ -1365,6 +1490,67 @@ impl AppState {
                 }
                 ReaderCommand::ExplainAi(node_id) => {
                     self.explain_node_ai(&node_id);
+                    push_snap = true;
+                }
+                ReaderCommand::FlipFlashcard(node_id) => {
+                    self.toggle_flashcard_flip(&node_id);
+                    push_snap = true;
+                }
+                ReaderCommand::SetFlashcardMastery { node_id, mastery } => {
+                    self.set_flashcard_mastery(&node_id, &mastery);
+                    push_snap = true;
+                }
+                ReaderCommand::UpdateFlashcardAnswer { node_id, answer } => {
+                    if let Some(n) = self.graph.get_node_mut(&node_id) {
+                        if n.kind == NodeKind::Flashcard {
+                            n.meta.answer = if answer.trim().is_empty() {
+                                None
+                            } else {
+                                Some(answer.clone())
+                            };
+                        }
+                    }
+                    if self.selected_nodes.contains(&node_id) {
+                        self.inspector_answer_edit = TextEdit::new(&answer);
+                    }
+                    if let Some(bundle) = &self.bundle {
+                        let _ = bundle.save_graph_atomic(&self.graph);
+                    }
+                    push_snap = true;
+                }
+                ReaderCommand::SetFormulaLanguage { node_id, language } => {
+                    self.set_formula_language(&node_id, &language);
+                    push_snap = true;
+                }
+                ReaderCommand::FormatFormula(node_id) => {
+                    self.format_formula_node(&node_id);
+                    push_snap = true;
+                }
+                ReaderCommand::InsertFormulaSymbol { node_id, symbol } => {
+                    self.insert_formula_symbol(&node_id, &symbol);
+                    push_snap = true;
+                }
+                ReaderCommand::AddNextSequenceStep(node_id) => {
+                    if let Some(next_id) = self.add_next_sequence_step(&node_id) {
+                        if self.inspector_popped_out {
+                            self.popped_out_node_id = Some(next_id);
+                        }
+                    }
+                    push_snap = true;
+                }
+                ReaderCommand::ToggleSectionFramed(node_id) => {
+                    self.toggle_section_framed(&node_id);
+                    push_snap = true;
+                }
+                ReaderCommand::ToggleChecklistItem {
+                    node_id,
+                    task_index,
+                } => {
+                    self.toggle_checklist_item_on_node(&node_id, task_index);
+                    push_snap = true;
+                }
+                ReaderCommand::IngestImagePath { node_id, path } => {
+                    self.ingest_file_into_node(&node_id, &path);
                     push_snap = true;
                 }
             }
@@ -1568,7 +1754,12 @@ impl AppState {
     pub fn select_node(&mut self, id: NodeId, additive: bool) {
         if !additive && self.selected_nodes.len() == 1 && self.selected_nodes.contains(&id) {
             let mut open_doc = false;
+            let mut popout_sync = false;
             if let Some(n) = self.graph.get_node(&id) {
+                if self.inspector_popped_out && can_pop_out(n.kind) {
+                    self.popped_out_node_id = Some(id.clone());
+                    popout_sync = true;
+                }
                 if matches!(n.kind, NodeKind::Document | NodeKind::Image) {
                     if !self.inspector_popped_out {
                         self.inspector_open = true;
@@ -1579,6 +1770,8 @@ impl AppState {
             }
             if open_doc {
                 self.ensure_reader_media_for_node(&id, false);
+            }
+            if open_doc || popout_sync {
                 self.push_reader_snapshot();
             }
             return;
@@ -1607,10 +1800,13 @@ impl AppState {
                 }
                 self.ai_panel_open = false;
                 self.editing_node_id = None;
-            } else if n.kind == NodeKind::Note {
+            } else if matches!(n.kind, NodeKind::Note | NodeKind::Formula) {
                 self.editing_node_id = Some(id.clone());
             } else {
                 self.editing_node_id = None;
+            }
+            if self.inspector_popped_out && can_pop_out(n.kind) {
+                self.popped_out_node_id = Some(id.clone());
             }
         }
 
@@ -1762,6 +1958,100 @@ impl AppState {
         self.status_message = "Updated checklist task".into();
     }
 
+    pub fn toggle_edge_hide_label(&mut self, edge_id: &EdgeId, hide: bool) {
+        if let Some(edge) = self.graph.get_edge_mut(edge_id) {
+            edge.hide_label = hide;
+        }
+        self.persist_graph_and_snapshot();
+        self.status_message = if hide {
+            "Edge label hidden".into()
+        } else {
+            "Edge label visible".into()
+        };
+    }
+
+    pub fn toggle_all_edge_labels(&mut self) {
+        self.hide_all_edge_labels = !self.hide_all_edge_labels;
+        self.push_reader_snapshot();
+        self.status_message = if self.hide_all_edge_labels {
+            "All connector labels hidden".into()
+        } else {
+            "Connector labels visible".into()
+        };
+    }
+
+    pub fn insert_formula_symbol(&mut self, node_id: &NodeId, sym: &str) {
+        let is_selected = self.selected_nodes.contains(node_id);
+        if is_selected && self.canvas_content_edit.focused {
+            self.canvas_content_edit.insert(sym);
+            self.sync_from_canvas_edits();
+            self.status_message = format!("Inserted {}", sym);
+            return;
+        }
+        if is_selected && self.inspector_content_edit.focused {
+            self.inspector_content_edit.insert(sym);
+            self.sync_from_inspector_edits();
+            self.status_message = format!("Inserted {}", sym);
+            return;
+        }
+
+        if let Some(node) = self.graph.get_node_mut(node_id) {
+            node.content.push_str(sym);
+            if is_selected {
+                self.canvas_content_edit = TextEdit::new(&node.content);
+                self.inspector_content_edit = TextEdit::new(&node.content);
+            }
+        }
+        self.persist_graph_and_snapshot();
+        self.status_message = format!("Inserted {}", sym);
+    }
+
+    pub fn format_formula_node(&mut self, node_id: &NodeId) {
+        self.sync_node_edits();
+        let is_selected = self.selected_nodes.contains(node_id);
+        let Some(node) = self.graph.get_node_mut(node_id) else {
+            return;
+        };
+        let expanded = formula_math::expand_math_shorthand(&node.content);
+        if expanded != node.content {
+            node.content = expanded;
+            if is_selected {
+                self.canvas_content_edit = TextEdit::new(&node.content);
+                self.inspector_content_edit = TextEdit::new(&node.content);
+            }
+            self.persist_graph_and_snapshot();
+            self.status_message = "Formatted math notation".into();
+        } else {
+            self.status_message = "Formula already formatted".into();
+        }
+    }
+
+    pub fn maybe_auto_expand_formula_on_canvas_edit(&mut self) {
+        let Some(id) = self.selected_nodes.iter().next().cloned() else {
+            return;
+        };
+        let Some((is_formula, is_code)) = self.graph.get_node(&id).map(|n| {
+            let lang = n.meta.language.as_deref().unwrap_or("MATH");
+            (
+                n.kind == NodeKind::Formula,
+                lang.eq_ignore_ascii_case("RUST") || lang.eq_ignore_ascii_case("PY"),
+            )
+        }) else {
+            return;
+        };
+        if !is_formula || is_code {
+            return;
+        }
+
+        if let Some(expanded) = formula_math::expand_trailing_command_on_space(&self.canvas_content_edit.text) {
+            let was_focused = self.canvas_content_edit.focused;
+            let mut next_edit = TextEdit::new(&expanded);
+            next_edit.focused = was_focused;
+            self.canvas_content_edit = next_edit;
+            self.sync_from_canvas_edits();
+        }
+    }
+
     /// Spawn a specialized Phase 2 study node with clean monochrome defaults.
     pub fn add_study_node(&mut self, kind: NodeKind, pos_opt: Option<WorldPos>) -> NodeId {
         self.show_block_menu = false;
@@ -1787,6 +2077,7 @@ impl AppState {
 
         let title = match kind {
             NodeKind::Section => "New Section".to_string(),
+            NodeKind::Image => "New Image".to_string(),
             NodeKind::Excerpt => "Source Excerpt".to_string(),
             NodeKind::Flashcard => "Recall Question".to_string(),
             NodeKind::Formula => "Key Equation".to_string(),
@@ -2082,6 +2373,9 @@ impl AppState {
         self.flipped_flashcards.remove(id);
         if let Some((removed, edges)) = self.graph.remove_node(id) {
             self.selected_nodes.remove(id);
+            if self.popped_out_node_id.as_ref() == Some(id) {
+                self.popped_out_node_id = None;
+            }
             if self.editing_node_id.as_ref() == Some(id) {
                 self.editing_node_id = None;
             }
@@ -2327,6 +2621,7 @@ Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
             if node.title.is_empty()
                 || node.title == "New Document"
                 || node.title == "New Note"
+                || node.title == "New Image"
             {
                 node.title = filename.clone();
             }

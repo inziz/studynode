@@ -304,6 +304,9 @@ pub struct Edge {
     pub note: String,
     pub provenance: EdgeProvenance,
     pub status: EdgeStatus,
+    /// When true, the edge text label pill is hidden on canvas to keep diagrams uncluttered.
+    #[serde(default)]
+    pub hide_label: bool,
 }
 
 impl Edge {
@@ -317,6 +320,7 @@ impl Edge {
             note: String::new(),
             provenance: EdgeProvenance::User,
             status: EdgeStatus::Accepted,
+            hide_label: false,
         }
     }
 
@@ -336,6 +340,28 @@ impl Edge {
             note: note.into(),
             provenance: EdgeProvenance::Llm,
             status: EdgeStatus::Proposed,
+            hide_label: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_edge_hide_label_backward_compat() {
+        let legacy_edge_json = r#"{
+            "id": "e1",
+            "from": { "node": "n1", "port": "out_main" },
+            "to": { "node": "n2", "port": "in_main" },
+            "relation": "Supports",
+            "label": "Validates",
+            "note": "",
+            "provenance": "User",
+            "status": "Accepted"
+        }"#;
+        let edge: Edge = serde_json::from_str(legacy_edge_json).expect("legacy edge json");
+        assert!(!edge.hide_label);
     }
 }

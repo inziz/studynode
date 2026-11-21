@@ -8,6 +8,7 @@ use studynodes_graph::model::{EdgeRelation, NodeKind};
 use studynodes_llm::LlmProvider;
 
 use crate::doc_reader::{self, DocFormat, ReaderMode};
+use crate::formula_math;
 use crate::state::{AppState, DocViewTab};
 use crate::theme;
 
@@ -564,85 +565,100 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                                             }),
                                     ),
                             ),
-                    )
-                    // Concise Document Action Strip
+                    );
+                // Concise Document / Image Action Strip
+                let is_img_kind = node_kind == NodeKind::Image;
+                let mut doc_actions = row()
+                    .w_full()
+                    .gap(6.0)
                     .child(
-                        row()
-                            .w_full()
-                            .gap(6.0)
-                            .child(
-                                el()
-                                    .key("btn_doc_ingest")
-                                    .grow(1.0)
-                                    .h(28.0)
-                                    .px(8.0)
-                                    .radius(4.0)
-                                    .fill(theme::accent_primary())
-                                    .hover(theme::accent_primary().alpha(0.88))
-                                    .center()
-                                    .cursor(Cursor::Pointer)
-                                    .on_press_tx(move |_s: &mut AppState, tx: &mut Tx| {
-                                        let opts = FileDialogOptions {
-                                            title: "Ingest Document File".into(),
-                                            ..Default::default()
-                                        }
-                                        .filter(
-                                            "All Documents",
-                                            &[
-                                                "pdf", "md", "markdown", "docx", "odt", "pptx",
-                                                "xlsx", "epub", "html", "htm", "rtf", "csv", "tsv",
-                                                "txt", "json", "rs", "py", "js", "ts", "png", "jpg",
-                                                "jpeg", "webp", "svg",
-                                            ],
-                                        )
-                                        .filter("PDF & eBooks", &["pdf", "epub"])
-                                        .filter("Office", &["docx", "odt", "pptx", "xlsx", "rtf"])
-                                        .filter(
-                                            "Markdown & Code",
-                                            &["md", "markdown", "txt", "json", "rs", "py", "csv", "html"],
-                                        );
+                        el()
+                            .key("btn_doc_ingest")
+                            .grow(1.0)
+                            .h(28.0)
+                            .px(8.0)
+                            .radius(4.0)
+                            .fill(theme::accent_primary())
+                            .hover(theme::accent_primary().alpha(0.88))
+                            .center()
+                            .cursor(Cursor::Pointer)
+                            .on_press_tx(move |_s: &mut AppState, tx: &mut Tx| {
+                                let opts = if is_img_kind {
+                                    FileDialogOptions {
+                                        title: "Choose Image File".into(),
+                                        ..Default::default()
+                                    }
+                                    .filter(
+                                        "Images",
+                                        &["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg"],
+                                    )
+                                } else {
+                                    FileDialogOptions {
+                                        title: "Ingest Document File".into(),
+                                        ..Default::default()
+                                    }
+                                    .filter(
+                                        "All Documents",
+                                        &[
+                                            "pdf", "md", "markdown", "docx", "odt", "pptx",
+                                            "xlsx", "epub", "html", "htm", "rtf", "csv", "tsv",
+                                            "txt", "json", "rs", "py", "js", "ts", "png", "jpg",
+                                            "jpeg", "webp", "svg",
+                                        ],
+                                    )
+                                    .filter("PDF & eBooks", &["pdf", "epub"])
+                                    .filter("Office", &["docx", "odt", "pptx", "xlsx", "rtf"])
+                                    .filter(
+                                        "Markdown & Code",
+                                        &["md", "markdown", "txt", "json", "rs", "py", "csv", "html"],
+                                    )
+                                };
 
-                                        let target_id = node_id_for_ingest.clone();
-                                        tx.open_file(opts, move |s: &mut AppState, res, _| match res {
-                                            Ok(Some(path)) => {
-                                                s.ingest_file_into_node(&target_id, &path);
-                                            }
-                                            Ok(None) => {}
-                                            Err(e) => {
-                                                s.status_message = format!("File picker error: {}", e);
-                                            }
-                                        });
-                                    })
-                                    .child(
-                                        text("Ingest")
-                                            .font(theme::CONTROL_TEXT)
-                                            .color(theme::text_inverted()),
-                                    ),
-                            )
+                                let target_id = node_id_for_ingest.clone();
+                                tx.open_file(opts, move |s: &mut AppState, res, _| match res {
+                                    Ok(Some(path)) => {
+                                        s.ingest_file_into_node(&target_id, &path);
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        s.status_message = format!("File picker error: {}", e);
+                                    }
+                                });
+                            })
                             .child(
-                                el()
-                                    .key("btn_doc_sample")
-                                    .grow(1.0)
-                                    .h(28.0)
-                                    .px(8.0)
-                                    .radius(4.0)
-                                    .fill(theme::bg_control())
-                                    .hover(theme::hover_subtle())
-                                    .border(1.0, theme::border_subtle())
-                                    .center()
-                                    .cursor(Cursor::Pointer)
-                                    .on_press(move |s: &mut AppState| {
-                                        s.load_sample_document(&node_id_for_sample);
-                                    })
-                                    .child(
-                                        text("Sample")
-                                            .font(theme::CONTROL_TEXT)
-                                            .color(theme::text_primary()),
-                                    ),
-                            )
+                                text(if is_img_kind { "Choose Image" } else { "Ingest" })
+                                    .font(theme::CONTROL_TEXT)
+                                    .color(theme::text_inverted()),
+                            ),
+                    );
+
+                if !is_img_kind {
+                    doc_actions = doc_actions.child(
+                        el()
+                            .key("btn_doc_sample")
+                            .grow(1.0)
+                            .h(28.0)
+                            .px(8.0)
+                            .radius(4.0)
+                            .fill(theme::bg_control())
+                            .hover(theme::hover_subtle())
+                            .border(1.0, theme::border_subtle())
+                            .center()
+                            .cursor(Cursor::Pointer)
+                            .on_press(move |s: &mut AppState| {
+                                s.load_sample_document(&node_id_for_sample);
+                            })
                             .child(
-                                el()
-                                    .key("btn_doc_summarize")
+                                text("Sample")
+                                    .font(theme::CONTROL_TEXT)
+                                    .color(theme::text_primary()),
+                            ),
+                    );
+                }
+
+                doc_actions = doc_actions.child(
+                    el()
+                        .key("btn_doc_summarize")
                                     .grow(1.0)
                                     .h(28.0)
                                     .px(8.0)
@@ -691,8 +707,8 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                                             .font(theme::CONTROL_TEXT)
                                             .color(theme::text_primary()),
                                     ),
-                            ),
-                    );
+                            );
+                content = content.child(doc_actions);
 
                 // AI Key Insights card if present
                 if let Some(summary) = &node.summary {
@@ -1063,24 +1079,26 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                     );
             } else {
                 // NOTE / SYNTHESIS / CONCEPT INSPECTOR
+                let mut hdr = row()
+                    .w_full()
+                    .center_y()
+                    .gap(6.0)
+                    .child(badge_pill(
+                        theme::kind_label(node_kind),
+                        theme::kind_accent(node_kind),
+                    ))
+                    .child(subtle_badge(
+                        &format!("#{}", &node.id.as_str()[..node.id.as_str().len().min(6)]),
+                        theme::text_muted(),
+                    ))
+                    .child(el().grow(1.0));
+                if crate::reader_window::can_pop_out(node_kind) {
+                    hdr = hdr.child(popout_panel_btn());
+                }
+                hdr = hdr.child(close_panel_btn());
+
                 content = content
-                    .child(
-                        row()
-                            .w_full()
-                            .center_y()
-                            .gap(6.0)
-                            .child(badge_pill(
-                                theme::kind_label(node_kind),
-                                theme::kind_accent(node_kind),
-                            ))
-                            .child(subtle_badge(
-                                &format!("#{}", &node.id.as_str()[..node.id.as_str().len().min(6)]),
-                                theme::text_muted(),
-                            ))
-                            .child(el().grow(1.0))
-                            .child(popout_panel_btn())
-                            .child(close_panel_btn()),
-                    )
+                    .child(hdr)
                     .child(
                         col()
                             .w_full()
@@ -1418,6 +1436,55 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                                     )
                                 }),
                         ),
+                )
+                .child(
+                    col()
+                        .w_full()
+                        .gap(6.0)
+                        .child(
+                            text("CANVAS LABEL")
+                                .font(theme::SECTION_LABEL)
+                                .color(theme::text_muted()),
+                        )
+                        .child({
+                            let eid_show = edge_id_for_rel.clone();
+                            let eid_hide = edge_id_for_rel.clone();
+                            row()
+                                .w_full()
+                                .center_y()
+                                .gap(6.0)
+                                .child(
+                                    row()
+                                        .padding(2.0)
+                                        .gap(2.0)
+                                        .radius(4.0)
+                                        .fill(theme::bg_input())
+                                        .border(1.0, theme::border_subtle())
+                                        .child(
+                                            seg_tab("btn_edge_show_label", "Show Text", !edge.hide_label)
+                                                .on_press(move |s: &mut AppState| {
+                                                    s.toggle_edge_hide_label(&eid_show, false);
+                                                }),
+                                        )
+                                        .child(
+                                            seg_tab("btn_edge_hide_label", "Hide Text", edge.hide_label)
+                                                .on_press(move |s: &mut AppState| {
+                                                    s.toggle_edge_hide_label(&eid_hide, true);
+                                                }),
+                                        ),
+                                )
+                                .child(el().grow(1.0))
+                                .child(quick_chip(
+                                    "btn_toggle_all_edge_labels",
+                                    if s.hide_all_edge_labels {
+                                        "Show All Labels"
+                                    } else {
+                                        "Hide All Labels"
+                                    },
+                                    theme::text_secondary(),
+                                    |s| s.toggle_all_edge_labels(),
+                                ))
+                        }),
                 )
                 .child(
                     col()
@@ -1931,15 +1998,138 @@ fn render_specialized_node_inspector(
                     ),
                 );
             }
-            col()
+
+            let fmt_nid = nid.clone();
+            let formula_col = col()
                 .w_full()
-                .gap(4.0)
+                .gap(8.0)
                 .child(
-                    text("NOTATION")
-                        .font(theme::SECTION_LABEL)
-                        .color(theme::text_muted()),
+                    col()
+                        .w_full()
+                        .gap(4.0)
+                        .child(
+                            text("NOTATION")
+                                .font(theme::SECTION_LABEL)
+                                .color(theme::text_muted()),
+                        )
+                        .child(langs),
                 )
-                .child(langs)
+                .child(
+                    el()
+                        .key("btn_inspector_formula_format")
+                        .w_full()
+                        .py(7.0)
+                        .px(10.0)
+                        .radius(4.0)
+                        .fill(theme::accent_claude().alpha(0.14))
+                        .hover(theme::accent_claude().alpha(0.24))
+                        .border(1.0, theme::accent_claude().alpha(0.45))
+                        .center()
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.format_formula_node(&fmt_nid);
+                        })
+                        .child(
+                            text("\\tex → ∑ Format Shorthands")
+                                .font(theme::CONTROL_TEXT)
+                                .color(theme::accent_claude()),
+                        ),
+                );
+
+            let mut sym_panel = col().w_full().gap(5.0).child(
+                text("SYMBOLS")
+                    .font(theme::SECTION_LABEL)
+                    .color(theme::text_muted()),
+            );
+            for (group_name, syms) in [
+                ("Greek", formula_math::GREEK_SYMBOLS),
+                ("Operators", formula_math::OP_SYMBOLS),
+                ("Scripts", formula_math::SCRIPT_SYMBOLS),
+            ] {
+                let mut g_col = col().w_full().gap(3.0).child(
+                    text(group_name)
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_muted()),
+                );
+                for (r_idx, chunk) in syms.chunks(8).enumerate() {
+                    let mut r = row().w_full().gap(4.0);
+                    for (c_idx, sym) in chunk.iter().enumerate() {
+                        let id_s = nid.clone();
+                        let sym_str = *sym;
+                        r = r.child(
+                            el()
+                                .key(format!("insp_sym_{}_{}_{}", group_name, r_idx, c_idx))
+                                .min_w(26.0)
+                                .h(24.0)
+                                .px(5.0)
+                                .radius(4.0)
+                                .fill(theme::bg_control())
+                                .hover(theme::hover_subtle())
+                                .border(1.0, theme::border_subtle())
+                                .center()
+                                .cursor(Cursor::Pointer)
+                                .on_press(move |s: &mut AppState| {
+                                    s.insert_formula_symbol(&id_s, sym_str);
+                                })
+                                .child(
+                                    text(sym_str)
+                                        .font(TextStyle::new(12.0, 500.0).mono())
+                                        .color(theme::text_primary()),
+                                ),
+                        );
+                    }
+                    g_col = g_col.child(r);
+                }
+                sym_panel = sym_panel.child(g_col);
+            }
+
+            let mut tpl_panel = col().w_full().gap(4.0).child(
+                text("TEMPLATES")
+                    .font(theme::SECTION_LABEL)
+                    .color(theme::text_muted()),
+            );
+            for chunk in formula_math::FORMULA_TEMPLATES.chunks(3) {
+                let mut r = row().w_full().gap(6.0);
+                for &(name, tpl) in chunk {
+                    let id_t = nid.clone();
+                    r = r.child(
+                        el()
+                            .key(format!("insp_tpl_{}", name))
+                            .grow(1.0)
+                            .py(5.0)
+                            .px(6.0)
+                            .radius(4.0)
+                            .fill(theme::bg_control())
+                            .hover(theme::hover_subtle())
+                            .border(1.0, theme::border_subtle())
+                            .center()
+                            .cursor(Cursor::Pointer)
+                            .on_press(move |s: &mut AppState| {
+                                let selected = s.selected_nodes.contains(&id_t);
+                                if let Some(n) = s.graph.get_node_mut(&id_t) {
+                                    n.content = tpl.to_string();
+                                    if selected {
+                                        s.canvas_content_edit = rune::TextEdit::new(&n.content);
+                                        s.inspector_content_edit = rune::TextEdit::new(&n.content);
+                                    }
+                                }
+                                if let Some(bundle) = &s.bundle {
+                                    let _ = bundle.save_graph_atomic(&s.graph);
+                                }
+                                s.push_reader_snapshot();
+                                s.status_message = format!("Applied {} template", name);
+                            })
+                            .child(
+                                text(name)
+                                    .font(theme::BADGE_TEXT)
+                                    .color(theme::text_primary()),
+                            ),
+                    );
+                }
+                tpl_panel = tpl_panel.child(r);
+            }
+
+            formula_col.child(sym_panel).child(tpl_panel)
         }
         NodeKind::Section => {
             let framed = node.meta.section_framed;

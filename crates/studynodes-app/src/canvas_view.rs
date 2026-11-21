@@ -1,6 +1,6 @@
 use rune::{
-    Color, Cursor, Cx, El, LineCap, Phase, PointerButton, ScrollSpec, Shape, SurfaceFit, TextStyle,
-    Tx, canvas, col, el, row, text, text_input,
+    Color, Cursor, Cx, El, FileDialogOptions, LineCap, Phase, PointerButton, ScrollSpec, Shape,
+    SurfaceFit, TextStyle, Tx, canvas, col, el, row, text, text_input,
 };
 
 use studynodes_graph::bezier::CubicBezier;
@@ -8,6 +8,7 @@ use studynodes_graph::coords::{ScreenPos, WorldPos};
 use studynodes_graph::model::{Edge, EdgeStatus, Node, NodeKind, PortDirection, PortId};
 
 use crate::doc_reader::{self, DocFormat};
+use crate::formula_math;
 use crate::state::{AppState, CanvasMode, node_world_size};
 use crate::theme;
 
@@ -64,10 +65,36 @@ fn build_grid_shape(s: &AppState) -> Shape {
     grid_shape
 }
 
+pub(crate) fn draw_arrow_triangle(
+    shape: Shape,
+    tip: [f32; 2],
+    dir: (f32, f32),
+    len: f32,
+    half_w: f32,
+    color: Color,
+) -> Shape {
+    let (dx, dy) = dir;
+    let px = -dy;
+    let py = dx;
+    let bx = tip[0] - dx * len;
+    let by = tip[1] - dy * len;
+    shape.fill(
+        vec![
+            tip,
+            [bx + px * half_w, by + py * half_w],
+            [bx - px * half_w, by - py * half_w],
+        ],
+        color,
+    )
+}
+
 fn build_wire_shape(s: &AppState) -> Shape {
     let cam = s.graph.viewport;
     let zoom = cam.zoom;
     let mut wire_shape = Shape::new();
+    let socket_r = (4.5 * zoom).clamp(3.0, 8.0);
+    let arrow_len = (8.5 * zoom).clamp(5.5, 13.0);
+    let arrow_hw = (4.0 * zoom).clamp(2.6, 6.2);
 
     for edge in s.graph.edges.values() {
         if let (Some(from_node), Some(to_node)) = (
@@ -99,6 +126,53 @@ fn build_wire_shape(s: &AppState) -> Shape {
             };
 
             wire_shape = wire_shape.stroke(segments, wire_w, wire_color);
+
+            // Terminal directional arrowhead just outside destination input socket
+            let to_sp = cam.world_to_screen(to_world);
+            let end_dir = curve.tangent(0.98);
+            let end_tip = [
+                to_sp.x - end_dir.0 * (socket_r + 2.0),
+                to_sp.y - end_dir.1 * (socket_r + 2.0),
+            ];
+            wire_shape = draw_arrow_triangle(
+                wire_shape,
+                end_tip,
+                end_dir,
+                arrow_len,
+                arrow_hw,
+                wire_color,
+            );
+
+            // Traveling directional pulse + chevron along the Bézier flow
+            let t_anim = 0.08 + s.wire_anim_phase.clamp(0.0, 1.0) * 0.84;
+            let alpha_env = (t_anim * 6.0).min((1.0 - t_anim) * 6.0).clamp(0.0, 1.0);
+            let pulse_color = if is_selected || is_ghost {
+                theme::accent_claude().alpha(0.92 * alpha_env)
+            } else {
+                theme::text_primary().alpha(0.82 * alpha_env)
+            };
+
+            let t_tail = (t_anim - 0.07).max(0.02);
+            let trail: Vec<[f32; 2]> = (0..=4)
+                .map(|step| {
+                    let frac = step as f32 / 4.0;
+                    let t = t_tail + (t_anim - t_tail) * frac;
+                    let sp = cam.world_to_screen(curve.eval(t));
+                    [sp.x, sp.y]
+                })
+                .collect();
+            wire_shape = wire_shape.stroke(trail, wire_w * 1.45, pulse_color.alpha(0.55 * alpha_env));
+
+            let pulse_sp = cam.world_to_screen(curve.eval(t_anim));
+            let pulse_dir = curve.tangent(t_anim);
+            wire_shape = draw_arrow_triangle(
+                wire_shape,
+                [pulse_sp.x, pulse_sp.y],
+                pulse_dir,
+                (8.0 * zoom).clamp(5.0, 12.0),
+                (3.6 * zoom).clamp(2.4, 5.5),
+                pulse_color,
+            );
         }
     }
 
@@ -123,6 +197,16 @@ fn build_wire_shape(s: &AppState) -> Shape {
             wire_shape = wire_shape.stroke(
                 segments,
                 2.2 * zoom.clamp(0.7, 1.4),
+                theme::accent_claude(),
+            );
+            let end_sp = cam.world_to_screen(*current_cursor);
+            let end_dir = curve.tangent(0.98);
+            wire_shape = draw_arrow_triangle(
+                wire_shape,
+                [end_sp.x, end_sp.y],
+                end_dir,
+                arrow_len,
+                arrow_hw,
                 theme::accent_claude(),
             );
         }
@@ -153,7 +237,13 @@ pub fn render_canvas_view(s: &AppState) -> El {
             crate::touchpad_win32::set_canvas_bounds(Some(r));
             tx.live_only();
         })
-        .child(canvas(grid_shape).w_full().h_full())
+        .child(
+            canvas(grid_shape)
+                .key("canvas_grid_layer")
+                .absolute(0.0, 0.0)
+                .w_full()
+                .h_full(),
+        )
         .on_wheel(|s: &mut AppState, e, _| {
             if e.mods.ctrl || e.mods.cmd {
                 let factor = if e.dy > 0.0 { 1.10 } else { 0.90 };
@@ -199,8 +289,29 @@ pub fn render_canvas_view(s: &AppState) -> El {
                     && tx.button() == PointerButton::Primary
                     && d.dx.hypot(d.dy) < 4.0
                 {
-                    s.deselect_all();
-                    tx.blur();
+                    let click_world = s.graph.viewport.screen_to_world(ScreenPos::new(d.x, d.y));
+                    let threshold = 12.0 / s.graph.viewport.zoom.max(0.25);
+                    let mut hit_edge = None;
+                    for edge in s.graph.edges.values() {
+                        if let (Some(fn_node), Some(tn_node)) = (
+                            s.graph.get_node(&edge.from.node),
+                            s.graph.get_node(&edge.to.node),
+                        ) {
+                            let fw = port_world_pos_for(fn_node, &edge.from.port);
+                            let tw = port_world_pos_for(tn_node, &edge.to.port);
+                            if CubicBezier::wire(fw, tw).hit_test(click_world, threshold) {
+                                hit_edge = Some(edge.id.clone());
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(eid) = hit_edge {
+                        s.select_edge(eid);
+                        tx.blur();
+                    } else {
+                        s.deselect_all();
+                        tx.blur();
+                    }
                 }
                 s.canvas_mode = CanvasMode::Idle;
             }
@@ -224,7 +335,13 @@ pub fn render_canvas_view(s: &AppState) -> El {
     }
 
     // 2b. Bezier Wires Layer (above Section backdrops, behind regular Study cards)
-    canvas_container = canvas_container.child(canvas(wire_shape).w_full().h_full());
+    canvas_container = canvas_container.child(
+        canvas(wire_shape)
+            .key("canvas_wire_layer")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full(),
+    );
 
     // 3. Regular Node Cards (deterministic z-order: unselected sorted by id, selected on top)
     let mut ordered_nodes: Vec<&Node> = s
@@ -245,7 +362,7 @@ pub fn render_canvas_view(s: &AppState) -> El {
         canvas_container = canvas_container.child(card);
     }
 
-    // 4. Edge Annotation Pills (rendered AFTER nodes so short-wire relation pills NEVER hide behind cards!)
+    // 4. Edge Annotation Pills (or compact midpoint click dot when label is hidden)
     if zoom >= 0.45 {
         let mut edges: Vec<&Edge> = s.graph.edges.values().collect();
         edges.sort_by(|a, b| {
@@ -262,12 +379,42 @@ pub fn render_canvas_view(s: &AppState) -> El {
                 let to_world = port_world_pos_for(to_node, &edge.to.port);
                 let curve = CubicBezier::wire(from_world, to_world);
                 let mid_screen = cam.world_to_screen(curve.midpoint());
-                canvas_container = canvas_container.child(render_edge_pill(
-                    edge,
-                    s.selected_edge.as_ref() == Some(&edge.id),
-                    mid_screen,
-                    zoom,
-                ));
+                let is_sel = s.selected_edge.as_ref() == Some(&edge.id);
+                let label_hidden =
+                    (edge.hide_label || s.hide_all_edge_labels) && edge.status != EdgeStatus::Proposed;
+                if label_hidden {
+                    let dot_edge_id = edge.id.clone();
+                    canvas_container = canvas_container.child(
+                        el()
+                            .key(format!("edge_pill_{}", edge.id.as_str()))
+                            .absolute(mid_screen.x - 6.0, mid_screen.y - 6.0)
+                            .size(12.0, 12.0)
+                            .radius(6.0)
+                            .hover(Color::WHITE.alpha(0.12))
+                            .center()
+                            .cursor(Cursor::Pointer)
+                            .on_press(move |s: &mut AppState| {
+                                s.select_edge(dot_edge_id.clone());
+                            })
+                            .child(
+                                el()
+                                    .size(5.0, 5.0)
+                                    .radius(2.5)
+                                    .fill(if is_sel {
+                                        theme::accent_claude()
+                                    } else {
+                                        theme::border_strong()
+                                    }),
+                            ),
+                    );
+                } else {
+                    canvas_container = canvas_container.child(render_edge_pill(
+                        edge,
+                        is_sel,
+                        mid_screen,
+                        zoom,
+                    ));
+                }
             }
         }
     }
@@ -1298,6 +1445,31 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                 .child(footer_strip)
         }
         NodeKind::Image => {
+            let pick_id_a = node.id.clone();
+            let pick_id_b = node.id.clone();
+            let open_id = node.id.clone();
+            let click_id_a = other_click_id.clone();
+            let click_id_b = other_click_id.clone();
+            let make_picker = |pick_id: studynodes_graph::model::NodeId| {
+                move |s_ref: &mut AppState, tx: &mut Tx| {
+                    s_ref.select_node(pick_id.clone(), false);
+                    let opts = FileDialogOptions {
+                        title: "Choose Image File".into(),
+                        ..Default::default()
+                    }
+                    .filter(
+                        "Images",
+                        &["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg"],
+                    );
+                    let target_id = pick_id.clone();
+                    tx.open_file(opts, move |s: &mut AppState, res, _| {
+                        if let Ok(Some(path)) = res {
+                            s.ingest_file_into_node(&target_id, &path);
+                        }
+                    });
+                }
+            };
+
             if let Some(img) = s.card_image_previews.get(&node.id) {
                 col()
                     .key(format!("node_body_{}", node.id.as_str()))
@@ -1305,11 +1477,13 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                     .grow(1.0)
                     .min_h(0.0)
                     .clip_soft(0.0)
-                    .padding(6.0 * zoom)
+                    .px(6.0 * zoom)
+                    .py(5.0 * zoom)
+                    .gap(4.0 * zoom)
                     .hover(theme::hover_subtle())
                     .cursor(Cursor::Pointer)
                     .on_press(move |s: &mut AppState| {
-                        s.select_node(other_click_id.clone(), false);
+                        s.select_node(click_id_a.clone(), false);
                         if !s.inspector_popped_out {
                             s.inspector_open = true;
                         }
@@ -1325,6 +1499,53 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                             .border(1.0, theme::border_subtle())
                             .pixels_fit(img.pixels(), SurfaceFit::Fit),
                     )
+                    .child(
+                        row()
+                            .w_full()
+                            .center_y()
+                            .gap(4.0 * zoom)
+                            .child(
+                                el()
+                                    .key(format!("img_pick_{}", node.id.as_str()))
+                                    .px(6.0 * zoom)
+                                    .py(2.0 * zoom)
+                                    .radius(3.0 * zoom)
+                                    .fill(theme::bg_control())
+                                    .hover(theme::hover_subtle())
+                                    .border(1.0, theme::border_subtle())
+                                    .cursor(Cursor::Pointer)
+                                    .on_press_tx(make_picker(pick_id_a))
+                                    .child(
+                                        text("Replace")
+                                            .font(TextStyle::new(badge_size, 500.0))
+                                            .color(theme::text_secondary()),
+                                    ),
+                            )
+                            .child(el().grow(1.0))
+                            .child(
+                                el()
+                                    .key(format!("img_open_{}", node.id.as_str()))
+                                    .px(6.0 * zoom)
+                                    .py(2.0 * zoom)
+                                    .radius(3.0 * zoom)
+                                    .fill(theme::bg_control())
+                                    .hover(theme::hover_subtle())
+                                    .border(1.0, theme::border_subtle())
+                                    .cursor(Cursor::Pointer)
+                                    .on_press(move |s: &mut AppState| {
+                                        s.select_node(open_id.clone(), false);
+                                        if !s.inspector_popped_out {
+                                            s.inspector_open = true;
+                                        }
+                                        s.ai_panel_open = false;
+                                    })
+                                    .child(
+                                        text("Open →")
+                                            .font(TextStyle::new(badge_size, 500.0).mono())
+                                            .color(theme::text_primary()),
+                                    ),
+                            ),
+                    )
             } else {
                 col()
                     .key(format!("node_body_{}", node.id.as_str()))
@@ -1332,30 +1553,48 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                     .grow(1.0)
                     .min_h(0.0)
                     .clip_soft(0.0)
-                    .px(10.0 * zoom)
-                    .py(8.0 * zoom)
+                    .padding(10.0 * zoom)
+                    .center()
+                    .gap(6.0 * zoom)
                     .hover(theme::hover_subtle())
                     .cursor(Cursor::Pointer)
                     .on_press(move |s: &mut AppState| {
-                        s.select_node(other_click_id.clone(), false);
+                        s.select_node(click_id_b.clone(), false);
                         if !s.inspector_popped_out {
                             s.inspector_open = true;
                         }
                         s.ai_panel_open = false;
                     })
                     .child(
-                        text("Visual image asset.")
-                            .font(TextStyle::new(body_size, 400.0).lh(body_size * 1.4))
-                            .color(theme::text_secondary())
-                            .w_full()
-                            .wrap(),
+                        el()
+                            .key(format!("img_pick_{}", node.id.as_str()))
+                            .px((10.0 * zoom).clamp(6.0, 14.0))
+                            .py((5.0 * zoom).clamp(3.0, 8.0))
+                            .radius(4.0 * zoom)
+                            .fill(theme::bg_control())
+                            .hover(theme::hover_subtle())
+                            .border(1.0, theme::border_default())
+                            .cursor(Cursor::Pointer)
+                            .on_press_tx(make_picker(pick_id_b))
+                            .child(
+                                text("+ Choose Image")
+                                    .font(TextStyle::new(badge_size.max(9.5), 600.0))
+                                    .color(theme::text_primary()),
+                            ),
+                    )
+                    .child(
+                        text("or drop PNG / JPG / SVG")
+                            .font(TextStyle::new((badge_size * 0.9).clamp(7.5, 11.5), 400.0))
+                            .color(theme::text_muted()),
                     )
             }
         }
         NodeKind::Flashcard => render_flashcard_body(s, node, body_size, badge_size, zoom),
         NodeKind::Excerpt => render_excerpt_body(s, node, body_size, badge_size, zoom),
         NodeKind::Checklist => render_checklist_body(node, body_size, badge_size, zoom),
-        NodeKind::Formula => render_formula_body(node, body_size, zoom),
+        NodeKind::Formula => {
+            render_formula_body(s, node, is_selected, body_size, badge_size, zoom)
+        }
         NodeKind::Sequence => render_sequence_body(node, body_size, badge_size, zoom),
         _ => {
             let preview_text = if node.content.trim().is_empty() {
@@ -1875,41 +2114,138 @@ fn render_checklist_body(node: &Node, body_size: f32, badge_size: f32, zoom: f32
     body
 }
 
-fn render_formula_body(node: &Node, body_size: f32, zoom: f32) -> El {
+fn render_formula_body(
+    s: &AppState,
+    node: &Node,
+    is_selected: bool,
+    body_size: f32,
+    badge_size: f32,
+    zoom: f32,
+) -> El {
     let select_id = node.id.clone();
+    let is_editing = is_selected && s.editing_node_id.as_ref() == Some(&node.id);
     let formula_text = if node.content.trim().is_empty() {
-        "y = f(x)"
+        "Click to edit equation..."
     } else {
         node.content.trim()
     };
 
-    col()
-        .key(format!("node_body_{}", node.id.as_str()))
-        .w_full()
-        .grow(1.0)
-        .min_h(0.0)
-        .clip_soft(0.0)
-        .padding(8.0 * zoom)
-        .on_press(move |s: &mut AppState| {
-            s.select_node(select_id.clone(), false);
-        })
-        .child(
-            col()
-                .w_full()
-                .grow(1.0)
-                .min_h(0.0)
-                .radius(4.0 * zoom)
-                .fill(theme::bg_input())
-                .border(1.0, theme::border_subtle())
-                .padding(8.0 * zoom)
+    if is_editing {
+        let fmt_id = node.id.clone();
+        let mut sym_bar = row().w_full().center_y().gap(2.5 * zoom);
+        for (idx, &(label, sym)) in formula_math::QUICK_CARD_SYMBOLS.iter().take(7).enumerate() {
+            let sym_nid = node.id.clone();
+            sym_bar = sym_bar.child(
+                el()
+                    .key(format!("formula_sym_{}_{}", node.id.as_str(), idx))
+                    .px((4.0 * zoom).clamp(3.0, 6.0))
+                    .py((2.0 * zoom).clamp(1.0, 4.0))
+                    .radius(3.0 * zoom)
+                    .fill(theme::bg_control())
+                    .hover(theme::hover_subtle())
+                    .border(1.0, theme::border_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.insert_formula_symbol(&sym_nid, sym);
+                    })
+                    .child(
+                        text(label)
+                            .font(TextStyle::new(badge_size, 500.0).mono())
+                            .color(theme::text_primary()),
+                    ),
+            );
+        }
+        sym_bar = sym_bar.child(el().grow(1.0)).child(
+            el()
+                .key(format!("formula_fmt_{}", node.id.as_str()))
+                .px((5.0 * zoom).clamp(3.0, 8.0))
+                .py((2.0 * zoom).clamp(1.0, 4.0))
+                .radius(3.0 * zoom)
+                .fill(theme::accent_claude().alpha(0.16))
+                .hover(theme::accent_claude().alpha(0.24))
+                .border(1.0, theme::accent_claude().alpha(0.45))
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.format_formula_node(&fmt_id);
+                })
                 .child(
-                    text(formula_text)
-                        .font(TextStyle::new(body_size, 500.0).mono().lh(body_size * 1.42))
-                        .color(theme::text_primary())
-                        .w_full()
-                        .wrap(),
+                    text("\\→∑")
+                        .font(TextStyle::new(badge_size, 600.0).mono())
+                        .color(theme::accent_claude()),
                 ),
-        )
+        );
+
+        col()
+            .key(format!("node_body_{}", node.id.as_str()))
+            .w_full()
+            .grow(1.0)
+            .min_h(0.0)
+            .clip_soft(0.0)
+            .padding(7.0 * zoom)
+            .gap(4.5 * zoom)
+            .child(
+                col()
+                    .w_full()
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_input())
+                    .border(1.0, theme::border_default())
+                    .padding(7.0 * zoom)
+                    .child(
+                        text_input(
+                            &s.canvas_content_edit,
+                            TextStyle::new(body_size, 500.0).mono().lh(body_size * 1.4),
+                        )
+                        .key(format!("formula_input_{}", node.id.as_str()))
+                        .label("Formula editor")
+                        .w_full()
+                        .grow(1.0)
+                        .color(theme::text_primary())
+                        .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                        .placeholder("Type math or \\alpha, \\sum, -> ...", theme::text_muted())
+                        .on_edit(|s: &mut AppState| &mut s.canvas_content_edit)
+                        .on_input_change(|s: &mut AppState, _| {
+                            s.sync_from_canvas_edits();
+                            s.maybe_auto_expand_formula_on_canvas_edit();
+                        }),
+                    ),
+            )
+            .child(sym_bar)
+    } else {
+        col()
+            .key(format!("node_body_{}", node.id.as_str()))
+            .w_full()
+            .grow(1.0)
+            .min_h(0.0)
+            .clip_soft(0.0)
+            .padding(8.0 * zoom)
+            .cursor(Cursor::Pointer)
+            .on_press(move |s: &mut AppState| {
+                s.select_node(select_id.clone(), false);
+            })
+            .child(
+                col()
+                    .w_full()
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_input())
+                    .border(1.0, theme::border_subtle())
+                    .padding(8.0 * zoom)
+                    .child(
+                        text(formula_text)
+                            .font(TextStyle::new(body_size, 500.0).mono().lh(body_size * 1.42))
+                            .color(if node.content.trim().is_empty() {
+                                theme::text_muted()
+                            } else {
+                                theme::text_primary()
+                            })
+                            .w_full()
+                            .wrap(),
+                    ),
+            )
+    }
 }
 
 fn render_sequence_body(node: &Node, body_size: f32, badge_size: f32, zoom: f32) -> El {
@@ -2226,6 +2562,7 @@ fn render_block_menu_popover(s: &AppState) -> El {
     let menu_x = (s.canvas_size[0] - 252.0).clamp(12.0, 980.0);
     let items = [
         ("btn_add_section", "▭", "Section", "Group frame & title", NodeKind::Section),
+        ("btn_add_image", "▣", "Image", "Visual figure or diagram", NodeKind::Image),
         ("btn_add_flashcard", "◇", "Flashcard", "Prompt & flip answer", NodeKind::Flashcard),
         ("btn_add_excerpt", "❝", "Excerpt", "Linked doc page quote", NodeKind::Excerpt),
         ("btn_add_checklist", "☑", "Checklist", "Interactive study tasks", NodeKind::Checklist),

@@ -54,6 +54,30 @@ impl CubicBezier {
         self.eval(0.5)
     }
 
+    /// Compute normalized unit tangent vector `(tx, ty)` along the curve at `t` in `[0.0, 1.0]`.
+    pub fn tangent(&self, t: f32) -> (f32, f32) {
+        let u = 1.0 - t;
+        let dx = 3.0 * u * u * (self.p1.x - self.p0.x)
+            + 6.0 * u * t * (self.p2.x - self.p1.x)
+            + 3.0 * t * t * (self.p3.x - self.p2.x);
+        let dy = 3.0 * u * u * (self.p1.y - self.p0.y)
+            + 6.0 * u * t * (self.p2.y - self.p1.y)
+            + 3.0 * t * t * (self.p3.y - self.p2.y);
+        let len = dx.hypot(dy);
+        if len >= 1e-4 {
+            (dx / len, dy / len)
+        } else {
+            let fx = self.p3.x - self.p0.x;
+            let fy = self.p3.y - self.p0.y;
+            let flen = fx.hypot(fy);
+            if flen >= 1e-4 {
+                (fx / flen, fy / flen)
+            } else {
+                (1.0, 0.0)
+            }
+        }
+    }
+
     /// Subdivide the curve into N line segments.
     pub fn sample_segments(&self, count: usize) -> Vec<WorldPos> {
         let n = count.max(4);
@@ -140,5 +164,19 @@ mod tests {
         // Point far away (50 units away) should not hit
         let far = WorldPos::new(mid.x, mid.y + 50.0);
         assert!(!curve.hit_test(far, 5.0));
+    }
+
+    #[test]
+    fn test_bezier_tangent_points_from_start_to_end() {
+        let from = WorldPos::new(10.0, 40.0);
+        let to = WorldPos::new(310.0, 180.0);
+        let curve = CubicBezier::wire(from, to);
+
+        for t in [0.0_f32, 0.5, 1.0] {
+            let (tx, ty) = curve.tangent(t);
+            let mag = tx.hypot(ty);
+            assert!((mag - 1.0).abs() < 1e-4, "tangent must be unit length at t={t}");
+            assert!(tx > 0.0, "left-to-right wire tangent should point +x at t={t}, got ({tx}, {ty})");
+        }
     }
 }

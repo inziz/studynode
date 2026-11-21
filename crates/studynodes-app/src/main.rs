@@ -3,6 +3,7 @@
 mod canvas_view;
 mod dashboard_view;
 mod doc_reader;
+mod formula_math;
 mod inspector_view;
 mod reader_window;
 mod state;
@@ -273,12 +274,23 @@ fn main() {
         touchpad_win32::set_waker(waker.clone());
         s.set_wakers(waker);
     });
-    spec.poll = Some(|s, _dt, _tx| {
+    spec.poll = Some(|s, _dt, tx| {
         touchpad_win32::pump_updates();
         let events = touchpad_win32::take_events();
         let tp_changed = s.apply_touchpad_events(events);
         let bridge_changed = s.poll_reader_bridge();
-        tp_changed || bridge_changed
+
+        let mut anim_changed = false;
+        if s.screen == AppScreen::Workspace
+            && !s.graph.edges.is_empty()
+            && !rune::is_headless()
+        {
+            s.wire_anim_phase = ((tx.clock() * 0.35).rem_euclid(1.0)) as f32;
+            tx.wake_after(std::time::Duration::from_millis(24));
+            anim_changed = true;
+        }
+
+        tp_changed || bridge_changed || anim_changed
     });
     spec.on_key = Some(|s, ev, tx| {
         if tx.focused().is_none() && ev.key == rune::Key::Text(" ".into()) {
@@ -1160,5 +1172,218 @@ mod tests {
         assert_eq!(steps.len(), 2);
         assert!(steps.iter().any(|n| n.meta.step_index == Some(2)));
         assert_eq!(rt.state.graph.edges.len(), 1);
+    }
+
+    #[test]
+    fn test_wire_layer_aligns_with_canvas_and_node_sockets() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Wire Alignment Test");
+        rt.state.inspector_open = false;
+
+        let n1 = rt.state.add_note_node(Some(WorldPos::new(60.0, 120.0)));
+        let n2 = rt.state.add_note_node(Some(WorldPos::new(460.0, 220.0)));
+        rt.state.connect_nodes(&n1, &n2);
+        rt.invalidate();
+        settle_frames(rt, 45);
+
+        let canvas_r = element_rect(rt, "graph_canvas");
+        let grid_r = element_rect(rt, "canvas_grid_layer");
+        let wire_r = element_rect(rt, "canvas_wire_layer");
+
+        for i in 0..4 {
+            assert!(
+                (grid_r[i] - canvas_r[i]).abs() < 1.0,
+                "canvas_grid_layer[{i}]={} must match graph_canvas[{i}]={}",
+                grid_r[i],
+                canvas_r[i]
+            );
+            assert!(
+                (wire_r[i] - canvas_r[i]).abs() < 1.0,
+                "canvas_wire_layer[{i}]={} must match graph_canvas[{i}]={}",
+                wire_r[i],
+                canvas_r[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_hide_edge_label_and_click_wire_selection() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Hide Edge Label Test");
+
+        let n1 = rt.state.add_note_node(Some(WorldPos::new(40.0, 140.0)));
+        let n2 = rt.state.add_note_node(Some(WorldPos::new(480.0, 140.0)));
+        rt.state.connect_nodes(&n1, &n2);
+        let edge_id = rt.state.graph.edges.keys().next().unwrap().clone();
+        if let Some(e) = rt.state.graph.get_edge_mut(&edge_id) {
+            e.label = "Supports".into();
+        }
+        rt.state.select_edge(edge_id.clone());
+        rt.invalidate();
+        settle_frames(rt, 45);
+
+        let visible_pill_r = element_rect(rt, &format!("edge_pill_{}", edge_id.as_str()));
+        assert!(visible_pill_r[2] > 30.0);
+
+        // Hide individual connector label -> becomes compact clickable midpoint dot
+        click_key(rt, "btn_edge_hide_label");
+        assert!(rt.state.graph.get_edge(&edge_id).unwrap().hide_label);
+        rt.state.deselect_all();
+        rt.state.inspector_open = false;
+        settle_frames(rt, 45);
+
+        let dot_r = element_rect(rt, &format!("edge_pill_{}", edge_id.as_str()));
+        assert!(dot_r[2] <= 14.0, "hidden label must collapse to small midpoint dot: {dot_r:?}");
+
+        // Clicking directly along the Bézier curve away from midpoint selects the edge
+        let canvas_r = element_rect(rt, "graph_canvas");
+        let n1_sz = crate::state::node_base_size(NodeKind::Note);
+        let n2_sz = crate::state::node_base_size(NodeKind::Note);
+        let from_w = WorldPos::new(40.0 + n1_sz.0, 140.0 + n1_sz.1 * 0.5);
+        let to_w = WorldPos::new(480.0, 140.0 + n2_sz.1 * 0.5);
+        let wire_pt_world = studynodes_graph::bezier::CubicBezier::wire(from_w, to_w).eval(0.25);
+        let wire_pt_screen = rt.state.graph.viewport.world_to_screen(wire_pt_world);
+        let click_x = canvas_r[0] + wire_pt_screen.x;
+        let click_y = canvas_r[1] + wire_pt_screen.y;
+        rt.pointer_move(click_x, click_y);
+        rt.pointer_down(click_x, click_y);
+        rt.pointer_up(click_x, click_y);
+        settle_frames(rt, 45);
+
+        assert_eq!(rt.state.selected_edge.as_ref(), Some(&edge_id));
+
+        // Restore label, then test global Hide All Labels toggle
+        click_key(rt, "btn_edge_show_label");
+        assert!(!rt.state.graph.get_edge(&edge_id).unwrap().hide_label);
+        click_key(rt, "btn_toggle_all_edge_labels");
+        assert!(rt.state.hide_all_edge_labels);
+        settle_frames(rt, 45);
+        let dot_global = element_rect(rt, &format!("edge_pill_{}", edge_id.as_str()));
+        assert!(dot_global[2] <= 14.0);
+    }
+
+    #[test]
+    fn test_formula_inline_symbol_insert_and_shorthand_format() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Formula UX Test");
+        rt.state.inspector_open = false;
+
+        let eq_id = rt
+            .state
+            .add_study_node(NodeKind::Formula, Some(WorldPos::new(100.0, 120.0)));
+        if let Some(eq) = rt.state.graph.get_node_mut(&eq_id) {
+            eq.content = "E = ".into();
+        }
+        rt.state.canvas_content_edit = rune::TextEdit::new("E = ");
+        rt.state.inspector_content_edit = rune::TextEdit::new("E = ");
+        rt.invalidate();
+        settle_frames(rt, 45);
+
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some(&format!("formula_input_{}", eq_id.as_str()))));
+
+        click_key(rt, &format!("formula_sym_{}_0", eq_id.as_str()));
+        assert!(rt.state.graph.get_node(&eq_id).unwrap().content.contains('∑'));
+
+        if let Some(eq) = rt.state.graph.get_node_mut(&eq_id) {
+            eq.content = "\\sum \\alpha^2".into();
+        }
+        rt.state.canvas_content_edit = rune::TextEdit::new("\\sum \\alpha^2");
+        rt.state.inspector_content_edit = rune::TextEdit::new("\\sum \\alpha^2");
+        rt.invalidate();
+        settle_frames(rt, 5);
+
+        click_key(rt, &format!("formula_fmt_{}", eq_id.as_str()));
+        assert_eq!(rt.state.graph.get_node(&eq_id).unwrap().content, "∑ α²");
+    }
+
+    #[test]
+    fn test_image_block_creation_and_popout_restrictions() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Image & Popout Policy Test");
+        rt.state.inspector_open = false;
+        rt.invalidate();
+        settle_frames(rt, 45);
+
+        // Spawn Image block from + Block menu
+        click_key(rt, "btn_toggle_block_menu");
+        settle_frames(rt, 5);
+        click_key(rt, "btn_add_image");
+        settle_frames(rt, 10);
+
+        let img_id = rt
+            .state
+            .graph
+            .nodes
+            .values()
+            .find(|n| n.kind == NodeKind::Image)
+            .expect("Image block created")
+            .id
+            .clone();
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("btn_popout_reader")));
+
+        // Checklist must hide pop-out button and refuse pop_out_reader()
+        let chk_id = rt
+            .state
+            .add_study_node(NodeKind::Checklist, Some(WorldPos::new(100.0, 320.0)));
+        rt.state.select_node(chk_id, false);
+        rt.state.inspector_open = true;
+        rt.invalidate();
+        settle_frames(rt, 45);
+        assert!(!rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some("btn_popout_reader") && !e.exiting));
+        rt.state.pop_out_reader();
+        assert!(!rt.state.inspector_popped_out);
+
+        // Excerpt must hide pop-out button and refuse pop_out_reader()
+        let ex_id = rt
+            .state
+            .add_study_node(NodeKind::Excerpt, Some(WorldPos::new(400.0, 320.0)));
+        rt.state.select_node(ex_id.clone(), false);
+        rt.state.inspector_open = true;
+        rt.invalidate();
+        settle_frames(rt, 45);
+        assert!(!rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some("btn_popout_reader") && !e.exiting));
+        rt.state.pop_out_reader();
+        assert!(!rt.state.inspector_popped_out);
+
+        // Section must pop out and publish its framed children + internal edges to ReaderSnapshot
+        let sec_id = rt
+            .state
+            .add_study_node(NodeKind::Section, Some(WorldPos::new(900.0, 20.0)));
+        let fc_id = rt
+            .state
+            .add_study_node(NodeKind::Flashcard, Some(WorldPos::new(940.0, 80.0)));
+        let seq_id = rt
+            .state
+            .add_study_node(NodeKind::Sequence, Some(WorldPos::new(1240.0, 80.0)));
+        rt.state.connect_nodes(&fc_id, &seq_id);
+        rt.state.select_node(sec_id.clone(), false);
+        rt.state.pop_out_reader();
+        assert!(rt.state.inspector_popped_out);
+
+        let snap = rt.state.reader_bridge.lock().unwrap().snapshot.clone();
+        assert_eq!(snap.node_kind, NodeKind::Section);
+        assert_eq!(snap.node_id.as_ref(), Some(&sec_id));
+        assert_eq!(snap.section_children.len(), 2);
+        assert_eq!(snap.section_edges.len(), 1);
+
+        // Clicking an Excerpt while Section is popped out must preserve popped-out Section snapshot
+        rt.state.select_node(ex_id, false);
+        let snap_after_ex = rt.state.reader_bridge.lock().unwrap().snapshot.clone();
+        assert_eq!(snap_after_ex.node_kind, NodeKind::Section);
+        assert_eq!(snap_after_ex.node_id.as_ref(), Some(&sec_id));
+
+        // Selecting a pop-outable Image switches pop-out window cleanly
+        rt.state.select_node(img_id, false);
+        assert_eq!(rt.state.reader_bridge.lock().unwrap().snapshot.node_kind, NodeKind::Image);
     }
 }
