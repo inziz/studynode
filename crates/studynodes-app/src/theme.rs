@@ -141,6 +141,12 @@ pub fn kind_accent(kind: NodeKind) -> Color {
         NodeKind::Image => hex("#B8B7B0"),
         NodeKind::LlmSynthesis => accent_claude(),
         NodeKind::Concept => hex("#9A9993"),
+        NodeKind::Section => hex("#73726E"),
+        NodeKind::Excerpt => accent_claude(),
+        NodeKind::Flashcard => hex("#D4D3CE"),
+        NodeKind::Formula => hex("#B8B7B0"),
+        NodeKind::Checklist => hex("#9A9993"),
+        NodeKind::Sequence => hex("#ECEBE6"),
     }
 }
 
@@ -151,6 +157,12 @@ pub fn kind_glyph(kind: NodeKind) -> &'static str {
         NodeKind::Image => "▣",
         NodeKind::LlmSynthesis => "✦",
         NodeKind::Concept => "○",
+        NodeKind::Section => "▭",
+        NodeKind::Excerpt => "❝",
+        NodeKind::Flashcard => "◇",
+        NodeKind::Formula => "∑",
+        NodeKind::Checklist => "☑",
+        NodeKind::Sequence => "→",
     }
 }
 
@@ -161,6 +173,12 @@ pub fn kind_label(kind: NodeKind) -> &'static str {
         NodeKind::Image => "IMAGE",
         NodeKind::LlmSynthesis => "AI SYNTH",
         NodeKind::Concept => "CONCEPT",
+        NodeKind::Section => "SECTION",
+        NodeKind::Excerpt => "EXCERPT",
+        NodeKind::Flashcard => "CARD",
+        NodeKind::Formula => "FORMULA",
+        NodeKind::Checklist => "CHECKLIST",
+        NodeKind::Sequence => "STEP",
     }
 }
 

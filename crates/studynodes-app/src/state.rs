@@ -98,6 +98,15 @@ pub enum CanvasMode {
         node_id: NodeId,
         start_pos: WorldPos,
     },
+    DraggingSection {
+        node_id: NodeId,
+        start_pos: WorldPos,
+        children: Vec<(NodeId, WorldPos)>,
+    },
+    ResizingSection {
+        node_id: NodeId,
+        start_size: (f32, f32),
+    },
     DraggingWire {
         from_node: NodeId,
         from_port: PortId,
@@ -113,6 +122,35 @@ pub fn node_base_size(kind: NodeKind) -> (f32, f32) {
         NodeKind::Image => (248.0, 180.0),
         NodeKind::LlmSynthesis => (260.0, 130.0),
         NodeKind::Concept => (240.0, 110.0),
+        NodeKind::Section => (640.0, 400.0),
+        NodeKind::Excerpt => (265.0, 165.0),
+        NodeKind::Flashcard => (270.0, 185.0),
+        NodeKind::Formula => (256.0, 140.0),
+        NodeKind::Checklist => (260.0, 195.0),
+        NodeKind::Sequence => (248.0, 145.0),
+    }
+}
+
+/// Effective world dimensions `(w, h)` for a specific node instance (honors resizable `Section` bounds).
+pub fn node_world_size(node: &studynodes_graph::model::Node) -> (f32, f32) {
+    if node.kind == NodeKind::Section {
+        let w = if node.size.0 >= 180.0 {
+            node.size.0
+        } else {
+            640.0
+        };
+        let h = if node.meta.section_framed {
+            if node.size.1 >= 120.0 {
+                node.size.1
+            } else {
+                400.0
+            }
+        } else {
+            44.0
+        };
+        (w, h)
+    } else {
+        node_base_size(node.kind)
     }
 }
 
@@ -179,6 +217,9 @@ pub struct AppState {
     // Wire draft
     #[allow(dead_code)]
     pub wire_draft: Option<ActiveWireDraft>,
+    pub show_block_menu: bool,
+    pub flipped_flashcards: HashSet<NodeId>,
+    pub inspector_answer_edit: TextEdit,
 }
 
 impl Default for AppState {
@@ -288,6 +329,9 @@ impl AppState {
             card_pdf_previews: HashMap::new(),
             card_image_previews: HashMap::new(),
             wire_draft: None,
+            show_block_menu: false,
+            flipped_flashcards: HashSet::new(),
+            inspector_answer_edit: TextEdit::new(""),
         };
 
         state.refresh_recent_projects();
@@ -381,6 +425,8 @@ impl AppState {
             tab.inspector_open
         };
         self.ai_panel_open = tab.ai_panel_open;
+        self.show_block_menu = false;
+        self.flipped_flashcards.clear();
         self.active_pdf = None;
         self.active_image = None;
         self.card_pdf_previews.clear();
@@ -390,6 +436,7 @@ impl AppState {
         self.canvas_content_edit = TextEdit::new("");
         self.inspector_title_edit = TextEdit::new("");
         self.inspector_content_edit = TextEdit::new("");
+        self.inspector_answer_edit = TextEdit::new("");
         self.edit_edge_label = TextEdit::new("");
         self.edit_edge_note = TextEdit::new("");
 
@@ -399,6 +446,7 @@ impl AppState {
                 self.canvas_content_edit = TextEdit::new(&n.content);
                 self.inspector_title_edit = TextEdit::new(&n.title);
                 self.inspector_content_edit = TextEdit::new(&n.content);
+                self.inspector_answer_edit = TextEdit::new(n.meta.answer.as_deref().unwrap_or(""));
                 if matches!(n.kind, NodeKind::Document | NodeKind::Image) {
                     self.ensure_reader_media_for_node(&nid, false);
                 }
@@ -778,9 +826,19 @@ impl AppState {
             if let Some(node) = self.graph.get_node_mut(&id) {
                 let title = self.inspector_title_edit.text.clone();
                 let content = self.inspector_content_edit.text.clone();
-                let changed = node.title != title || node.content != content;
+                let answer = self.inspector_answer_edit.text.clone();
+                let answer_changed = node.kind == NodeKind::Flashcard
+                    && node.meta.answer.as_deref().unwrap_or("") != answer;
+                let changed = node.title != title || node.content != content || answer_changed;
                 node.title = title;
                 node.content = content;
+                if node.kind == NodeKind::Flashcard && answer_changed {
+                    node.meta.answer = if answer.trim().is_empty() {
+                        None
+                    } else {
+                        Some(answer)
+                    };
+                }
                 if self.canvas_title_edit.text != node.title {
                     self.canvas_title_edit = TextEdit::new(&node.title);
                 }
@@ -802,10 +860,15 @@ impl AppState {
         let Some(id) = self.selected_nodes.iter().next().cloned() else {
             return;
         };
-        let Some((cur_title, cur_content)) = self
-            .graph
-            .get_node(&id)
-            .map(|n| (n.title.clone(), n.content.clone()))
+        let Some((cur_title, cur_content, cur_answer, is_flashcard)) =
+            self.graph.get_node(&id).map(|n| {
+                (
+                    n.title.clone(),
+                    n.content.clone(),
+                    n.meta.answer.clone().unwrap_or_default(),
+                    n.kind == NodeKind::Flashcard,
+                )
+            })
         else {
             return;
         };
@@ -813,7 +876,8 @@ impl AppState {
         let canvas_dirty =
             self.canvas_title_edit.text != cur_title || self.canvas_content_edit.text != cur_content;
         let inspector_dirty = self.inspector_title_edit.text != cur_title
-            || self.inspector_content_edit.text != cur_content;
+            || self.inspector_content_edit.text != cur_content
+            || (is_flashcard && self.inspector_answer_edit.text != cur_answer);
 
         if canvas_dirty {
             self.sync_from_canvas_edits();
@@ -1355,7 +1419,7 @@ impl AppState {
             .nodes
             .values()
             .map(|n| {
-                let sz = node_base_size(n.kind);
+                let sz = node_world_size(n);
                 let center = WorldPos::new(n.pos.x + sz.0 * 0.5, n.pos.y + sz.1 * 0.5);
                 let dx = center.x - view_center.x;
                 let dy = center.y - view_center.y;
@@ -1522,6 +1586,7 @@ impl AppState {
 
         self.sync_node_edits();
         self.sync_edge_edits();
+        self.show_block_menu = false;
         if !additive {
             self.selected_nodes.clear();
         }
@@ -1534,6 +1599,7 @@ impl AppState {
             self.canvas_content_edit = TextEdit::new(&n.content);
             self.inspector_title_edit = TextEdit::new(&n.title);
             self.inspector_content_edit = TextEdit::new(&n.content);
+            self.inspector_answer_edit = TextEdit::new(n.meta.answer.as_deref().unwrap_or(""));
             node_kind = Some(n.kind);
             if matches!(n.kind, NodeKind::Document | NodeKind::Image) {
                 if !self.inspector_popped_out {
@@ -1567,6 +1633,7 @@ impl AppState {
     pub fn deselect_all(&mut self) {
         self.sync_node_edits();
         self.sync_edge_edits();
+        self.show_block_menu = false;
         self.selected_nodes.clear();
         self.selected_edge = None;
         self.editing_node_id = None;
@@ -1576,7 +1643,422 @@ impl AppState {
         self.canvas_content_edit = TextEdit::new("");
         self.inspector_title_edit = TextEdit::new("");
         self.inspector_content_edit = TextEdit::new("");
+        self.inspector_answer_edit = TextEdit::new("");
         self.push_reader_snapshot();
+    }
+
+    fn persist_graph_and_snapshot(&mut self) {
+        if let Some(bundle) = &self.bundle {
+            let _ = bundle.save_graph_atomic(&self.graph);
+        }
+        self.push_reader_snapshot();
+    }
+
+    pub fn viewport_spawn_center(&self, dx: f32, dy: f32) -> WorldPos {
+        let w = if self.canvas_size[0] > 120.0 {
+            self.canvas_size[0]
+        } else {
+            920.0
+        };
+        let h = if self.canvas_size[1] > 120.0 {
+            self.canvas_size[1]
+        } else {
+            640.0
+        };
+        let stagger = ((self.graph.nodes.len() % 5) as f32 - 2.0) * 28.0;
+        let center = self
+            .graph
+            .viewport
+            .screen_to_world(ScreenPos::new(w * 0.5, h * 0.45));
+        WorldPos::new(center.x + dx + stagger, center.y + dy + stagger)
+    }
+
+    /// Capture non-section nodes whose centers fall inside a framed Section.
+    pub fn capture_section_children(&self, section_id: &NodeId) -> Vec<(NodeId, WorldPos)> {
+        let Some(sec) = self.graph.get_node(section_id) else {
+            return Vec::new();
+        };
+        if sec.kind != NodeKind::Section || !sec.meta.section_framed {
+            return Vec::new();
+        }
+        let (sw, sh) = node_world_size(sec);
+        let x0 = sec.pos.x;
+        let y0 = sec.pos.y;
+        let x1 = x0 + sw;
+        let y1 = y0 + sh;
+
+        self.graph
+            .nodes
+            .values()
+            .filter(|n| n.id != *section_id && n.kind != NodeKind::Section)
+            .filter_map(|n| {
+                let (nw, nh) = node_world_size(n);
+                let cx = n.pos.x + nw * 0.5;
+                let cy = n.pos.y + nh * 0.5;
+                if cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 {
+                    Some((n.id.clone(), n.pos))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    pub fn toggle_section_framed(&mut self, id: &NodeId) {
+        let mut label = "Section frame";
+        if let Some(sec) = self.graph.get_node_mut(id) {
+            if sec.kind == NodeKind::Section {
+                sec.meta.section_framed = !sec.meta.section_framed;
+                label = if sec.meta.section_framed {
+                    "Section: Framed Group"
+                } else {
+                    "Section: Title Banner"
+                };
+            }
+        }
+        self.persist_graph_and_snapshot();
+        self.status_message = label.into();
+    }
+
+    pub fn toggle_flashcard_flip(&mut self, id: &NodeId) {
+        if self.flipped_flashcards.contains(id) {
+            self.flipped_flashcards.remove(id);
+        } else {
+            self.flipped_flashcards.insert(id.clone());
+        }
+    }
+
+    pub fn set_flashcard_mastery(&mut self, id: &NodeId, mastery: &str) {
+        if let Some(n) = self.graph.get_node_mut(id) {
+            if n.kind == NodeKind::Flashcard {
+                n.meta.mastery = Some(mastery.to_string());
+            }
+        }
+        self.persist_graph_and_snapshot();
+        self.status_message = format!("Flashcard marked: {}", mastery);
+    }
+
+    pub fn set_formula_language(&mut self, id: &NodeId, lang: &str) {
+        if let Some(n) = self.graph.get_node_mut(id) {
+            if n.kind == NodeKind::Formula {
+                n.meta.language = Some(lang.to_string());
+            }
+        }
+        self.persist_graph_and_snapshot();
+        self.status_message = format!("Formula notation: {}", lang);
+    }
+
+    pub fn toggle_checklist_item_on_node(&mut self, id: &NodeId, task_index: usize) {
+        let is_selected = self.selected_nodes.contains(id);
+        let Some(node) = self.graph.get_node_mut(id) else {
+            return;
+        };
+        node.content = doc_reader::toggle_markdown_task(&node.content, task_index);
+        if is_selected {
+            self.canvas_content_edit = TextEdit::new(&node.content);
+            self.inspector_content_edit = TextEdit::new(&node.content);
+        }
+        self.persist_graph_and_snapshot();
+        self.status_message = "Updated checklist task".into();
+    }
+
+    /// Spawn a specialized Phase 2 study node with clean monochrome defaults.
+    pub fn add_study_node(&mut self, kind: NodeKind, pos_opt: Option<WorldPos>) -> NodeId {
+        self.show_block_menu = false;
+        if kind == NodeKind::Excerpt && pos_opt.is_none() {
+            if let Some(created) = self.create_excerpt_from_selected_doc(None) {
+                return created;
+            }
+        }
+
+        let default_pos = match kind {
+            NodeKind::Section => self.viewport_spawn_center(-320.0, -200.0),
+            _ => self.viewport_spawn_center(-130.0, -85.0),
+        };
+        let pos = pos_opt.unwrap_or(default_pos);
+
+        let step_num = (self
+            .graph
+            .nodes
+            .values()
+            .filter(|n| n.kind == NodeKind::Sequence)
+            .count() as u32)
+            + 1;
+
+        let title = match kind {
+            NodeKind::Section => "New Section".to_string(),
+            NodeKind::Excerpt => "Source Excerpt".to_string(),
+            NodeKind::Flashcard => "Recall Question".to_string(),
+            NodeKind::Formula => "Key Equation".to_string(),
+            NodeKind::Checklist => "Study Checklist".to_string(),
+            NodeKind::Sequence => format!("Step {:02}", step_num),
+            _ => kind.display_name().to_string(),
+        };
+
+        let mut node = studynodes_graph::model::Node::new(kind, title, pos);
+        node.size = node_base_size(kind);
+
+        match kind {
+            NodeKind::Section => {
+                node.meta.section_framed = true;
+            }
+            NodeKind::Excerpt => {
+                node.content =
+                    "\"Key passage or empirical claim highlighted from source.\"".into();
+            }
+            NodeKind::Flashcard => {
+                node.content = "What mechanism or concept does this card test?".into();
+                node.meta.answer = Some("Concise recall explanation shown on flip.".into());
+                node.meta.mastery = Some("new".into());
+            }
+            NodeKind::Formula => {
+                node.content = "Δw_ij = η · x_i · y_j".into();
+                node.meta.language = Some("MATH".into());
+            }
+            NodeKind::Checklist => {
+                node.content =
+                    "- [ ] Review foundational definition\n- [ ] Trace worked example\n- [ ] Self-test without notes"
+                        .into();
+            }
+            NodeKind::Sequence => {
+                node.content = "Describe this procedural or causal stage.".into();
+                node.meta.step_index = Some(step_num);
+            }
+            _ => {}
+        }
+
+        let id = node.id.clone();
+        self.graph.add_node(node);
+        if kind != NodeKind::Section {
+            self.select_node(id.clone(), false);
+        } else {
+            self.selected_nodes.clear();
+            self.selected_nodes.insert(id.clone());
+            self.selected_edge = None;
+            if let Some(n) = self.graph.get_node(&id) {
+                self.canvas_title_edit = TextEdit::new(&n.title);
+                self.canvas_content_edit = TextEdit::new(&n.content);
+                self.inspector_title_edit = TextEdit::new(&n.title);
+                self.inspector_content_edit = TextEdit::new(&n.content);
+                self.inspector_answer_edit = TextEdit::new("");
+            }
+        }
+        self.persist_graph_and_snapshot();
+        self.status_message = format!("Added {} block", kind.display_name());
+        id
+    }
+
+    /// Create a Source Excerpt linked to the currently selected Document/Image & active page.
+    pub fn create_excerpt_from_selected_doc(
+        &mut self,
+        snippet_opt: Option<&str>,
+    ) -> Option<NodeId> {
+        let doc_id = self
+            .selected_nodes
+            .iter()
+            .find(|id| {
+                self.graph
+                    .get_node(id)
+                    .is_some_and(|n| matches!(n.kind, NodeKind::Document | NodeKind::Image))
+            })
+            .cloned()?;
+
+        let page_idx = self
+            .active_pdf
+            .as_ref()
+            .filter(|p| p.node_id == doc_id)
+            .map(|p| p.page_index)
+            .unwrap_or_else(|| {
+                self.graph
+                    .get_node(&doc_id)
+                    .map(|n| n.preview_page)
+                    .unwrap_or(0)
+            });
+
+        let (doc_title, doc_pos, doc_content) = self
+            .graph
+            .get_node(&doc_id)
+            .map(|n| (n.title.clone(), n.pos, n.content.clone()))?;
+
+        let sibling_count = self
+            .graph
+            .nodes
+            .values()
+            .filter(|n| {
+                n.kind == NodeKind::Excerpt && n.meta.source_node.as_ref() == Some(&doc_id)
+            })
+            .count() as f32;
+
+        let snippet = snippet_opt
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                let pages = doc_reader::split_document_preview_pages(&doc_content, 7);
+                let page_text = pages.get(page_idx).map(|p| p.body.as_str()).unwrap_or("");
+                let clean: String = page_text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("```"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let trimmed = clean.trim();
+                if trimmed.is_empty() {
+                    format!("Cited passage from '{}' (page {}).", doc_title, page_idx + 1)
+                } else {
+                    let short: String = trimmed.chars().take(150).collect();
+                    if trimmed.chars().count() > 150 {
+                        format!("\"{}...\"", short.trim_end())
+                    } else {
+                        format!("\"{}\"", short)
+                    }
+                }
+            });
+
+        let spawn_pos =
+            WorldPos::new(doc_pos.x + 310.0, doc_pos.y + 30.0 + sibling_count * 185.0);
+        let mut excerpt = studynodes_graph::model::Node::new(
+            NodeKind::Excerpt,
+            format!("{} · p.{}", doc_title, page_idx + 1),
+            spawn_pos,
+        );
+        excerpt.size = node_base_size(NodeKind::Excerpt);
+        excerpt.content = snippet;
+        excerpt.meta.source_node = Some(doc_id.clone());
+        excerpt.meta.source_page = Some(page_idx);
+
+        let ex_id = excerpt.id.clone();
+        self.graph.add_node(excerpt);
+
+        let mut edge = studynodes_graph::model::Edge::new(
+            studynodes_graph::model::EdgeEndpoint {
+                node: doc_id,
+                port: PortId::new(PortId::DEFAULT_OUT),
+            },
+            studynodes_graph::model::EdgeEndpoint {
+                node: ex_id.clone(),
+                port: PortId::new(PortId::DEFAULT_IN),
+            },
+        );
+        edge.relation = studynodes_graph::model::EdgeRelation::DerivedFrom;
+        edge.label = format!("p.{}", page_idx + 1);
+        edge.note = format!("Excerpt anchored to page {} of '{}'.", page_idx + 1, doc_title);
+        self.graph.add_edge(edge);
+
+        self.persist_graph_and_snapshot();
+        self.status_message = format!("Pinned Excerpt from '{}' · p.{}", doc_title, page_idx + 1);
+        Some(ex_id)
+    }
+
+    /// Jump the Integrated Reader to the Document node and page referenced by an `Excerpt`.
+    pub fn jump_to_excerpt_source(&mut self, excerpt_id: &NodeId) {
+        let Some((src_id, src_page)) = self.graph.get_node(excerpt_id).and_then(|n| {
+            n.meta
+                .source_node
+                .clone()
+                .map(|id| (id, n.meta.source_page.unwrap_or(0)))
+        }) else {
+            self.status_message = "Excerpt has no linked source document".into();
+            return;
+        };
+
+        let Some(doc_title) = self.graph.get_node(&src_id).map(|d| d.title.clone()) else {
+            self.status_message = "Linked source document no longer exists".into();
+            return;
+        };
+
+        if let Some(doc) = self.graph.get_node_mut(&src_id) {
+            doc.preview_page = src_page;
+        }
+        self.select_node(src_id.clone(), false);
+        if self
+            .active_pdf
+            .as_ref()
+            .is_some_and(|p| p.node_id == src_id)
+        {
+            self.set_pdf_page(src_page);
+        } else {
+            self.ensure_card_preview(&src_id);
+            self.push_reader_snapshot();
+        }
+        self.status_message = format!("Opened '{}' · p.{}", doc_title, src_page + 1);
+    }
+
+    /// Spawn the next chained Sequence step right of `prev_id` and connect them.
+    pub fn add_next_sequence_step(&mut self, prev_id: &NodeId) -> Option<NodeId> {
+        let (prev_pos, prev_step) = self
+            .graph
+            .get_node(prev_id)
+            .map(|n| (n.pos, n.meta.step_index.unwrap_or(1)))?;
+        let next_step = prev_step + 1;
+        let next_pos = WorldPos::new(prev_pos.x + 296.0, prev_pos.y);
+
+        let mut next = studynodes_graph::model::Node::new(
+            NodeKind::Sequence,
+            format!("Step {:02}", next_step),
+            next_pos,
+        );
+        next.size = node_base_size(NodeKind::Sequence);
+        next.content = "Continue sequence step...".into();
+        next.meta.step_index = Some(next_step);
+        let next_id = next.id.clone();
+        self.graph.add_node(next);
+
+        let mut edge = studynodes_graph::model::Edge::new(
+            studynodes_graph::model::EdgeEndpoint {
+                node: prev_id.clone(),
+                port: PortId::new(PortId::DEFAULT_OUT),
+            },
+            studynodes_graph::model::EdgeEndpoint {
+                node: next_id.clone(),
+                port: PortId::new(PortId::DEFAULT_IN),
+            },
+        );
+        edge.relation = studynodes_graph::model::EdgeRelation::Custom("then".into());
+        edge.label = "Next".into();
+        self.graph.add_edge(edge);
+
+        self.select_node(next_id.clone(), false);
+        self.persist_graph_and_snapshot();
+        self.status_message = format!("Added Step {:02}", next_step);
+        Some(next_id)
+    }
+
+    /// Generate active-recall Flashcard & Study Checklist nodes for selected focus nodes.
+    pub fn generate_study_cards_ai(&mut self) {
+        self.sync_node_edits();
+        let mut focus_ids: Vec<NodeId> = self.selected_nodes.iter().cloned().collect();
+        if focus_ids.is_empty() {
+            focus_ids = self
+                .graph
+                .nodes
+                .values()
+                .filter(|n| n.kind != NodeKind::Section)
+                .take(2)
+                .map(|n| n.id.clone())
+                .collect();
+        }
+        if focus_ids.is_empty() {
+            self.status_message = "Add at least one node first to generate study cards".into();
+            return;
+        }
+
+        let context =
+            studynodes_llm::LlmContext::build(&self.graph, &focus_ids, "Generate Study Cards");
+        let provider = studynodes_llm::MockLlmProvider;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        if let Ok(rt) = rt {
+            if let Ok(patch) = rt.block_on(provider.generate_patch(&context)) {
+                let res = self.graph.validate_and_stage_patch(&patch);
+                self.persist_graph_and_snapshot();
+                self.status_message = format!(
+                    "✦ AI generated {} study cards & {} connections",
+                    res.new_nodes.len(),
+                    res.proposed_edges.len()
+                );
+            }
+        }
     }
 
     /// Enter in-card editing mode directly on the canvas.
@@ -1597,6 +2079,7 @@ impl AppState {
 
     /// Delete a node and all connected edges from the graph.
     pub fn delete_node(&mut self, id: &NodeId) {
+        self.flipped_flashcards.remove(id);
         if let Some((removed, edges)) = self.graph.remove_node(id) {
             self.selected_nodes.remove(id);
             if self.editing_node_id.as_ref() == Some(id) {

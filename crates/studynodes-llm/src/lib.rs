@@ -33,4 +33,24 @@ mod tests {
         assert!(!result.proposed_edges.is_empty());
         assert!(!result.new_nodes.is_empty());
     }
+
+    #[tokio::test]
+    async fn test_mock_llm_generates_study_cards() {
+        let mut graph = StudyGraph::new("Study Cards Test");
+        let mut doc = Node::new(NodeKind::Document, "Action Potential", WorldPos::new(0.0, 0.0));
+        doc.content = "Voltage-gated Na+ channels drive rapid depolarization above -55 mV.".into();
+        let doc_id = doc.id.clone();
+        graph.add_node(doc);
+
+        let context = LlmContext::build(&graph, &[doc_id], "Generate Study Cards");
+        let provider = MockLlmProvider;
+        let patch = provider.generate_patch(&context).await.unwrap();
+        let result = graph.validate_and_stage_patch(&patch);
+
+        assert_eq!(result.new_nodes.len(), 2);
+        assert_eq!(result.new_nodes[0].kind, NodeKind::Flashcard);
+        assert!(result.new_nodes[0].meta.answer.is_some());
+        assert_eq!(result.new_nodes[1].kind, NodeKind::Checklist);
+        assert_eq!(result.proposed_edges.len(), 1);
+    }
 }

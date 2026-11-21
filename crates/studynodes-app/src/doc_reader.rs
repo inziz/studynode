@@ -1413,6 +1413,28 @@ pub fn toggle_markdown_task(src: &str, task_index: usize) -> String {
     out
 }
 
+/// Extract ordered `(checked, label)` pairs matching [`toggle_markdown_task`] indices.
+pub fn parse_markdown_tasks(src: &str) -> Vec<(bool, String)> {
+    let mut tasks = Vec::new();
+    for line in src.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed
+            .strip_prefix("- [ ] ")
+            .or_else(|| trimmed.strip_prefix("* [ ] "))
+        {
+            tasks.push((false, rest.trim().to_string()));
+        } else if let Some(rest) = trimmed
+            .strip_prefix("- [x] ")
+            .or_else(|| trimmed.strip_prefix("- [X] "))
+            .or_else(|| trimmed.strip_prefix("* [x] "))
+            .or_else(|| trimmed.strip_prefix("* [X] "))
+        {
+            tasks.push((true, rest.trim().to_string()));
+        }
+    }
+    tasks
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextPreviewPage {
     pub heading: String,

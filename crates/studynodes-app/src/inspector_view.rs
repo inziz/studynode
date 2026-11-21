@@ -263,6 +263,27 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
             )
             .child(
                 el()
+                    .key("btn_ai_generate_cards")
+                    .w_full()
+                    .px(space::S3)
+                    .py(9.0)
+                    .radius(4.0)
+                    .fill(theme::bg_control())
+                    .hover(theme::hover_subtle())
+                    .border(1.0, theme::border_default())
+                    .center()
+                    .cursor(Cursor::Pointer)
+                    .on_press(|s: &mut AppState| {
+                        s.generate_study_cards_ai();
+                    })
+                    .child(
+                        text("◇ Generate Flashcards & Checklist")
+                            .font(theme::CONTROL_TEXT)
+                            .color(theme::text_primary()),
+                    ),
+            )
+            .child(
+                el()
                     .key("btn_back_from_ai")
                     .w_full()
                     .py(8.0)
@@ -648,6 +669,27 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                                                     .font(theme::CONTROL_TEXT)
                                                     .color(theme::text_primary()),
                                             ),
+                                    ),
+                            )
+                            .child(
+                                el()
+                                    .key("btn_doc_excerpt")
+                                    .grow(1.0)
+                                    .h(28.0)
+                                    .px(8.0)
+                                    .radius(4.0)
+                                    .fill(theme::bg_control())
+                                    .hover(theme::hover_subtle())
+                                    .border(1.0, theme::border_subtle())
+                                    .center()
+                                    .cursor(Cursor::Pointer)
+                                    .on_press(|s: &mut AppState| {
+                                        s.create_excerpt_from_selected_doc(None);
+                                    })
+                                    .child(
+                                        text("❝ Excerpt")
+                                            .font(theme::CONTROL_TEXT)
+                                            .color(theme::text_primary()),
                                     ),
                             ),
                     );
@@ -1181,7 +1223,8 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                                         |s| s.append_to_selected_node("> "),
                                     )),
                             ),
-                    );
+                    )
+                    .child(render_specialized_node_inspector(s, node));
 
                 if let Some(summary) = &node.summary {
                     content = content.child(
@@ -1596,6 +1639,26 @@ fn render_readonly_doc_panel(
     small_toolbar = small_toolbar
         .child(
             el()
+                .key("btn_readonly_excerpt")
+                .h(24.0)
+                .px(8.0)
+                .radius(4.0)
+                .fill(theme::bg_control())
+                .hover(theme::hover_subtle())
+                .border(1.0, theme::border_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut AppState| {
+                    s.create_excerpt_from_selected_doc(None);
+                })
+                .child(
+                    text("❝ Excerpt")
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_primary()),
+                ),
+        )
+        .child(
+            el()
                 .key("btn_toggle_readonly")
                 .h(24.0)
                 .px(8.0)
@@ -1769,4 +1832,219 @@ fn render_readonly_doc_panel(
                 .padding(14.0)
                 .child(reader_body),
         )
+}
+
+fn render_specialized_node_inspector(
+    s: &AppState,
+    node: &studynodes_graph::model::Node,
+) -> El {
+    let nid = node.id.clone();
+    match node.kind {
+        NodeKind::Flashcard => {
+            let cur = node.meta.mastery.as_deref().unwrap_or("new");
+            let mut mastery_row = row().w_full().gap(6.0);
+            for (key, label, val) in [
+                ("mast_new", "New", "new"),
+                ("mast_again", "Again", "again"),
+                ("mast_good", "Good", "good"),
+                ("mast_easy", "Easy", "easy"),
+            ] {
+                let id_c = nid.clone();
+                let active = cur == val;
+                mastery_row = mastery_row.child(
+                    seg_tab(key, label, active).on_press(move |s: &mut AppState| {
+                        s.set_flashcard_mastery(&id_c, val);
+                    }),
+                );
+            }
+
+            col()
+                .w_full()
+                .gap(8.0)
+                .child(
+                    col()
+                        .w_full()
+                        .gap(4.0)
+                        .child(
+                            text("ANSWER / BACK")
+                                .font(theme::SECTION_LABEL)
+                                .color(theme::text_muted()),
+                        )
+                        .child(
+                            el()
+                                .w_full()
+                                .min_h(92.0)
+                                .padding(10.0)
+                                .radius(4.0)
+                                .fill(theme::bg_input())
+                                .border(1.0, theme::border_default())
+                                .child(
+                                    text_input(&s.inspector_answer_edit, theme::BODY_TEXT)
+                                        .key("inspector_answer")
+                                        .label("Flashcard answer")
+                                        .w_full()
+                                        .min_h(76.0)
+                                        .wrap()
+                                        .color(theme::text_primary())
+                                        .caret(
+                                            theme::accent_claude(),
+                                            theme::accent_claude().alpha(0.25),
+                                        )
+                                        .placeholder(
+                                            "Recall explanation shown when card is flipped...",
+                                            theme::text_muted(),
+                                        )
+                                        .on_edit(|s: &mut AppState| &mut s.inspector_answer_edit)
+                                        .on_input_change(|s: &mut AppState, _| {
+                                            s.sync_from_inspector_edits();
+                                        }),
+                                ),
+                        ),
+                )
+                .child(
+                    col()
+                        .w_full()
+                        .gap(4.0)
+                        .child(
+                            text("MASTERY")
+                                .font(theme::SECTION_LABEL)
+                                .color(theme::text_muted()),
+                        )
+                        .child(mastery_row),
+                )
+        }
+        NodeKind::Formula => {
+            let cur = node.meta.language.as_deref().unwrap_or("MATH");
+            let mut langs = row().w_full().gap(6.0);
+            for (key, lang) in [
+                ("lang_math", "MATH"),
+                ("lang_rust", "RUST"),
+                ("lang_py", "PY"),
+                ("lang_chem", "CHEM"),
+            ] {
+                let id_c = nid.clone();
+                langs = langs.child(
+                    seg_tab(key, lang, cur.eq_ignore_ascii_case(lang)).on_press(
+                        move |s: &mut AppState| {
+                            s.set_formula_language(&id_c, lang);
+                        },
+                    ),
+                );
+            }
+            col()
+                .w_full()
+                .gap(4.0)
+                .child(
+                    text("NOTATION")
+                        .font(theme::SECTION_LABEL)
+                        .color(theme::text_muted()),
+                )
+                .child(langs)
+        }
+        NodeKind::Section => {
+            let framed = node.meta.section_framed;
+            let id_a = nid.clone();
+            let id_b = nid.clone();
+            let sz = crate::state::node_world_size(node);
+            col()
+                .w_full()
+                .gap(6.0)
+                .child(
+                    text("SECTION MODE")
+                        .font(theme::SECTION_LABEL)
+                        .color(theme::text_muted()),
+                )
+                .child(
+                    row()
+                        .w_full()
+                        .gap(6.0)
+                        .child(
+                            seg_tab("insp_sec_framed", "▭ Framed Group", framed).on_press(
+                                move |s: &mut AppState| {
+                                    if let Some(sec) = s.graph.get_node(&id_a) {
+                                        if !sec.meta.section_framed {
+                                            s.toggle_section_framed(&id_a);
+                                        }
+                                    }
+                                },
+                            ),
+                        )
+                        .child(
+                            seg_tab("insp_sec_banner", "— Banner Only", !framed).on_press(
+                                move |s: &mut AppState| {
+                                    if let Some(sec) = s.graph.get_node(&id_b) {
+                                        if sec.meta.section_framed {
+                                            s.toggle_section_framed(&id_b);
+                                        }
+                                    }
+                                },
+                            ),
+                        ),
+                )
+                .child(
+                    text(format!("Canvas bounds: {} × {} px", sz.0 as i32, sz.1 as i32))
+                        .font(theme::STATUS_TEXT)
+                        .color(theme::text_muted()),
+                )
+        }
+        NodeKind::Excerpt => {
+            let jump_label = match (&node.meta.source_node, node.meta.source_page) {
+                (Some(src_id), page_opt) => {
+                    let doc_title = s
+                        .graph
+                        .get_node(src_id)
+                        .map(|d| d.title.as_str())
+                        .unwrap_or("Source Document");
+                    format!("▤ Open '{}' · p.{} ↗", doc_title, page_opt.unwrap_or(0) + 1)
+                }
+                _ => "No source document linked".into(),
+            };
+            el().key("btn_inspector_excerpt_jump")
+                .w_full()
+                .py(8.0)
+                .px(10.0)
+                .radius(4.0)
+                .fill(theme::bg_control())
+                .hover(theme::accent_claude().alpha(0.16))
+                .border(1.0, theme::border_default())
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.jump_to_excerpt_source(&nid);
+                })
+                .child(
+                    text(jump_label)
+                        .font(theme::CONTROL_TEXT)
+                        .color(theme::accent_claude())
+                        .truncate(),
+                )
+        }
+        NodeKind::Sequence => el()
+            .key("btn_inspector_seq_next")
+            .w_full()
+            .py(8.0)
+            .px(10.0)
+            .radius(4.0)
+            .fill(theme::bg_control())
+            .hover(theme::accent_claude().alpha(0.16))
+            .border(1.0, theme::border_default())
+            .center()
+            .cursor(Cursor::Pointer)
+            .on_press(move |s: &mut AppState| {
+                s.add_next_sequence_step(&nid);
+            })
+            .child(
+                text("+ Spawn Next Step →")
+                    .font(theme::CONTROL_TEXT)
+                    .color(theme::text_primary()),
+            ),
+        NodeKind::Checklist => {
+            let tasks = doc_reader::parse_markdown_tasks(&node.content);
+            let done = tasks.iter().filter(|(c, _)| *c).count();
+            text(format!("Checklist progress: {}/{} tasks completed", done, tasks.len()))
+                .font(theme::STATUS_TEXT)
+                .color(theme::text_secondary())
+        }
+        _ => el(),
+    }
 }

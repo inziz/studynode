@@ -29,6 +29,65 @@ pub struct MockLlmProvider;
 impl LlmProvider for MockLlmProvider {
     async fn generate_patch(&self, context: &LlmContext) -> Result<GraphPatch, LlmError> {
         let mut ops = Vec::new();
+        let task_lower = context.task.to_lowercase();
+
+        if task_lower.contains("flashcard") || task_lower.contains("study") {
+            if let Some(primary) = context.focus_nodes.first() {
+                let answer_text = primary
+                    .summary
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        let first_line = primary
+                            .content
+                            .lines()
+                            .map(str::trim)
+                            .find(|l| !l.is_empty() && !l.starts_with('#'))
+                            .unwrap_or("Key conceptual mechanism from source material.");
+                        let truncated: String = first_line.chars().take(140).collect();
+                        truncated
+                    });
+
+                ops.push(PatchOp::CreateStudyNode {
+                    temp_id: "study_fc_1".into(),
+                    kind: studynodes_graph::model::NodeKind::Flashcard,
+                    title: format!("Recall: {}", primary.title),
+                    content: format!(
+                        "What core principle or mechanism does '{}' establish?",
+                        primary.title
+                    ),
+                    answer: Some(answer_text),
+                    source_nodes: vec![primary.node_id.clone()],
+                });
+
+                ops.push(PatchOp::CreateStudyNode {
+                    temp_id: "study_chk_1".into(),
+                    kind: studynodes_graph::model::NodeKind::Checklist,
+                    title: format!("{} · Study Plan", primary.title),
+                    content: format!(
+                        "- [ ] Summarize '{}' from memory\n- [ ] Connect empirical evidence\n- [ ] Self-test flashcard recall",
+                        primary.title
+                    ),
+                    answer: None,
+                    source_nodes: vec![primary.node_id.clone()],
+                });
+
+                ops.push(PatchOp::ProposeConnection {
+                    from_node: primary.node_id.clone(),
+                    to_node: "study_fc_1".into(),
+                    relation: SemanticRelation::DerivedFrom,
+                    label: "Tests recall".into(),
+                    note: "Auto-generated active recall prompt.".into(),
+                    evidence: vec![],
+                    confidence: 0.91,
+                });
+
+                return Ok(GraphPatch {
+                    summary: "Generated active-recall Flashcard & Study Checklist.".into(),
+                    ops,
+                });
+            }
+        }
 
         if context.focus_nodes.len() >= 2 {
             let n1 = &context.focus_nodes[0];

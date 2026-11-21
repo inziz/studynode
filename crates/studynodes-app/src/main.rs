@@ -127,10 +127,19 @@ fn populate_demo_projects(s: &mut AppState) {
     // Tab 2: Cognitive Neuroscience (active flagship workspace)
     s.create_project("Cognitive Neuroscience");
 
+    let mut section = studynodes_graph::model::Node::new(
+        studynodes_graph::model::NodeKind::Section,
+        "Synaptic Plasticity · Core Circuit",
+        studynodes_graph::coords::WorldPos::new(8.0, 12.0),
+    );
+    section.size = (760.0, 534.0);
+    section.meta.section_framed = true;
+    s.graph.add_node(section);
+
     let mut n1 = studynodes_graph::model::Node::new(
         studynodes_graph::model::NodeKind::Document,
         "Hebbian Learning (1949)",
-        studynodes_graph::coords::WorldPos::new(24.0, 56.0),
+        studynodes_graph::coords::WorldPos::new(28.0, 62.0),
     );
     n1.size = node_base_size(n1.kind);
     n1.content = r#"# The Organization of Behavior
@@ -167,7 +176,7 @@ fn hebbian_delta(pre: f32, post: f32, lr: f32) -> f32 {
     let mut n2 = studynodes_graph::model::Node::new(
         studynodes_graph::model::NodeKind::Note,
         "LTP Mechanism",
-        studynodes_graph::coords::WorldPos::new(470.0, 48.0),
+        studynodes_graph::coords::WorldPos::new(460.0, 62.0),
     );
     n2.size = node_base_size(n2.kind);
     n2.content = "Long-Term Potentiation validates Hebb's postulate via NMDA coincidence detection and AMPA receptor insertion.".into();
@@ -180,7 +189,7 @@ fn hebbian_delta(pre: f32, post: f32, lr: f32) -> f32 {
             port: studynodes_graph::model::PortId::new("out_main"),
         },
         studynodes_graph::model::EdgeEndpoint {
-            node: id2.clone(),
+            node: id2,
             port: studynodes_graph::model::PortId::new("in_main"),
         },
     );
@@ -189,28 +198,43 @@ fn hebbian_delta(pre: f32, post: f32, lr: f32) -> f32 {
     edge.note = "Biochemical validation through NMDA activation".into();
     s.graph.add_edge(edge);
 
-    let mut synth = studynodes_graph::model::Node::new(
-        studynodes_graph::model::NodeKind::LlmSynthesis,
-        "Memory Consolidation",
-        studynodes_graph::coords::WorldPos::new(430.0, 350.0),
+    let mut fc = studynodes_graph::model::Node::new(
+        studynodes_graph::model::NodeKind::Flashcard,
+        "Coincidence Detector",
+        studynodes_graph::coords::WorldPos::new(28.0, 326.0),
     );
-    synth.size = node_base_size(synth.kind);
-    synth.content = "Hebbian plasticity provides the local synaptic substrate for hippocampal-neocortical consolidation.".into();
-    let synth_id = synth.id.clone();
-    s.graph.add_node(synth);
+    fc.size = node_base_size(fc.kind);
+    fc.content = "Which receptor gates Ca2+ influx only during paired pre + post firing?".into();
+    fc.meta.answer = Some(
+        "The NMDA glutamate receptor: glutamate binds while depolarization expels the Mg2+ pore block."
+            .into(),
+    );
+    fc.meta.mastery = Some("good".into());
+    let fc_id = fc.id.clone();
+    s.graph.add_node(fc);
+
+    let mut chk = studynodes_graph::model::Node::new(
+        studynodes_graph::model::NodeKind::Checklist,
+        "Plasticity Study Plan",
+        studynodes_graph::coords::WorldPos::new(460.0, 326.0),
+    );
+    chk.size = node_base_size(chk.kind);
+    chk.content = "- [x] Trace Hebbian weight update rule\n- [ ] Contrast AMPA vs NMDA kinetics\n- [ ] Test recall on LTP flashcard".into();
+    let chk_id = chk.id.clone();
+    s.graph.add_node(chk);
 
     let ghost_edge = studynodes_graph::model::Edge::proposed_by_llm(
         studynodes_graph::model::EdgeEndpoint {
-            node: id1.clone(),
+            node: fc_id,
             port: studynodes_graph::model::PortId::new("out_main"),
         },
         studynodes_graph::model::EdgeEndpoint {
-            node: synth_id,
+            node: chk_id,
             port: studynodes_graph::model::PortId::new("in_main"),
         },
         studynodes_graph::model::EdgeRelation::DerivedFrom,
-        "Cellular substrate",
-        "Provides cellular substrate",
+        "Active recall",
+        "Derived study drill anchored in NMDA coincidence detection",
     );
     s.graph.add_edge(ghost_edge);
 
@@ -218,7 +242,11 @@ fn hebbian_delta(pre: f32, post: f32, lr: f32) -> f32 {
     s.select_node(id1, false);
     s.save_active_into_tab();
     s.refresh_recent_projects();
-    s.status_message = "Loaded 'Cognitive Neuroscience' · 3 nodes, 2 links".into();
+    s.status_message = format!(
+        "Loaded 'Cognitive Neuroscience' · {} nodes, {} links",
+        s.graph.nodes.len(),
+        s.graph.edges.len()
+    );
 }
 
 fn setup_workspace_demo(s: &mut AppState) {
@@ -944,5 +972,193 @@ mod tests {
         assert!(rt.state.locate_nearest_nodes().is_none());
         assert_eq!(rt.state.graph.viewport.offset, WorldPos::ZERO);
         assert!((rt.state.graph.viewport.zoom - 1.0).abs() < 1e-4);
+    }
+
+    fn click_key(rt: &mut Runtime<AppState>, key: &str) {
+        let r = element_rect(rt, key);
+        let cx = r[0] + r[2] * 0.5;
+        let cy = r[1] + r[3] * 0.5;
+        rt.pointer_move(cx, cy);
+        rt.pointer_down(cx, cy);
+        rt.pointer_up(cx, cy);
+        settle_frames(rt, 3);
+    }
+
+    #[test]
+    fn test_section_frame_group_drag_and_banner_toggle() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Section Group Test");
+
+        let sec_id = rt
+            .state
+            .add_study_node(NodeKind::Section, Some(WorldPos::new(40.0, 40.0)));
+        let child_inside = rt.state.add_note_node(Some(WorldPos::new(90.0, 110.0)));
+        let child_outside = rt.state.add_note_node(Some(WorldPos::new(820.0, 110.0)));
+        rt.state.deselect_all();
+        rt.state.inspector_open = false;
+        rt.invalidate();
+        settle_frames(rt, 45);
+
+        let hdr = element_rect(rt, &format!("node_header_{}", sec_id.as_str()));
+        let sx = hdr[0] + hdr[2] * 0.25;
+        let sy = hdr[1] + hdr[3] * 0.5;
+        rt.pointer_move(sx, sy);
+        rt.pointer_down(sx, sy);
+        rt.pointer_move(sx + 60.0, sy + 40.0);
+        rt.pointer_move(sx + 120.0, sy + 70.0);
+        rt.pointer_up(sx + 120.0, sy + 70.0);
+        settle_frames(rt, 5);
+
+        let sec_pos = rt.state.graph.get_node(&sec_id).unwrap().pos;
+        let in_pos = rt.state.graph.get_node(&child_inside).unwrap().pos;
+        let out_pos = rt.state.graph.get_node(&child_outside).unwrap().pos;
+
+        assert!((sec_pos.x - 160.0).abs() < 2.0, "sec moved right: {:?}", sec_pos);
+        assert!((sec_pos.y - 110.0).abs() < 2.0, "sec moved down: {:?}", sec_pos);
+        assert!((in_pos.x - 210.0).abs() < 2.0, "child inside moved together: {:?}", in_pos);
+        assert!((in_pos.y - 180.0).abs() < 2.0, "child inside moved together: {:?}", in_pos);
+        assert!((out_pos.x - 820.0).abs() < 1e-3, "outside note stayed put: {:?}", out_pos);
+
+        // Toggle section to Title Banner Only mode -> height drops to 44
+        settle_frames(rt, 40);
+        click_key(rt, &format!("sec_toggle_frame_{}", sec_id.as_str()));
+        let sec = rt.state.graph.get_node(&sec_id).unwrap();
+        assert!(!sec.meta.section_framed);
+        assert!((crate::state::node_world_size(sec).1 - 44.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_flashcard_flip_and_mastery_rating() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Flashcard Recall Test");
+        rt.state.inspector_open = false;
+
+        let fc_id = rt
+            .state
+            .add_study_node(NodeKind::Flashcard, Some(WorldPos::new(120.0, 120.0)));
+        if let Some(fc) = rt.state.graph.get_node_mut(&fc_id) {
+            fc.content = "What channels gate LTP?".into();
+            fc.meta.answer = Some("NMDA receptors".into());
+        }
+        rt.state.deselect_all();
+        rt.invalidate();
+        settle_frames(rt, 45);
+
+        // Reveal answer inline on canvas without popping inspector open
+        click_key(rt, &format!("flash_flip_{}", fc_id.as_str()));
+        assert!(rt.state.flipped_flashcards.contains(&fc_id));
+        assert!(!rt.state.inspector_open);
+
+        // Rate mastery as Good
+        settle_frames(rt, 10);
+        click_key(rt, &format!("flash_rate_good_{}", fc_id.as_str()));
+        let fc = rt.state.graph.get_node(&fc_id).unwrap();
+        assert_eq!(fc.meta.mastery.as_deref(), Some("good"));
+    }
+
+    #[test]
+    fn test_checklist_card_toggles_task_inline() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Checklist Test");
+
+        let chk_id = rt
+            .state
+            .add_study_node(NodeKind::Checklist, Some(WorldPos::new(100.0, 100.0)));
+        if let Some(chk) = rt.state.graph.get_node_mut(&chk_id) {
+            chk.content = "- [ ] First item\n- [ ] Second item".into();
+        }
+        rt.invalidate();
+        settle_frames(rt, 45);
+
+        click_key(rt, &format!("check_item_{}_1", chk_id.as_str()));
+        let content = &rt.state.graph.get_node(&chk_id).unwrap().content;
+        assert!(content.contains("- [ ] First item"));
+        assert!(content.contains("- [x] Second item"));
+    }
+
+    #[test]
+    fn test_excerpt_jumps_to_source_document_page() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Excerpt Jump Test");
+
+        let doc_id = rt.state.add_document_node(Some(WorldPos::new(80.0, 80.0)));
+        let lines: String = (1..=20)
+            .map(|i| format!("Line {} of multi-page study paper", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(doc) = rt.state.graph.get_node_mut(&doc_id) {
+            doc.content = lines;
+            doc.preview_page = 2;
+        }
+
+        let ex_id = rt
+            .state
+            .create_excerpt_from_selected_doc(None)
+            .expect("excerpt from selected doc");
+        {
+            let ex = rt.state.graph.get_node(&ex_id).unwrap();
+            assert_eq!(ex.meta.source_node.as_ref(), Some(&doc_id));
+            assert_eq!(ex.meta.source_page, Some(2));
+        }
+
+        // Reset doc preview page back to 0 and deselect everything
+        if let Some(doc) = rt.state.graph.get_node_mut(&doc_id) {
+            doc.preview_page = 0;
+        }
+        rt.state.deselect_all();
+        rt.state.inspector_open = false;
+        rt.invalidate();
+        settle_frames(rt, 45);
+
+        // Clicking deep-link pill on Excerpt card jumps to Document page 2 & opens Reader
+        click_key(rt, &format!("excerpt_jump_{}", ex_id.as_str()));
+        assert!(rt.state.selected_nodes.contains(&doc_id));
+        assert_eq!(rt.state.graph.get_node(&doc_id).unwrap().preview_page, 2);
+        assert!(rt.state.inspector_open);
+    }
+
+    #[test]
+    fn test_sequence_next_step_and_block_menu() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Sequence & Block Menu Test");
+        rt.state.inspector_open = false;
+        rt.invalidate();
+        settle_frames(rt, 45);
+
+        // Open + Block palette menu and create a Sequence step
+        click_key(rt, "btn_toggle_block_menu");
+        assert!(rt.state.show_block_menu);
+        settle_frames(rt, 10);
+
+        click_key(rt, "btn_add_sequence");
+        assert!(!rt.state.show_block_menu);
+        let seq1_id = rt
+            .state
+            .graph
+            .nodes
+            .values()
+            .find(|n| n.kind == NodeKind::Sequence)
+            .expect("Step 01 created")
+            .id
+            .clone();
+        settle_frames(rt, 45);
+
+        // Click "+ Next ->" on Step 01 to chain Step 02
+        click_key(rt, &format!("seq_next_{}", seq1_id.as_str()));
+        let steps: Vec<_> = rt
+            .state
+            .graph
+            .nodes
+            .values()
+            .filter(|n| n.kind == NodeKind::Sequence)
+            .collect();
+        assert_eq!(steps.len(), 2);
+        assert!(steps.iter().any(|n| n.meta.step_index == Some(2)));
+        assert_eq!(rt.state.graph.edges.len(), 1);
     }
 }

@@ -78,6 +78,18 @@ pub enum NodeKind {
     LlmSynthesis,
     /// Conceptual cluster or topic anchor
     Concept,
+    /// Spatial section title or collapsible/draggable group frame behind cards
+    Section,
+    /// Highlighted quotation deep-linked to a source document page
+    Excerpt,
+    /// Interactive spaced-repetition prompt/answer flip card
+    Flashcard,
+    /// Monospace mathematical equation, code snippet, or reaction schema
+    Formula,
+    /// Interactive task/study-checklist card backed by Markdown checkboxes
+    Checklist,
+    /// Numbered procedural or causal step card with chained spawning
+    Sequence,
 }
 
 impl NodeKind {
@@ -88,18 +100,56 @@ impl NodeKind {
             Self::Image => "Image",
             Self::LlmSynthesis => "AI Synthesis",
             Self::Concept => "Concept",
+            Self::Section => "Section",
+            Self::Excerpt => "Excerpt",
+            Self::Flashcard => "Flashcard",
+            Self::Formula => "Formula",
+            Self::Checklist => "Checklist",
+            Self::Sequence => "Sequence",
         }
     }
 
     pub fn default_color_hex(&self) -> &'static str {
         match self {
-            Self::Note => "#eab308",       // Yellow/Amber
-            Self::Document => "#3b82f6",   // Blue
-            Self::Image => "#10b981",      // Emerald
+            Self::Note => "#eab308",         // Yellow/Amber
+            Self::Document => "#3b82f6",     // Blue
+            Self::Image => "#10b981",        // Emerald
             Self::LlmSynthesis => "#8b5cf6", // Purple/Violet
-            Self::Concept => "#ec4899",    // Pink
+            Self::Concept => "#ec4899",      // Pink
+            Self::Section => "#73726e",      // Warm stone frame
+            Self::Excerpt => "#d97757",      // Terracotta citation
+            Self::Flashcard => "#d4d3ce",    // Chalk prompt/flip
+            Self::Formula => "#b8b7b0",      // Technical mono slate
+            Self::Checklist => "#9a9993",    // Muted task checklist
+            Self::Sequence => "#ecebe6",     // Bright ordinal step
         }
     }
+}
+
+/// Optional metadata extending specialized Phase 2 study nodes (`Flashcard`, `Excerpt`, `Formula`, `Sequence`, `Section`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct NodeMeta {
+    /// Answer / back face for `Flashcard` cards.
+    #[serde(default)]
+    pub answer: Option<String>,
+    /// Spaced repetition / recall mastery rating (`"new"`, `"again"`, `"good"`, `"easy"`).
+    #[serde(default)]
+    pub mastery: Option<String>,
+    /// Source document node referenced by an `Excerpt`.
+    #[serde(default)]
+    pub source_node: Option<NodeId>,
+    /// Zero-based page or section index referenced by an `Excerpt`.
+    #[serde(default)]
+    pub source_page: Option<usize>,
+    /// Language or notation tag for `Formula` cards (`"MATH"`, `"RUST"`, `"CHEM"`, etc.).
+    #[serde(default)]
+    pub language: Option<String>,
+    /// 1-based ordinal step index for `Sequence` cards.
+    #[serde(default)]
+    pub step_index: Option<u32>,
+    /// Whether a `Section` renders as a framed group backdrop (`true`) or title banner only (`false`).
+    #[serde(default)]
+    pub section_framed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -119,6 +169,9 @@ pub struct Node {
     pub summary: Option<String>,
     pub tags: Vec<String>,
     pub ports: Vec<Port>,
+    /// Specialized metadata for study card kinds (`Section`, `Flashcard`, `Excerpt`, `Formula`, `Checklist`, `Sequence`).
+    #[serde(default)]
+    pub meta: NodeMeta,
 }
 
 impl Node {
@@ -153,6 +206,7 @@ impl Node {
             summary: None,
             tags: Vec::new(),
             ports,
+            meta: NodeMeta::default(),
         }
     }
 

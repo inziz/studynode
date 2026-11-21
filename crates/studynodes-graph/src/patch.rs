@@ -82,6 +82,18 @@ pub enum PatchOp {
         node_id: String,
         summary: String,
     },
+
+    /// Spawns a specialized Phase 2 study node (`Flashcard`, `Checklist`, `Formula`, `Excerpt`, `Sequence`, `Section`).
+    CreateStudyNode {
+        temp_id: String,
+        kind: NodeKind,
+        title: String,
+        content: String,
+        #[serde(default)]
+        answer: Option<String>,
+        #[serde(default)]
+        source_nodes: Vec<String>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -92,12 +104,46 @@ pub struct StagedPatchResult {
     pub dropped_ops_count: usize,
 }
 
+fn centroid_spawn_pos(
+    graph: &StudyGraph,
+    source_nodes: &[String],
+    temp_to_real: &HashMap<String, NodeId>,
+    sibling_offset: usize,
+) -> WorldPos {
+    let mut sum_x = 0.0;
+    let mut sum_y = 0.0;
+    let mut valid_count = 0;
+
+    for src in source_nodes {
+        let id = temp_to_real
+            .get(src)
+            .cloned()
+            .unwrap_or_else(|| NodeId::from_str(src));
+        if let Some(n) = graph.nodes.get(&id) {
+            sum_x += n.pos.x;
+            sum_y += n.pos.y;
+            valid_count += 1;
+        }
+    }
+
+    let dx = (sibling_offset as f32) * 290.0;
+    if valid_count > 0 {
+        WorldPos::new(
+            sum_x / valid_count as f32 + dx,
+            sum_y / valid_count as f32 + 220.0,
+        )
+    } else {
+        WorldPos::new(100.0 + dx, 100.0)
+    }
+}
+
 impl StudyGraph {
     /// Validates a `GraphPatch` against the current graph topology, resolving temp IDs and
     /// filtering out any hallucinated IDs or duplicate edges.
     pub fn validate_and_stage_patch(&mut self, patch: &GraphPatch) -> StagedPatchResult {
         let mut result = StagedPatchResult::default();
         let mut temp_to_real: HashMap<String, NodeId> = HashMap::new();
+        let mut created_count: usize = 0;
 
         for op in &patch.ops {
             match op {
@@ -107,34 +153,49 @@ impl StudyGraph {
                     markdown_body,
                     source_nodes,
                 } => {
-                    // Compute centroid of valid source nodes
-                    let mut sum_x = 0.0;
-                    let mut sum_y = 0.0;
-                    let mut valid_count = 0;
-
-                    for src in source_nodes {
-                        let id = temp_to_real
-                            .get(src)
-                            .cloned()
-                            .unwrap_or_else(|| NodeId::from_str(src));
-                        if let Some(n) = self.nodes.get(&id) {
-                            sum_x += n.pos.x;
-                            sum_y += n.pos.y;
-                            valid_count += 1;
-                        }
-                    }
-
-                    let spawn_pos = if valid_count > 0 {
-                        WorldPos::new(
-                            sum_x / valid_count as f32,
-                            sum_y / valid_count as f32 + 220.0,
-                        )
-                    } else {
-                        WorldPos::new(100.0, 100.0)
-                    };
+                    let spawn_pos =
+                        centroid_spawn_pos(self, source_nodes, &temp_to_real, created_count);
+                    created_count += 1;
 
                     let mut node = Node::new(NodeKind::LlmSynthesis, title, spawn_pos);
                     node.content = markdown_body.clone();
+                    temp_to_real.insert(temp_id.clone(), node.id.clone());
+
+                    self.add_node(node.clone());
+                    result.new_nodes.push(node);
+                }
+
+                PatchOp::CreateStudyNode {
+                    temp_id,
+                    kind,
+                    title,
+                    content,
+                    answer,
+                    source_nodes,
+                } => {
+                    let spawn_pos =
+                        centroid_spawn_pos(self, source_nodes, &temp_to_real, created_count);
+                    created_count += 1;
+
+                    let mut node = Node::new(*kind, title, spawn_pos);
+                    node.content = content.clone();
+                    match kind {
+                        NodeKind::Flashcard => {
+                            node.meta.answer = answer.clone();
+                            node.meta.mastery = Some("new".into());
+                        }
+                        NodeKind::Section => {
+                            node.meta.section_framed = true;
+                            node.size = (640.0, 400.0);
+                        }
+                        NodeKind::Formula => {
+                            node.meta.language = Some("MATH".into());
+                        }
+                        NodeKind::Sequence => {
+                            node.meta.step_index = Some(created_count as u32);
+                        }
+                        _ => {}
+                    }
                     temp_to_real.insert(temp_id.clone(), node.id.clone());
 
                     self.add_node(node.clone());
@@ -301,5 +362,72 @@ mod tests {
         let edge = result.proposed_edges.first().unwrap();
         assert_eq!(edge.status, EdgeStatus::Proposed);
         assert_eq!(edge.provenance, EdgeProvenance::Llm);
+    }
+
+    #[test]
+    fn test_create_study_node_patch_and_backward_compat_deserialization() {
+        let mut g = StudyGraph::new("Study Patch Test");
+        let doc = Node::new(NodeKind::Document, "Lecture Notes", WorldPos::new(100.0, 100.0));
+        let doc_id = doc.id.as_str().to_string();
+        g.add_node(doc);
+
+        let patch = GraphPatch {
+            summary: "Generate flashcard & checklist".into(),
+            ops: vec![
+                PatchOp::CreateStudyNode {
+                    temp_id: "fc_1".into(),
+                    kind: NodeKind::Flashcard,
+                    title: "LTP Trigger".into(),
+                    content: "Which receptor unblocks once postsynaptic depolarization expels Mg2+?".into(),
+                    answer: Some("NMDA receptor".into()),
+                    source_nodes: vec![doc_id.clone()],
+                },
+                PatchOp::CreateStudyNode {
+                    temp_id: "chk_1".into(),
+                    kind: NodeKind::Checklist,
+                    title: "Review Steps".into(),
+                    content: "- [ ] Derive Goldman equation\n- [ ] Compare AMPA vs NMDA".into(),
+                    answer: None,
+                    source_nodes: vec![doc_id.clone()],
+                },
+                PatchOp::ProposeConnection {
+                    from_node: doc_id,
+                    to_node: "fc_1".into(),
+                    relation: SemanticRelation::DerivedFrom,
+                    label: "Tests recall".into(),
+                    note: "Key exam question".into(),
+                    evidence: vec![],
+                    confidence: 0.92,
+                },
+            ],
+        };
+
+        let result = g.validate_and_stage_patch(&patch);
+        assert_eq!(result.new_nodes.len(), 2);
+        assert_eq!(result.proposed_edges.len(), 1);
+        let fc = &result.new_nodes[0];
+        assert_eq!(fc.kind, NodeKind::Flashcard);
+        assert_eq!(fc.meta.answer.as_deref(), Some("NMDA receptor"));
+        assert_eq!(fc.meta.mastery.as_deref(), Some("new"));
+        // Second node is spaced to avoid overlap
+        assert!((result.new_nodes[1].pos.x - fc.pos.x - 290.0).abs() < 1e-3);
+
+        // Legacy JSON without `preview_page` or `meta` must deserialize cleanly
+        let legacy_json = r#"{
+            "id": "legacy_1",
+            "kind": "Note",
+            "title": "Old Note",
+            "content": "Legacy body",
+            "pos": { "x": 12.0, "y": 34.0 },
+            "size": [280.0, 180.0],
+            "asset_hash": null,
+            "summary": null,
+            "tags": [],
+            "ports": []
+        }"#;
+        let deserialized: Node = serde_json::from_str(legacy_json).expect("legacy node json");
+        assert_eq!(deserialized.preview_page, 0);
+        assert_eq!(deserialized.meta.answer, None);
+        assert!(!deserialized.meta.section_framed);
     }
 }

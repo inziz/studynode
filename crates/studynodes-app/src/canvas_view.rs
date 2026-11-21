@@ -8,11 +8,11 @@ use studynodes_graph::coords::{ScreenPos, WorldPos};
 use studynodes_graph::model::{Edge, EdgeStatus, Node, NodeKind, PortDirection, PortId};
 
 use crate::doc_reader::{self, DocFormat};
-use crate::state::{AppState, CanvasMode, node_base_size};
+use crate::state::{AppState, CanvasMode, node_world_size};
 use crate::theme;
 
 fn port_world_pos_for(node: &Node, port_id: &PortId) -> WorldPos {
-    let (w, h) = node_base_size(node.kind);
+    let (w, h) = node_world_size(node);
     let y_center = node.pos.y + h * 0.5;
     if let Some(port) = node.ports.iter().find(|p| &p.id == port_id) {
         match port.direction {
@@ -26,12 +26,10 @@ fn port_world_pos_for(node: &Node, port_id: &PortId) -> WorldPos {
     }
 }
 
-pub fn render_canvas_view(s: &AppState) -> El {
+fn build_grid_shape(s: &AppState) -> Shape {
     let cam = s.graph.viewport;
     let zoom = cam.zoom;
-
-    // 1. Vector Canvas Layer (Subtle Monochrome Grid + Bezier Wires)
-    let mut canvas_shape = Shape::new();
+    let mut grid_shape = Shape::new();
 
     let base_spacing = 48.0 * zoom;
     if base_spacing >= 10.0 {
@@ -45,7 +43,7 @@ pub fn render_canvas_view(s: &AppState) -> El {
         while x < 3840.0 {
             let is_major = ix.rem_euclid(4) == 0;
             let (col, w) = if is_major { (major_color, 0.75) } else { (minor_color, 0.5) };
-            canvas_shape = canvas_shape.line([x, 0.0], [x, 2160.0], w, LineCap::Butt, col);
+            grid_shape = grid_shape.line([x, 0.0], [x, 2160.0], w, LineCap::Butt, col);
             x += base_spacing;
             ix += 1;
         }
@@ -57,13 +55,20 @@ pub fn render_canvas_view(s: &AppState) -> El {
         while y < 2160.0 {
             let is_major = iy.rem_euclid(4) == 0;
             let (col, w) = if is_major { (major_color, 0.75) } else { (minor_color, 0.5) };
-            canvas_shape = canvas_shape.line([0.0, y], [3840.0, y], w, LineCap::Butt, col);
+            grid_shape = grid_shape.line([0.0, y], [3840.0, y], w, LineCap::Butt, col);
             y += base_spacing;
             iy += 1;
         }
     }
 
-    // Connection wires
+    grid_shape
+}
+
+fn build_wire_shape(s: &AppState) -> Shape {
+    let cam = s.graph.viewport;
+    let zoom = cam.zoom;
+    let mut wire_shape = Shape::new();
+
     for edge in s.graph.edges.values() {
         if let (Some(from_node), Some(to_node)) = (
             s.graph.get_node(&edge.from.node),
@@ -93,11 +98,10 @@ pub fn render_canvas_view(s: &AppState) -> El {
                 (theme::wire_default(), 1.6 * zoom.clamp(0.7, 1.4))
             };
 
-            canvas_shape = canvas_shape.stroke(segments, wire_w, wire_color);
+            wire_shape = wire_shape.stroke(segments, wire_w, wire_color);
         }
     }
 
-    // Active wire pulling preview
     if let CanvasMode::DraggingWire {
         from_node,
         from_port,
@@ -116,13 +120,22 @@ pub fn render_canvas_view(s: &AppState) -> El {
                 })
                 .collect();
 
-            canvas_shape = canvas_shape.stroke(
+            wire_shape = wire_shape.stroke(
                 segments,
                 2.2 * zoom.clamp(0.7, 1.4),
                 theme::accent_claude(),
             );
         }
     }
+
+    wire_shape
+}
+
+pub fn render_canvas_view(s: &AppState) -> El {
+    let cam = s.graph.viewport;
+    let zoom = cam.zoom;
+    let grid_shape = build_grid_shape(s);
+    let wire_shape = build_wire_shape(s);
 
     // 2. Interactive Canvas Container (grow(1.0).min_w(0.0) so right-side Reader fits on screen!)
     let mut canvas_container = el()
@@ -140,7 +153,7 @@ pub fn render_canvas_view(s: &AppState) -> El {
             crate::touchpad_win32::set_canvas_bounds(Some(r));
             tx.live_only();
         })
-        .child(canvas(canvas_shape).w_full().h_full())
+        .child(canvas(grid_shape).w_full().h_full())
         .on_wheel(|s: &mut AppState, e, _| {
             if e.mods.ctrl || e.mods.cmd {
                 let factor = if e.dy > 0.0 { 1.10 } else { 0.90 };
@@ -193,8 +206,33 @@ pub fn render_canvas_view(s: &AppState) -> El {
             }
         });
 
-    // 3. Node Cards (deterministic z-order: unselected sorted by id, selected on top)
-    let mut ordered_nodes: Vec<&Node> = s.graph.nodes.values().collect();
+    // 2. Section Title Banners & Group Frames (always behind wires and regular cards)
+    let mut section_nodes: Vec<&Node> = s
+        .graph
+        .nodes
+        .values()
+        .filter(|n| n.kind == NodeKind::Section)
+        .collect();
+    section_nodes.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+    for sec in section_nodes {
+        canvas_container = canvas_container.child(render_section_node(
+            s,
+            sec,
+            cam.world_to_screen(sec.pos),
+            zoom,
+        ));
+    }
+
+    // 2b. Bezier Wires Layer (above Section backdrops, behind regular Study cards)
+    canvas_container = canvas_container.child(canvas(wire_shape).w_full().h_full());
+
+    // 3. Regular Node Cards (deterministic z-order: unselected sorted by id, selected on top)
+    let mut ordered_nodes: Vec<&Node> = s
+        .graph
+        .nodes
+        .values()
+        .filter(|n| n.kind != NodeKind::Section)
+        .collect();
     ordered_nodes.sort_by(|a, b| {
         s.selected_nodes
             .contains(&a.id)
@@ -232,6 +270,10 @@ pub fn render_canvas_view(s: &AppState) -> El {
                 ));
             }
         }
+    }
+
+    if s.show_block_menu {
+        canvas_container = canvas_container.child(render_block_menu_popover(s));
     }
 
     canvas_container
@@ -469,6 +511,43 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
         )
         .child(
             el()
+                .key("btn_toggle_block_menu")
+                .h(26.0)
+                .px(10.0)
+                .radius(4.0)
+                .fill(if s.show_block_menu {
+                    theme::accent_claude().alpha(0.18)
+                } else {
+                    theme::bg_control()
+                })
+                .hover(theme::hover_subtle())
+                .press(theme::press_subtle())
+                .border(
+                    1.0,
+                    if s.show_block_menu {
+                        theme::accent_claude().alpha(0.55)
+                    } else {
+                        theme::border_subtle()
+                    },
+                )
+                .center()
+                .cursor(Cursor::Pointer)
+                .no_window_drag()
+                .on_press(|s: &mut AppState| {
+                    s.show_block_menu = !s.show_block_menu;
+                })
+                .child(
+                    text("+ Block ▾")
+                        .font(theme::CONTROL_TEXT)
+                        .color(if s.show_block_menu {
+                            theme::text_primary()
+                        } else {
+                            theme::text_secondary()
+                        }),
+                ),
+        )
+        .child(
+            el()
                 .key("btn_ai")
                 .h(26.0)
                 .px(10.0)
@@ -650,7 +729,7 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
 
 fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32) -> El {
     let is_selected = s.selected_nodes.contains(&node.id);
-    let (base_w, base_h) = node_base_size(node.kind);
+    let (base_w, base_h) = node_world_size(node);
     let w = base_w * zoom;
     let h = base_h * zoom;
 
@@ -807,8 +886,8 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                     let from_id = from_node.clone();
                     let mut target_id = None;
                     for other in s.graph.nodes.values() {
-                        if other.id != from_id {
-                            let (ow, oh) = node_base_size(other.kind);
+                        if other.id != from_id && other.kind != NodeKind::Section {
+                            let (ow, oh) = node_world_size(other);
                             let in_pos = WorldPos::new(other.pos.x, other.pos.y + oh * 0.5);
                             if current_cursor.distance_to(&in_pos) < 65.0
                                 || (current_cursor.x >= other.pos.x - 25.0
@@ -920,6 +999,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
         } else {
             el()
         })
+        .child(card_header_meta_pill(node, badge_size, zoom))
         // Subtle delete × button
         .child(
             el()
@@ -1272,6 +1352,11 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                     )
             }
         }
+        NodeKind::Flashcard => render_flashcard_body(s, node, body_size, badge_size, zoom),
+        NodeKind::Excerpt => render_excerpt_body(s, node, body_size, badge_size, zoom),
+        NodeKind::Checklist => render_checklist_body(node, body_size, badge_size, zoom),
+        NodeKind::Formula => render_formula_body(node, body_size, zoom),
+        NodeKind::Sequence => render_sequence_body(node, body_size, badge_size, zoom),
         _ => {
             let preview_text = if node.content.trim().is_empty() {
                 match node.kind {
@@ -1331,6 +1416,882 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
         )
         .child(in_socket)
         .child(out_socket)
+}
+
+fn card_header_meta_pill(node: &Node, badge_size: f32, zoom: f32) -> El {
+    let (label, accent) = match node.kind {
+        NodeKind::Flashcard => {
+            let m = node.meta.mastery.as_deref().unwrap_or("new");
+            let col = if m == "again" {
+                theme::accent_claude()
+            } else if m == "easy" || m == "good" {
+                theme::text_primary()
+            } else {
+                theme::text_muted()
+            };
+            (m.to_uppercase(), col)
+        }
+        NodeKind::Checklist => {
+            let tasks = doc_reader::parse_markdown_tasks(&node.content);
+            let done = tasks.iter().filter(|(c, _)| *c).count();
+            (
+                format!("{}/{}", done, tasks.len()),
+                if !tasks.is_empty() && done == tasks.len() {
+                    theme::accent_claude()
+                } else {
+                    theme::text_secondary()
+                },
+            )
+        }
+        NodeKind::Formula => (
+            node.meta
+                .language
+                .as_deref()
+                .unwrap_or("MATH")
+                .to_uppercase(),
+            theme::text_secondary(),
+        ),
+        NodeKind::Sequence => (
+            format!("#{:02}", node.meta.step_index.unwrap_or(1)),
+            theme::text_primary(),
+        ),
+        _ => return el(),
+    };
+
+    let inspect_id = node.id.clone();
+    row()
+        .center_y()
+        .gap(3.0 * zoom)
+        .child(
+            el()
+                .px((5.0 * zoom).clamp(3.0, 7.0))
+                .py((1.5 * zoom).clamp(1.0, 3.0))
+                .radius(3.0 * zoom)
+                .fill(Color::WHITE.alpha(0.05))
+                .border(1.0, theme::border_subtle())
+                .child(
+                    text(label)
+                        .font(TextStyle::new(badge_size, 600.0).mono())
+                        .color(accent),
+                ),
+        )
+        .child(
+            el()
+                .key(format!("node_inspect_{}", node.id.as_str()))
+                .px((4.0 * zoom).clamp(2.5, 6.0))
+                .py((1.5 * zoom).clamp(1.0, 3.0))
+                .radius(3.0 * zoom)
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.select_node(inspect_id.clone(), false);
+                    if !s.inspector_popped_out {
+                        s.inspector_open = true;
+                    }
+                    s.ai_panel_open = false;
+                })
+                .child(
+                    text("✎")
+                        .font(TextStyle::new(badge_size, 600.0))
+                        .color(theme::text_muted()),
+                ),
+        )
+}
+
+fn render_flashcard_body(
+    s: &AppState,
+    node: &Node,
+    body_size: f32,
+    badge_size: f32,
+    zoom: f32,
+) -> El {
+    let flipped = s.flipped_flashcards.contains(&node.id);
+    let select_id = node.id.clone();
+    let flip_id = node.id.clone();
+    let again_id = node.id.clone();
+    let good_id = node.id.clone();
+    let easy_id = node.id.clone();
+
+    let eyebrow = if flipped { "ANSWER" } else { "PROMPT" };
+    let face_text = if flipped {
+        node.meta
+            .answer
+            .as_deref()
+            .filter(|a| !a.trim().is_empty())
+            .unwrap_or("No answer set — click ✎ to add answer.")
+    } else if node.content.trim().is_empty() {
+        "Click ✎ to add recall prompt..."
+    } else {
+        node.content.trim()
+    };
+
+    let cur_mastery = node.meta.mastery.as_deref().unwrap_or("new");
+    let mut actions = row().w_full().center_y().gap(4.0 * zoom).child(
+        el()
+            .key(format!("flash_flip_{}", node.id.as_str()))
+            .px((7.0 * zoom).clamp(5.0, 10.0))
+            .py((3.0 * zoom).clamp(2.0, 5.0))
+            .radius(4.0 * zoom)
+            .fill(if flipped {
+                theme::accent_claude().alpha(0.18)
+            } else {
+                theme::bg_control()
+            })
+            .hover(theme::hover_subtle())
+            .border(
+                1.0,
+                if flipped {
+                    theme::accent_claude().alpha(0.50)
+                } else {
+                    theme::border_default()
+                },
+            )
+            .cursor(Cursor::Pointer)
+            .on_press(move |s: &mut AppState| {
+                s.toggle_flashcard_flip(&flip_id);
+            })
+            .child(
+                text(if flipped { "↺ Prompt" } else { "Reveal" })
+                    .font(TextStyle::new(badge_size, 600.0))
+                    .color(if flipped {
+                        theme::accent_claude()
+                    } else {
+                        theme::text_primary()
+                    }),
+            ),
+    );
+
+    actions = actions.child(el().grow(1.0));
+    if flipped {
+        for (key_prefix, label, rating, active, target_id, accent) in [
+            (
+                "flash_rate_again_",
+                "Again",
+                "again",
+                cur_mastery == "again",
+                again_id,
+                theme::accent_claude(),
+            ),
+            (
+                "flash_rate_good_",
+                "Good",
+                "good",
+                cur_mastery == "good",
+                good_id,
+                theme::text_primary(),
+            ),
+            (
+                "flash_rate_easy_",
+                "Easy",
+                "easy",
+                cur_mastery == "easy",
+                easy_id,
+                theme::text_primary(),
+            ),
+        ] {
+            actions = actions.child(
+                el()
+                    .key(format!("{}{}", key_prefix, node.id.as_str()))
+                    .px((5.5 * zoom).clamp(4.0, 8.0))
+                    .py((3.0 * zoom).clamp(2.0, 5.0))
+                    .radius(4.0 * zoom)
+                    .fill(if active {
+                        accent.alpha(0.20)
+                    } else {
+                        theme::bg_control()
+                    })
+                    .hover(theme::hover_subtle())
+                    .border(
+                        1.0,
+                        if active {
+                            accent.alpha(0.55)
+                        } else {
+                            theme::border_subtle()
+                        },
+                    )
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.set_flashcard_mastery(&target_id, rating);
+                    })
+                    .child(
+                        text(label)
+                            .font(TextStyle::new(badge_size, 600.0))
+                            .color(if active { accent } else { theme::text_secondary() }),
+                    ),
+            );
+        }
+    }
+
+    col()
+        .key(format!("node_body_{}", node.id.as_str()))
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .clip_soft(0.0)
+        .px(10.0 * zoom)
+        .py(8.0 * zoom)
+        .gap(5.0 * zoom)
+        .on_press(move |s: &mut AppState| {
+            s.select_node(select_id.clone(), false);
+        })
+        .child(
+            text(eyebrow)
+                .font(TextStyle::new((8.5 * zoom).clamp(7.0, 11.5), 600.0).mono())
+                .color(if flipped {
+                    theme::accent_claude()
+                } else {
+                    theme::text_muted()
+                }),
+        )
+        .child(
+            col()
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .clip_soft(0.0)
+                .child(
+                    text(face_text)
+                        .font(TextStyle::new(body_size, 400.0).lh(body_size * 1.38))
+                        .color(if flipped {
+                            theme::text_primary()
+                        } else {
+                            theme::text_secondary()
+                        })
+                        .w_full()
+                        .wrap(),
+                ),
+        )
+        .child(actions)
+}
+
+fn render_excerpt_body(
+    s: &AppState,
+    node: &Node,
+    body_size: f32,
+    badge_size: f32,
+    zoom: f32,
+) -> El {
+    let select_id = node.id.clone();
+    let jump_id = node.id.clone();
+    let quote_text = if node.content.trim().is_empty() {
+        "\"Quoted source passage...\""
+    } else {
+        node.content.trim()
+    };
+
+    let source_label = match (&node.meta.source_node, node.meta.source_page) {
+        (Some(doc_id), page_opt) => {
+            let doc_title = s
+                .graph
+                .get_node(doc_id)
+                .map(|d| d.title.as_str())
+                .unwrap_or("Source Doc");
+            let page = page_opt.unwrap_or(0) + 1;
+            format!("▤ {} · p.{} ↗", doc_title, page)
+        }
+        _ => "Unlinked excerpt".into(),
+    };
+
+    col()
+        .key(format!("node_body_{}", node.id.as_str()))
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .clip_soft(0.0)
+        .px(10.0 * zoom)
+        .py(8.0 * zoom)
+        .gap(6.0 * zoom)
+        .on_press(move |s: &mut AppState| {
+            s.select_node(select_id.clone(), false);
+        })
+        .child(
+            row()
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .gap(7.0 * zoom)
+                .child(
+                    el().w((2.5 * zoom).clamp(1.5, 4.0))
+                        .h_full()
+                        .radius(1.5)
+                        .fill(theme::accent_claude().alpha(0.75)),
+                )
+                .child(
+                    el().grow(1.0).min_h(0.0).clip_soft(0.0).child(
+                        text(quote_text)
+                            .font(TextStyle::new(body_size, 400.0).lh(body_size * 1.38))
+                            .color(theme::text_primary())
+                            .w_full()
+                            .wrap(),
+                    ),
+                ),
+        )
+        .child(
+            el()
+                .key(format!("excerpt_jump_{}", node.id.as_str()))
+                .w_full()
+                .px(7.0 * zoom)
+                .py(3.5 * zoom)
+                .radius(4.0 * zoom)
+                .fill(theme::bg_control())
+                .hover(theme::accent_claude().alpha(0.16))
+                .border(1.0, theme::border_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.jump_to_excerpt_source(&jump_id);
+                })
+                .child(
+                    text(source_label)
+                        .font(TextStyle::new(badge_size, 600.0))
+                        .color(if node.meta.source_node.is_some() {
+                            theme::accent_claude()
+                        } else {
+                            theme::text_muted()
+                        })
+                        .truncate(),
+                ),
+        )
+}
+
+fn render_checklist_body(node: &Node, body_size: f32, badge_size: f32, zoom: f32) -> El {
+    let select_id = node.id.clone();
+    let tasks = doc_reader::parse_markdown_tasks(&node.content);
+    let total = tasks.len();
+    let done = tasks.iter().filter(|(c, _)| *c).count();
+    let ratio = if total > 0 {
+        (done as f32 / total as f32).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    let track_w = (232.0 * zoom).max(80.0);
+    let mut body = col()
+        .key(format!("node_body_{}", node.id.as_str()))
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .clip_soft(0.0)
+        .px(10.0 * zoom)
+        .py(7.0 * zoom)
+        .gap(4.0 * zoom)
+        .on_press(move |s: &mut AppState| {
+            s.select_node(select_id.clone(), false);
+        })
+        .child(
+            el().w_full()
+                .h((3.0 * zoom).clamp(2.0, 5.0))
+                .radius(2.0)
+                .fill(theme::bg_input())
+                .child(
+                    el().w(track_w * ratio)
+                        .h_full()
+                        .radius(2.0)
+                        .fill(if done == total && total > 0 {
+                            theme::accent_claude()
+                        } else {
+                            theme::accent_primary()
+                        }),
+                ),
+        );
+
+    if tasks.is_empty() {
+        body = body.child(
+            text("No `- [ ]` tasks yet. Click ✎ to add.")
+                .font(TextStyle::new(body_size, 400.0))
+                .color(theme::text_muted())
+                .w_full()
+                .wrap(),
+        );
+        return body;
+    }
+
+    for (idx, (checked, label)) in tasks.iter().take(4).enumerate() {
+        let toggle_id = node.id.clone();
+        let checked_val = *checked;
+        body = body.child(
+            row()
+                .key(format!("check_item_{}_{}", node.id.as_str(), idx))
+                .w_full()
+                .center_y()
+                .gap(5.5 * zoom)
+                .px(4.0 * zoom)
+                .py(2.0 * zoom)
+                .radius(3.5 * zoom)
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.toggle_checklist_item_on_node(&toggle_id, idx);
+                })
+                .child(
+                    el()
+                        .size((12.0 * zoom).clamp(9.0, 16.0), (12.0 * zoom).clamp(9.0, 16.0))
+                        .radius(3.0 * zoom)
+                        .fill(if checked_val {
+                            theme::accent_claude().alpha(0.24)
+                        } else {
+                            theme::bg_input()
+                        })
+                        .border(
+                            1.0,
+                            if checked_val {
+                                theme::accent_claude()
+                            } else {
+                                theme::border_default()
+                            },
+                        )
+                        .center()
+                        .child(
+                            text(if checked_val { "✓" } else { "" })
+                                .font(TextStyle::new(badge_size, 700.0))
+                                .color(theme::accent_claude()),
+                        ),
+                )
+                .child(
+                    el().grow(1.0).min_w(0.0).child(
+                        text(label)
+                            .font(TextStyle::new(
+                                (body_size * 0.92).clamp(8.0, 15.0),
+                                400.0,
+                            ))
+                            .color(if checked_val {
+                                theme::text_muted()
+                            } else {
+                                theme::text_primary()
+                            })
+                            .truncate(),
+                    ),
+                ),
+        );
+    }
+
+    if total > 4 {
+        body = body.child(
+            text(format!("+{} more in inspector", total - 4))
+                .font(TextStyle::new(badge_size, 500.0))
+                .color(theme::text_muted()),
+        );
+    }
+
+    body
+}
+
+fn render_formula_body(node: &Node, body_size: f32, zoom: f32) -> El {
+    let select_id = node.id.clone();
+    let formula_text = if node.content.trim().is_empty() {
+        "y = f(x)"
+    } else {
+        node.content.trim()
+    };
+
+    col()
+        .key(format!("node_body_{}", node.id.as_str()))
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .clip_soft(0.0)
+        .padding(8.0 * zoom)
+        .on_press(move |s: &mut AppState| {
+            s.select_node(select_id.clone(), false);
+        })
+        .child(
+            col()
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .radius(4.0 * zoom)
+                .fill(theme::bg_input())
+                .border(1.0, theme::border_subtle())
+                .padding(8.0 * zoom)
+                .child(
+                    text(formula_text)
+                        .font(TextStyle::new(body_size, 500.0).mono().lh(body_size * 1.42))
+                        .color(theme::text_primary())
+                        .w_full()
+                        .wrap(),
+                ),
+        )
+}
+
+fn render_sequence_body(node: &Node, body_size: f32, badge_size: f32, zoom: f32) -> El {
+    let select_id = node.id.clone();
+    let seq_id = node.id.clone();
+    let step_num = node.meta.step_index.unwrap_or(1);
+    let desc = if node.content.trim().is_empty() {
+        "Step description..."
+    } else {
+        node.content.trim()
+    };
+
+    col()
+        .key(format!("node_body_{}", node.id.as_str()))
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .clip_soft(0.0)
+        .px(10.0 * zoom)
+        .py(7.0 * zoom)
+        .gap(5.0 * zoom)
+        .on_press(move |s: &mut AppState| {
+            s.select_node(select_id.clone(), false);
+        })
+        .child(
+            el().grow(1.0).min_h(0.0).clip_soft(0.0).child(
+                text(desc)
+                    .font(TextStyle::new(body_size, 400.0).lh(body_size * 1.38))
+                    .color(theme::text_secondary())
+                    .w_full()
+                    .wrap(),
+            ),
+        )
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .child(
+                    text(format!("Step {:02}", step_num))
+                        .font(TextStyle::new(badge_size, 600.0).mono())
+                        .color(theme::text_muted()),
+                )
+                .child(el().grow(1.0))
+                .child(
+                    el()
+                        .key(format!("seq_next_{}", node.id.as_str()))
+                        .px((7.0 * zoom).clamp(5.0, 10.0))
+                        .py((3.0 * zoom).clamp(2.0, 5.0))
+                        .radius(4.0 * zoom)
+                        .fill(theme::bg_control())
+                        .hover(theme::accent_claude().alpha(0.18))
+                        .border(1.0, theme::border_default())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.add_next_sequence_step(&seq_id);
+                        })
+                        .child(
+                            text("+ Next →")
+                                .font(TextStyle::new(badge_size, 600.0))
+                                .color(theme::text_primary()),
+                        ),
+                ),
+        )
+}
+
+fn render_section_node(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32) -> El {
+    let is_selected = s.selected_nodes.contains(&node.id);
+    let (base_w, base_h) = node_world_size(node);
+    let w = base_w * zoom;
+    let h = base_h * zoom;
+    let framed = node.meta.section_framed;
+    let header_h = if framed {
+        (34.0 * zoom).clamp(26.0, 44.0)
+    } else {
+        h.max(28.0)
+    };
+    let sec_title_size = (13.5 * zoom).clamp(11.5, 22.0);
+    let badge_size = (9.5 * zoom).clamp(7.5, 13.0);
+
+    let sec_drag_id = node.id.clone();
+    let sec_toggle_id = node.id.clone();
+    let sec_edit_id = node.id.clone();
+    let sec_del_id = node.id.clone();
+    let sec_resize_id = node.id.clone();
+
+    let border_color = if is_selected {
+        theme::border_strong()
+    } else {
+        theme::border_default()
+    };
+
+    let header_bar = row()
+        .key(format!("node_header_{}", node.id.as_str()))
+        .w_full()
+        .h(header_h)
+        .px(10.0 * zoom)
+        .gap(7.0 * zoom)
+        .center_y()
+        .fill(if is_selected {
+            theme::bg_card_selected()
+        } else {
+            theme::bg_chrome().alpha(0.92)
+        })
+        .border_sides([0.0, 0.0, 1.0, 0.0], border_color)
+        .cursor(Cursor::Grab)
+        .pointer_buttons([PointerButton::Primary, PointerButton::Middle])
+        .on_drag(move |s: &mut AppState, d, tx| match d.phase {
+            Phase::Down => {
+                if tx.button() == PointerButton::Middle || s.space_held {
+                    s.canvas_mode = CanvasMode::Panning {
+                        start_screen: ScreenPos::new(d.x, d.y),
+                        start_offset: s.graph.viewport.offset,
+                    };
+                    return;
+                }
+                s.select_node(sec_drag_id.clone(), false);
+                let children = s.capture_section_children(&sec_drag_id);
+                if let Some(n) = s.graph.get_node(&sec_drag_id) {
+                    s.canvas_mode = CanvasMode::DraggingSection {
+                        node_id: sec_drag_id.clone(),
+                        start_pos: n.pos,
+                        children,
+                    };
+                }
+            }
+            Phase::Move => {
+                let z = s.graph.viewport.zoom.max(0.01);
+                match &s.canvas_mode {
+                    CanvasMode::DraggingSection {
+                        node_id,
+                        start_pos,
+                        children,
+                    } => {
+                        let node_id = node_id.clone();
+                        let start_pos = *start_pos;
+                        let children = children.clone();
+                        let dx_w = d.dx / z;
+                        let dy_w = d.dy / z;
+                        if let Some(n) = s.graph.get_node_mut(&node_id) {
+                            n.pos = WorldPos::new(start_pos.x + dx_w, start_pos.y + dy_w);
+                        }
+                        for (cid, cpos) in children {
+                            if let Some(cn) = s.graph.get_node_mut(&cid) {
+                                cn.pos = WorldPos::new(cpos.x + dx_w, cpos.y + dy_w);
+                            }
+                        }
+                    }
+                    CanvasMode::Panning { start_offset, .. } => {
+                        let start_offset = *start_offset;
+                        s.graph.viewport.offset.x = start_offset.x - (d.dx / z);
+                        s.graph.viewport.offset.y = start_offset.y - (d.dy / z);
+                    }
+                    _ => {}
+                }
+            }
+            Phase::Up => {
+                if !d.cancelled() && matches!(s.canvas_mode, CanvasMode::DraggingSection { .. }) {
+                    if let Some(bundle) = &s.bundle {
+                        let _ = bundle.save_graph_atomic(&s.graph);
+                    }
+                }
+                s.canvas_mode = CanvasMode::Idle;
+            }
+        })
+        .child(
+            text("▭")
+                .font(TextStyle::new(sec_title_size * 0.9, 600.0).mono())
+                .color(theme::kind_accent(NodeKind::Section)),
+        )
+        .child(
+            el().grow(1.0).min_w(0.0).child(
+                text(&node.title)
+                    .font(TextStyle::new(sec_title_size, 600.0))
+                    .color(theme::text_primary())
+                    .truncate(),
+            ),
+        )
+        .child(
+            el()
+                .key(format!("sec_toggle_frame_{}", node.id.as_str()))
+                .px(6.0 * zoom)
+                .py(2.0 * zoom)
+                .radius(4.0 * zoom)
+                .fill(theme::bg_control())
+                .hover(theme::hover_subtle())
+                .border(1.0, theme::border_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.toggle_section_framed(&sec_toggle_id);
+                })
+                .child(
+                    text(if framed { "▭ Frame" } else { "— Banner" })
+                        .font(TextStyle::new(badge_size, 600.0))
+                        .color(theme::text_secondary()),
+                ),
+        )
+        .child(
+            el()
+                .key(format!("node_inspect_{}", node.id.as_str()))
+                .px(5.0 * zoom)
+                .py(2.0 * zoom)
+                .radius(4.0 * zoom)
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.select_node(sec_edit_id.clone(), false);
+                    if !s.inspector_popped_out {
+                        s.inspector_open = true;
+                    }
+                    s.ai_panel_open = false;
+                })
+                .child(
+                    text("✎")
+                        .font(TextStyle::new(badge_size, 600.0))
+                        .color(theme::text_muted()),
+                ),
+        )
+        .child(
+            el()
+                .key(format!("node_del_{}", node.id.as_str()))
+                .px(5.0 * zoom)
+                .py(2.0 * zoom)
+                .radius(4.0 * zoom)
+                .hover(theme::accent_danger().alpha(0.18))
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.delete_node(&sec_del_id);
+                })
+                .child(
+                    text("×")
+                        .font(TextStyle::new((13.0 * zoom).clamp(10.0, 18.0), 600.0))
+                        .color(theme::text_muted()),
+                ),
+        );
+
+    let radius = (8.0 * zoom).clamp(4.0, 12.0);
+    let mut container = el()
+        .key(node.id.as_str())
+        .size(w, h)
+        .absolute(screen_pos.x, screen_pos.y)
+        .radius(radius)
+        .clip_rounded(radius)
+        .fill(if framed {
+            Color::WHITE.alpha(0.025)
+        } else {
+            theme::bg_chrome()
+        })
+        .border(if is_selected { 1.25 } else { 1.0 }, border_color)
+        .child(header_bar);
+
+    if framed {
+        let grip = (16.0 * zoom).clamp(12.0, 22.0);
+        container = container.child(
+            el()
+                .key(format!("sec_resize_{}", node.id.as_str()))
+                .absolute((w - grip - 3.0).max(0.0), (h - grip - 3.0).max(0.0))
+                .size(grip, grip)
+                .radius(3.0)
+                .fill(theme::bg_control())
+                .hover(theme::accent_claude().alpha(0.35))
+                .border(1.0, theme::border_default())
+                .center()
+                .cursor(Cursor::ResizeColumn)
+                .on_drag(move |s: &mut AppState, d, _| match d.phase {
+                    Phase::Down => {
+                        if let Some(n) = s.graph.get_node(&sec_resize_id) {
+                            let sz = node_world_size(n);
+                            s.canvas_mode = CanvasMode::ResizingSection {
+                                node_id: sec_resize_id.clone(),
+                                start_size: sz,
+                            };
+                        }
+                    }
+                    Phase::Move => {
+                        let z = s.graph.viewport.zoom.max(0.01);
+                        if let CanvasMode::ResizingSection {
+                            node_id,
+                            start_size,
+                        } = &s.canvas_mode
+                        {
+                            let node_id = node_id.clone();
+                            let start_size = *start_size;
+                            if let Some(n) = s.graph.get_node_mut(&node_id) {
+                                n.size = (
+                                    (start_size.0 + d.dx / z).clamp(240.0, 2000.0),
+                                    (start_size.1 + d.dy / z).clamp(140.0, 1400.0),
+                                );
+                            }
+                        }
+                    }
+                    Phase::Up => {
+                        if !d.cancelled()
+                            && matches!(s.canvas_mode, CanvasMode::ResizingSection { .. })
+                        {
+                            if let Some(bundle) = &s.bundle {
+                                let _ = bundle.save_graph_atomic(&s.graph);
+                            }
+                        }
+                        s.canvas_mode = CanvasMode::Idle;
+                    }
+                })
+                .child(
+                    text("⋱")
+                        .font(TextStyle::new(badge_size, 600.0))
+                        .color(theme::text_muted()),
+                ),
+        );
+    }
+
+    container
+}
+
+fn render_block_menu_popover(s: &AppState) -> El {
+    let menu_x = (s.canvas_size[0] - 252.0).clamp(12.0, 980.0);
+    let items = [
+        ("btn_add_section", "▭", "Section", "Group frame & title", NodeKind::Section),
+        ("btn_add_flashcard", "◇", "Flashcard", "Prompt & flip answer", NodeKind::Flashcard),
+        ("btn_add_excerpt", "❝", "Excerpt", "Linked doc page quote", NodeKind::Excerpt),
+        ("btn_add_checklist", "☑", "Checklist", "Interactive study tasks", NodeKind::Checklist),
+        ("btn_add_formula", "∑", "Formula", "Equation & code box", NodeKind::Formula),
+        ("btn_add_sequence", "→", "Sequence", "Numbered causal step", NodeKind::Sequence),
+    ];
+
+    let mut menu = col()
+        .key("block_create_menu")
+        .absolute(menu_x, 8.0)
+        .w(238.0)
+        .padding(6.0)
+        .gap(3.0)
+        .radius(6.0)
+        .fill(theme::bg_chrome())
+        .border(1.0, theme::border_strong())
+        .shadow(8.0, 22.0, Color::BLACK.alpha(0.55))
+        .child(
+            el().px(8.0).py(4.0).child(
+                text("STUDY BLOCKS")
+                    .font(theme::SECTION_LABEL)
+                    .color(theme::text_muted()),
+            ),
+        );
+
+    for (key, glyph, name, desc, kind) in items {
+        menu = menu.child(
+            row()
+                .key(key)
+                .w_full()
+                .px(8.0)
+                .py(6.0)
+                .gap(8.0)
+                .center_y()
+                .radius(4.0)
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.add_study_node(kind, None);
+                })
+                .child(
+                    el().w(20.0).center().child(
+                        text(glyph)
+                            .font(theme::CONTROL_TEXT)
+                            .color(theme::kind_accent(kind)),
+                    ),
+                )
+                .child(
+                    col()
+                        .grow(1.0)
+                        .gap(1.0)
+                        .child(
+                            text(name)
+                                .font(theme::CONTROL_TEXT)
+                                .color(theme::text_primary()),
+                        )
+                        .child(
+                            text(desc)
+                                .font(theme::BADGE_TEXT)
+                                .color(theme::text_muted()),
+                        ),
+                ),
+        );
+    }
+
+    menu
 }
 
 fn render_edge_pill(edge: &Edge, is_selected: bool, screen_pos: ScreenPos, zoom: f32) -> El {
