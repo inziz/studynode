@@ -1,66 +1,75 @@
-use rune::tok::space;
 use rune::{
-    canvas, col, el, row, text, text_input, Color, Cursor, Cx, El, LineCap, Phase,
-    PointerButton, Shape, TextStyle,
+    Color, Cursor, Cx, El, LineCap, Phase, PointerButton, ScrollSpec, Shape, TextStyle, Tx,
+    canvas, col, el, row, text, text_input,
 };
 
 use studynodes_graph::bezier::CubicBezier;
 use studynodes_graph::coords::{ScreenPos, WorldPos};
-use studynodes_graph::model::{EdgeStatus, Node, NodeKind, PortId};
+use studynodes_graph::model::{Edge, EdgeStatus, Node, NodeKind, PortDirection, PortId};
 
-use crate::state::{AppState, CanvasMode};
+use crate::state::{AppState, CanvasMode, node_base_size};
+use crate::theme;
 
-const HEADLINE: TextStyle = TextStyle::new(14.0, 700.0);
+fn port_world_pos_for(node: &Node, port_id: &PortId) -> WorldPos {
+    let (w, h) = node_base_size(node.kind);
+    let y_center = node.pos.y + h * 0.5;
+    if let Some(port) = node.ports.iter().find(|p| &p.id == port_id) {
+        match port.direction {
+            PortDirection::Input => WorldPos::new(node.pos.x, y_center),
+            PortDirection::Output => WorldPos::new(node.pos.x + w, y_center),
+        }
+    } else if port_id.as_str() == PortId::DEFAULT_OUT {
+        WorldPos::new(node.pos.x + w, y_center)
+    } else {
+        WorldPos::new(node.pos.x, y_center)
+    }
+}
 
-pub fn render_canvas_view(s: &AppState, _: &mut Cx<AppState>) -> El {
-    let t = rune::tok::theme(true);
+pub fn render_canvas_view(s: &AppState) -> El {
     let cam = s.graph.viewport;
     let zoom = cam.zoom;
 
-    // Palette tokens (Blender & Antigravity sleek dark canvas)
-    let bg_color = Color { r: 0.065, g: 0.075, b: 0.095, a: 1.0 };
-    let grid_color = Color { r: 0.12, g: 0.14, b: 0.18, a: 1.0 };
-    let wire_default = Color { r: 0.42, g: 0.46, b: 0.55, a: 0.90 };
-    let wire_selected = Color { r: 0.38, g: 0.65, b: 1.0, a: 1.0 };
-    let wire_ghost = Color { r: 0.85, g: 0.45, b: 0.95, a: 0.95 }; // Ghost Edge: Neon Violet
-
-    // 1. Build Top Toolbar
-    let toolbar = render_top_toolbar(s, t);
-
-    // 2. Build Canvas Vector Geometry (Grid + Bézier Wires)
+    // 1. Vector Canvas Layer (Infinite Grid + Bézier Wires)
     let mut canvas_shape = Shape::new();
 
-    // Draw subtle grid lines
-    let grid_spacing = 60.0 * zoom;
-    if grid_spacing >= 12.0 {
-        let offset_x = (cam.offset.x * zoom) % grid_spacing;
-        let offset_y = (cam.offset.y * zoom) % grid_spacing;
+    let base_spacing = 48.0 * zoom;
+    if base_spacing >= 10.0 {
+        let minor_color = Color::WHITE.alpha(0.028);
+        let major_color = Color::WHITE.alpha(0.055);
 
-        let mut x = -offset_x;
+        let world_left_idx = (cam.offset.x / 48.0).floor() as i32;
+        let offset_x = (cam.offset.x * zoom).rem_euclid(base_spacing);
+        let mut x = if offset_x == 0.0 { 0.0 } else { base_spacing - offset_x };
+        let mut ix = world_left_idx + if offset_x == 0.0 { 0 } else { 1 };
         while x < 3840.0 {
-            canvas_shape = canvas_shape.line([x, 0.0], [x, 2160.0], 0.5, LineCap::Butt, grid_color);
-            x += grid_spacing;
+            let is_major = ix.rem_euclid(4) == 0;
+            let (col, w) = if is_major { (major_color, 0.75) } else { (minor_color, 0.5) };
+            canvas_shape = canvas_shape.line([x, 0.0], [x, 2160.0], w, LineCap::Butt, col);
+            x += base_spacing;
+            ix += 1;
         }
 
-        let mut y = -offset_y;
+        let world_top_idx = (cam.offset.y / 48.0).floor() as i32;
+        let offset_y = (cam.offset.y * zoom).rem_euclid(base_spacing);
+        let mut y = if offset_y == 0.0 { 0.0 } else { base_spacing - offset_y };
+        let mut iy = world_top_idx + if offset_y == 0.0 { 0 } else { 1 };
         while y < 2160.0 {
-            canvas_shape = canvas_shape.line([0.0, y], [3840.0, y], 0.5, LineCap::Butt, grid_color);
-            y += grid_spacing;
+            let is_major = iy.rem_euclid(4) == 0;
+            let (col, w) = if is_major { (major_color, 0.75) } else { (minor_color, 0.5) };
+            canvas_shape = canvas_shape.line([0.0, y], [3840.0, y], w, LineCap::Butt, col);
+            y += base_spacing;
+            iy += 1;
         }
     }
 
-    // Draw all connection wires
+    // Connection wires
     for edge in s.graph.edges.values() {
         if let (Some(from_node), Some(to_node)) = (
             s.graph.get_node(&edge.from.node),
             s.graph.get_node(&edge.to.node),
         ) {
-            let from_world = from_node
-                .port_world_pos(&edge.from.port)
-                .unwrap_or(from_node.pos);
-            let to_world = to_node
-                .port_world_pos(&edge.to.port)
-                .unwrap_or(to_node.pos);
+            let from_world = port_world_pos_for(from_node, &edge.from.port);
+            let to_world = port_world_pos_for(to_node, &edge.to.port);
 
             let curve = CubicBezier::wire(from_world, to_world);
             let segments: Vec<[f32; 2]> = curve
@@ -76,18 +85,18 @@ pub fn render_canvas_view(s: &AppState, _: &mut Cx<AppState>) -> El {
             let is_ghost = edge.status == EdgeStatus::Proposed;
 
             let (wire_color, wire_w) = if is_selected {
-                (wire_selected, 3.0 * zoom.clamp(0.7, 1.4))
+                (theme::accent_blue(), 2.6 * zoom.clamp(0.7, 1.4))
             } else if is_ghost {
-                (wire_ghost, 2.5 * zoom.clamp(0.7, 1.4))
+                (theme::accent_violet().alpha(0.85), 2.2 * zoom.clamp(0.7, 1.4))
             } else {
-                (wire_default, 2.0 * zoom.clamp(0.7, 1.4))
+                (theme::wire_default(), 1.8 * zoom.clamp(0.7, 1.4))
             };
 
             canvas_shape = canvas_shape.stroke(segments, wire_w, wire_color);
         }
     }
 
-    // Draw active wire draft if user is currently pulling a wire
+    // Active wire pulling preview
     if let CanvasMode::DraggingWire {
         from_node,
         from_port,
@@ -95,7 +104,7 @@ pub fn render_canvas_view(s: &AppState, _: &mut Cx<AppState>) -> El {
     } = &s.canvas_mode
     {
         if let Some(node) = s.graph.get_node(from_node) {
-            let from_world = node.port_world_pos(from_port).unwrap_or(node.pos);
+            let from_world = port_world_pos_for(node, from_port);
             let curve = CubicBezier::wire(from_world, *current_cursor);
             let segments: Vec<[f32; 2]> = curve
                 .sample_segments(24)
@@ -108,64 +117,40 @@ pub fn render_canvas_view(s: &AppState, _: &mut Cx<AppState>) -> El {
 
             canvas_shape = canvas_shape.stroke(
                 segments,
-                2.8 * zoom.clamp(0.7, 1.4),
-                Color { r: 1.0, g: 0.82, b: 0.20, a: 1.0 }, // Live pulling: Amber
+                2.4 * zoom.clamp(0.7, 1.4),
+                theme::accent_amber(),
             );
         }
     }
 
-    // 3. Assemble the Interactive Canvas Container
-    // Full simultaneous 2D navigation:
-    // - Trackpad 2-finger scroll moves X and Y simultaneously
-    // - Ctrl+wheel / Cmd+wheel zooms anchored at cursor
-    // - Shift+wheel scrolls horizontally
-    // - Trackpad pinch magnifies anchored at cursor
-    // - Spacebar + drag pans anywhere
-    // - Middle-click drag pans anywhere
-    // - Right-click (secondary) drag pans anywhere
-    // - Left-click drag on canvas background pans in 2D
+    // 2. Interactive Canvas Container (grow(1.0).min_w(0.0) so right-side Inspector fits on screen!)
     let mut canvas_container = el()
         .key("graph_canvas")
-        .w_full()
         .grow(1.0)
-        .fill(bg_color)
+        .min_w(0.0)
+        .h_full()
+        .clip_soft(0.0)
+        .fill(theme::bg_canvas())
         .cursor(if s.space_held { Cursor::Grab } else { Cursor::Default })
-        .pointer_buttons([PointerButton::Primary, PointerButton::Middle, PointerButton::Secondary])
+        .pointer_buttons([PointerButton::Primary, PointerButton::Middle])
+        .on_layout_tx(|s: &mut AppState, r, tx| {
+            s.canvas_origin = [r[0], r[1]];
+            crate::touchpad_win32::set_canvas_bounds(Some(r));
+            tx.live_only();
+        })
         .child(canvas(canvas_shape).w_full().h_full())
-        .on_key(|s: &mut AppState, ev, _| {
-            if let rune::Key::Text(k) = &ev.key {
-                if k == " " {
-                    s.space_held = true;
-                    return true;
-                }
-            }
-            false
-        })
-        .on_key_up(|s: &mut AppState, ev, _| {
-            if let rune::Key::Text(k) = &ev.key {
-                if k == " " {
-                    s.space_held = false;
-                    return true;
-                }
-            }
-            false
-        })
         .on_wheel(|s: &mut AppState, e, _| {
             if e.mods.ctrl || e.mods.cmd {
-                // Ctrl+scroll zoom anchored at cursor
                 let factor = if e.dy > 0.0 { 1.10 } else { 0.90 };
                 s.graph.viewport.zoom_at(ScreenPos::new(e.x, e.y), factor);
-            } else if e.mods.shift {
-                // Shift+wheel: horizontal pan
+            } else if e.mods.shift && e.dx == 0.0 {
                 s.graph.viewport.pan_by_screen_delta(e.dy, 0.0);
             } else {
-                // Simultaneous 2D panning on X and Y!
                 s.graph.viewport.pan_by_screen_delta(e.dx, e.dy);
             }
             true
         })
         .on_magnify(|s: &mut AppState, e, _| {
-            // Trackpad pinch-to-zoom anchored at cursor
             let factor = (1.0 + e.delta).clamp(0.5, 2.0);
             s.graph.viewport.zoom_at(ScreenPos::new(e.x, e.y), factor);
             true
@@ -173,7 +158,7 @@ pub fn render_canvas_view(s: &AppState, _: &mut Cx<AppState>) -> El {
         .on_drop_files(|s: &mut AppState, files, _| {
             s.handle_dropped_files(files, ScreenPos::new(400.0, 300.0));
         })
-        .on_drag(|s: &mut AppState, d, _tx| match d.phase {
+        .on_drag(|s: &mut AppState, d, tx| match d.phase {
             Phase::Down => {
                 s.canvas_mode = CanvasMode::Panning {
                     start_screen: ScreenPos::new(d.x, d.y),
@@ -181,372 +166,313 @@ pub fn render_canvas_view(s: &AppState, _: &mut Cx<AppState>) -> El {
                 };
             }
             Phase::Move => {
-                if let CanvasMode::Panning {
-                    start_offset,
-                    ..
-                } = s.canvas_mode
-                {
-                    let zoom = s.graph.viewport.zoom.max(0.01);
-                    s.graph.viewport.offset.x = start_offset.x - (d.dx / zoom);
-                    s.graph.viewport.offset.y = start_offset.y - (d.dy / zoom);
-                } else if let CanvasMode::DraggingNode {
-                    ref node_id,
-                    start_pos,
-                } = s.canvas_mode
-                {
-                    let zoom = s.graph.viewport.zoom.max(0.01);
-                    if let Some(node) = s.graph.get_node_mut(node_id) {
-                        node.pos = WorldPos::new(
-                            start_pos.x + (d.dx / zoom),
-                            start_pos.y + (d.dy / zoom),
-                        );
-                    }
+                if let CanvasMode::Panning { start_offset, .. } = s.canvas_mode {
+                    let z = s.graph.viewport.zoom.max(0.01);
+                    s.graph.viewport.offset.x = start_offset.x - (d.dx / z);
+                    s.graph.viewport.offset.y = start_offset.y - (d.dy / z);
                 }
             }
             Phase::Up => {
+                if !d.cancelled()
+                    && !s.space_held
+                    && tx.button() == PointerButton::Primary
+                    && d.dx.hypot(d.dy) < 4.0
+                {
+                    s.deselect_all();
+                    tx.blur();
+                }
                 s.canvas_mode = CanvasMode::Idle;
             }
         });
 
-    // 4. Mount Edge Annotation Midpoint Pills (hidden when zoomed far out)
+    // 4. Edge Annotation Pills (rendered below nodes cleanly)
     if zoom >= 0.55 {
-        for edge in s.graph.edges.values() {
+        let mut edges: Vec<&Edge> = s.graph.edges.values().collect();
+        edges.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+        for edge in edges {
             if let (Some(from_node), Some(to_node)) = (
                 s.graph.get_node(&edge.from.node),
                 s.graph.get_node(&edge.to.node),
             ) {
-                let from_world = from_node
-                    .port_world_pos(&edge.from.port)
-                    .unwrap_or(from_node.pos);
-                let to_world = to_node
-                    .port_world_pos(&edge.to.port)
-                    .unwrap_or(to_node.pos);
-
+                let from_world = port_world_pos_for(from_node, &edge.from.port);
+                let to_world = port_world_pos_for(to_node, &edge.to.port);
                 let curve = CubicBezier::wire(from_world, to_world);
                 let mid_screen = cam.world_to_screen(curve.midpoint());
-
-                let pill = render_edge_pill(edge, mid_screen, zoom);
-                canvas_container = canvas_container.child(pill);
+                canvas_container = canvas_container.child(render_edge_pill(
+                    edge,
+                    s.selected_edge.as_ref() == Some(&edge.id),
+                    mid_screen,
+                    zoom,
+                ));
             }
         }
     }
 
-    // 5. Mount Node Cards (scaled by zoom)
-    for node in s.graph.nodes.values() {
+    // 5. Node Cards (deterministic z-order: unselected sorted by id, selected on top)
+    let mut ordered_nodes: Vec<&Node> = s.graph.nodes.values().collect();
+    ordered_nodes.sort_by(|a, b| {
+        s.selected_nodes
+            .contains(&a.id)
+            .cmp(&s.selected_nodes.contains(&b.id))
+            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+    });
+
+    for node in ordered_nodes {
         let card = render_node_card(s, node, cam.world_to_screen(node.pos), zoom);
         canvas_container = canvas_container.child(card);
     }
 
-    col().w_full().h_full().child(toolbar).child(canvas_container)
+    canvas_container
 }
 
-fn render_top_toolbar(s: &AppState, _t: rune::tok::Theme) -> El {
-    let bar_bg = Color { r: 0.08, g: 0.09, b: 0.12, a: 1.0 };
-    let border = Color { r: 0.16, g: 0.18, b: 0.24, a: 1.0 };
+fn topbar_pill_btn(
+    key: &'static str,
+    dot_color: Option<Color>,
+    label: &'static str,
+) -> El {
+    let mut content = row().center_y().gap(6.0);
+    if let Some(c) = dot_color {
+        content = content.child(el().size(6.0, 6.0).radius(3.0).fill(c));
+    }
+    content = content.child(
+        text(label)
+            .font(theme::CONTROL_TEXT)
+            .color(theme::text_primary()),
+    );
 
-    // Amber accent for Note
-    let note_color = Color { r: 0.95, g: 0.68, b: 0.12, a: 1.0 };
-    let note_bg = Color { r: 0.95, g: 0.68, b: 0.12, a: 0.14 };
+    el()
+        .key(key)
+        .h(26.0)
+        .px(10.0)
+        .radius(6.0)
+        .fill(theme::bg_control())
+        .hover(theme::hover_subtle())
+        .press(theme::press_subtle())
+        .border(1.0, theme::border_subtle())
+        .center()
+        .cursor(Cursor::Pointer)
+        .no_window_drag()
+        .child(content)
+}
 
-    // Blue accent for Document
-    let doc_color = Color { r: 0.35, g: 0.65, b: 1.0, a: 1.0 };
-    let doc_bg = Color { r: 0.25, g: 0.55, b: 0.95, a: 0.14 };
-
-    // Violet accent for AI Discover
-    let ai_color = Color { r: 0.55, g: 0.30, b: 0.90, a: 1.0 };
+pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
+    let insets = cx.chrome_insets();
 
     row()
+        .key("workspace_topbar")
         .w_full()
-        .px(14.0)
-        .py(7.0)
-        .gap(space::S3)
-        .center()
-        .fill(bar_bg)
-        .border(1.0, border)
-        // Back to Projects button
+        .h(40.0)
+        .pl(insets.leading + 10.0)
+        .pr(insets.trailing + 10.0)
+        .gap(8.0)
+        .center_y()
+        .fill(theme::bg_chrome())
+        .border_sides([0.0, 0.0, 1.0, 0.0], theme::border_subtle())
+        .window_drag()
+        // Left: concise Back + Project Title
         .child(
             el()
-                .px(10.0)
-                .py(5.0)
+                .key("btn_back")
+                .h(26.0)
+                .px(8.0)
                 .radius(6.0)
-                .fill(Color { r: 0.13, g: 0.15, b: 0.19, a: 1.0 })
-                .border(1.0, Color { r: 0.22, g: 0.25, b: 0.32, a: 1.0 })
+                .fill(theme::bg_control())
+                .hover(theme::hover_subtle())
+                .press(theme::press_subtle())
+                .border(1.0, theme::border_subtle())
+                .center()
                 .cursor(Cursor::Pointer)
+                .no_window_drag()
                 .on_press(|s: &mut AppState| {
                     s.close_to_dashboard();
                 })
                 .child(
-                    text("← Projects")
-                        .font(TextStyle::new(12.5, 500.0))
-                        .color(Color { r: 0.85, g: 0.88, b: 0.94, a: 1.0 }),
+                    text("←")
+                        .font(theme::CONTROL_TEXT)
+                        .color(theme::text_secondary()),
                 ),
         )
-        // Subtle vertical separator
         .child(
             el()
-                .size(1.0, 18.0)
-                .fill(Color { r: 0.20, g: 0.22, b: 0.28, a: 1.0 }),
-        )
-        // Project Title
-        .child(
-            text(&s.graph.title)
-                .font(HEADLINE)
-                .color(Color::WHITE),
-        )
-        // Graph Stats Pill
-        .child(
-            row()
-                .px(8.0)
-                .py(3.0)
-                .radius(10.0)
-                .fill(Color { r: 0.13, g: 0.15, b: 0.20, a: 0.85 })
-                .border(1.0, Color { r: 0.20, g: 0.23, b: 0.30, a: 0.6 })
+                .shrink()
+                .min_w(0.0)
                 .child(
-                    text(format!("{} nodes  •  {} links", s.graph.nodes.len(), s.graph.edges.len()))
-                        .font(TextStyle::new(11.0, 500.0))
-                        .color(Color { r: 0.60, g: 0.65, b: 0.75, a: 1.0 }),
+                    text(&s.graph.title)
+                        .font(theme::TITLE_BAR)
+                        .color(theme::text_primary())
+                        .truncate(),
                 ),
         )
-        // Active Status Pill (if status is not standard Ready)
-        .child(if !s.status_message.is_empty() && s.status_message != "Ready" {
-            row()
-                .px(8.0)
-                .py(3.0)
-                .radius(10.0)
-                .fill(Color { r: 0.10, g: 0.22, b: 0.38, a: 0.7 })
-                .border(1.0, Color { r: 0.25, g: 0.48, b: 0.80, a: 0.7 })
-                .child(
-                    text(&s.status_message)
-                        .font(TextStyle::new(11.0, 500.0))
-                        .color(Color { r: 0.65, g: 0.82, b: 1.0, a: 1.0 }),
-                )
-        } else {
-            el()
-        })
-        .child(el().grow(1.0)) // Spacer
-        // Clean Zoom Controls (Grouped segmented pill)
+        // Middle draggable window band spacer
+        .child(el().grow(1.0))
+        // Right: concise creation + AI + Zoom + Inspector toggle
         .child(
-            row()
-                .center()
+            topbar_pill_btn("btn_add_note", Some(theme::accent_amber()), "+ Note").on_press_tx(
+                |s: &mut AppState, tx: &mut Tx| {
+                    let offset_x = (s.graph.nodes.len() as f32 * 32.0) % 160.0;
+                    let offset_y = (s.graph.nodes.len() as f32 * 24.0) % 120.0;
+                    let pos = s
+                        .graph
+                        .viewport
+                        .screen_to_world(ScreenPos::new(200.0 + offset_x, 120.0 + offset_y));
+                    let id = s.add_note_node(Some(pos));
+                    tx.focus_when_shown(format!("note_body_{}", id.as_str()), false);
+                },
+            ),
+        )
+        .child(
+            topbar_pill_btn("btn_add_doc", Some(theme::accent_blue()), "+ Doc").on_press(
+                |s: &mut AppState| {
+                    let offset_x = (s.graph.nodes.len() as f32 * 32.0) % 160.0;
+                    let offset_y = (s.graph.nodes.len() as f32 * 24.0) % 120.0;
+                    let pos = s
+                        .graph
+                        .viewport
+                        .screen_to_world(ScreenPos::new(240.0 + offset_x, 150.0 + offset_y));
+                    s.add_document_node(Some(pos));
+                },
+            ),
+        )
+        .child(
+            el()
+                .key("btn_ai")
+                .h(26.0)
+                .px(10.0)
                 .radius(6.0)
-                .fill(Color { r: 0.11, g: 0.13, b: 0.17, a: 1.0 })
-                .border(1.0, Color { r: 0.20, g: 0.22, b: 0.28, a: 1.0 })
-                .padding(2.0)
-                .gap(1.0)
+                .fill(if s.ai_panel_open {
+                    theme::accent_violet().alpha(0.24)
+                } else {
+                    theme::accent_violet().alpha(0.13)
+                })
+                .hover(theme::accent_violet().alpha(0.22))
+                .press(theme::accent_violet().alpha(0.30))
+                .border(1.0, theme::accent_violet().alpha(0.35))
+                .center()
+                .cursor(Cursor::Pointer)
+                .no_window_drag()
+                .on_press(|s: &mut AppState| {
+                    s.ai_panel_open = !s.ai_panel_open;
+                    if s.ai_panel_open {
+                        s.inspector_open = true;
+                        s.status_message = "AI Synthesis ready".into();
+                    }
+                })
+                .child(
+                    text("✦ AI")
+                        .font(theme::CONTROL_TEXT)
+                        .color(theme::accent_violet()),
+                ),
+        )
+        // Compact segmented zoom pill
+        .child(
+            row()
+                .key("zoom_pill")
+                .h(26.0)
+                .center_y()
+                .radius(6.0)
+                .fill(theme::bg_control())
+                .border(1.0, theme::border_subtle())
+                .no_window_drag()
                 .child(
                     el()
-                        .px(8.0)
-                        .py(4.0)
-                        .radius(4.0)
-                        .fill(Color { r: 0.15, g: 0.17, b: 0.22, a: 1.0 })
+                        .key("btn_zoom_out")
+                        .h_full()
+                        .px(7.0)
+                        .center()
+                        .hover(theme::hover_subtle())
                         .cursor(Cursor::Pointer)
                         .on_press(|s: &mut AppState| {
                             s.graph.viewport.zoom = (s.graph.viewport.zoom * 0.85).max(0.2);
                         })
-                        .child(text("−").font(TextStyle::new(13.0, 600.0)).color(Color { r: 0.85, g: 0.88, b: 0.94, a: 1.0 })),
+                        .child(
+                            text("−")
+                                .font(theme::CONTROL_TEXT)
+                                .color(theme::text_secondary()),
+                        ),
                 )
                 .child(
                     el()
-                        .px(9.0)
-                        .py(4.0)
-                        .radius(4.0)
-                        .fill(Color { r: 0.12, g: 0.14, b: 0.18, a: 1.0 })
+                        .key("btn_zoom_reset")
+                        .h_full()
+                        .px(6.0)
+                        .center()
+                        .hover(theme::hover_subtle())
                         .cursor(Cursor::Pointer)
                         .on_press(|s: &mut AppState| {
                             s.graph.viewport.zoom = 1.0;
                             s.graph.viewport.offset = WorldPos::ZERO;
                         })
                         .child(
-                            text(format!("{}%", (s.graph.viewport.zoom * 100.0).round() as u32))
-                                .font(TextStyle::new(11.5, 500.0))
-                                .color(Color { r: 0.72, g: 0.76, b: 0.85, a: 1.0 }),
+                            text(format!(
+                                "{}%",
+                                (s.graph.viewport.zoom * 100.0).round() as u32
+                            ))
+                            .font(theme::STATUS_TEXT)
+                            .color(theme::text_secondary()),
                         ),
                 )
                 .child(
                     el()
-                        .px(8.0)
-                        .py(4.0)
-                        .radius(4.0)
-                        .fill(Color { r: 0.15, g: 0.17, b: 0.22, a: 1.0 })
+                        .key("btn_zoom_in")
+                        .h_full()
+                        .px(7.0)
+                        .center()
+                        .hover(theme::hover_subtle())
                         .cursor(Cursor::Pointer)
                         .on_press(|s: &mut AppState| {
                             s.graph.viewport.zoom = (s.graph.viewport.zoom * 1.15).min(3.0);
                         })
-                        .child(text("+").font(TextStyle::new(13.0, 600.0)).color(Color { r: 0.85, g: 0.88, b: 0.94, a: 1.0 })),
-                )
-                .child(
-                    el()
-                        .px(8.0)
-                        .py(4.0)
-                        .radius(4.0)
-                        .fill(Color { r: 0.15, g: 0.17, b: 0.22, a: 1.0 })
-                        .cursor(Cursor::Pointer)
-                        .on_press(|s: &mut AppState| {
-                            s.graph.viewport.zoom = 1.0;
-                            s.graph.viewport.offset = WorldPos::ZERO;
-                        })
-                        .child(text("Fit").font(TextStyle::new(11.0, 500.0)).color(Color { r: 0.65, g: 0.70, b: 0.80, a: 1.0 })),
+                        .child(
+                            text("+")
+                                .font(theme::CONTROL_TEXT)
+                                .color(theme::text_secondary()),
+                        ),
                 ),
         )
-        // 2D Pan directional controls (Grouped navigation pill)
+        // Sidebar toggle button
         .child(
-            row()
+            el()
+                .key("btn_toggle_panel")
+                .size(26.0, 26.0)
+                .radius(6.0)
+                .fill(if s.inspector_open {
+                    theme::accent_blue().alpha(0.16)
+                } else {
+                    theme::bg_control()
+                })
+                .hover(theme::hover_subtle())
+                .border(
+                    1.0,
+                    if s.inspector_open {
+                        theme::accent_blue().alpha(0.35)
+                    } else {
+                        theme::border_subtle()
+                    },
+                )
                 .center()
-                .radius(6.0)
-                .fill(Color { r: 0.11, g: 0.13, b: 0.17, a: 1.0 })
-                .border(1.0, Color { r: 0.20, g: 0.22, b: 0.28, a: 1.0 })
-                .padding(2.0)
-                .gap(1.0)
-                .child(
-                    el()
-                        .px(7.0)
-                        .py(4.0)
-                        .radius(4.0)
-                        .fill(Color { r: 0.15, g: 0.17, b: 0.22, a: 1.0 })
-                        .cursor(Cursor::Pointer)
-                        .on_press(|s: &mut AppState| {
-                            s.graph.viewport.pan_by_screen_delta(120.0, 0.0);
-                        })
-                        .child(text("◄").font(TextStyle::new(10.0, 600.0)).color(Color { r: 0.75, g: 0.78, b: 0.85, a: 1.0 })),
-                )
-                .child(
-                    el()
-                        .px(7.0)
-                        .py(4.0)
-                        .radius(4.0)
-                        .fill(Color { r: 0.15, g: 0.17, b: 0.22, a: 1.0 })
-                        .cursor(Cursor::Pointer)
-                        .on_press(|s: &mut AppState| {
-                            s.graph.viewport.pan_by_screen_delta(0.0, 120.0);
-                        })
-                        .child(text("▲").font(TextStyle::new(10.0, 600.0)).color(Color { r: 0.75, g: 0.78, b: 0.85, a: 1.0 })),
-                )
-                .child(
-                    el()
-                        .px(7.0)
-                        .py(4.0)
-                        .radius(4.0)
-                        .fill(Color { r: 0.15, g: 0.17, b: 0.22, a: 1.0 })
-                        .cursor(Cursor::Pointer)
-                        .on_press(|s: &mut AppState| {
-                            s.graph.viewport.pan_by_screen_delta(0.0, -120.0);
-                        })
-                        .child(text("▼").font(TextStyle::new(10.0, 600.0)).color(Color { r: 0.75, g: 0.78, b: 0.85, a: 1.0 })),
-                )
-                .child(
-                    el()
-                        .px(7.0)
-                        .py(4.0)
-                        .radius(4.0)
-                        .fill(Color { r: 0.15, g: 0.17, b: 0.22, a: 1.0 })
-                        .cursor(Cursor::Pointer)
-                        .on_press(|s: &mut AppState| {
-                            s.graph.viewport.pan_by_screen_delta(-120.0, 0.0);
-                        })
-                        .child(text("►").font(TextStyle::new(10.0, 600.0)).color(Color { r: 0.75, g: 0.78, b: 0.85, a: 1.0 })),
-                )
-                .child(
-                    el()
-                        .px(7.0)
-                        .py(4.0)
-                        .radius(4.0)
-                        .fill(Color { r: 0.15, g: 0.17, b: 0.22, a: 1.0 })
-                        .cursor(Cursor::Pointer)
-                        .on_press(|s: &mut AppState| {
-                            s.graph.viewport.offset = WorldPos::ZERO;
-                        })
-                        .child(text("⊙").font(TextStyle::new(10.0, 600.0)).color(Color { r: 0.75, g: 0.78, b: 0.85, a: 1.0 })),
-                ),
-        )
-        // Separator
-        .child(
-            el()
-                .size(1.0, 18.0)
-                .fill(Color { r: 0.20, g: 0.22, b: 0.28, a: 1.0 }),
-        )
-        // Add Note Button (Amber)
-        .child(
-            el()
-                .px(11.0)
-                .py(5.0)
-                .radius(6.0)
-                .fill(note_bg)
-                .border(1.0, Color { r: note_color.r, g: note_color.g, b: note_color.b, a: 0.80 })
                 .cursor(Cursor::Pointer)
+                .no_window_drag()
                 .on_press(|s: &mut AppState| {
-                    let offset_x = (s.graph.nodes.len() as f32 * 32.0) % 192.0;
-                    let offset_y = (s.graph.nodes.len() as f32 * 24.0) % 144.0;
-                    let center_world = s.graph.viewport.screen_to_world(ScreenPos::new(480.0 + offset_x, 220.0 + offset_y));
-                    s.add_note_node(Some(center_world));
+                    s.inspector_open = !s.inspector_open;
                 })
                 .child(
-                    row()
-                        .center()
-                        .gap(space::S1)
-                        .child(text("✎").font(TextStyle::new(12.0, 600.0)).color(note_color))
-                        .child(text("+ Note").font(TextStyle::new(12.5, 600.0)).color(note_color)),
-                ),
-        )
-        // Add Document Button (Blue)
-        .child(
-            el()
-                .px(11.0)
-                .py(5.0)
-                .radius(6.0)
-                .fill(doc_bg)
-                .border(1.0, Color { r: doc_color.r, g: doc_color.g, b: doc_color.b, a: 0.80 })
-                .cursor(Cursor::Pointer)
-                .on_press(|s: &mut AppState| {
-                    let offset_x = (s.graph.nodes.len() as f32 * 32.0) % 192.0;
-                    let offset_y = (s.graph.nodes.len() as f32 * 24.0) % 144.0;
-                    let center_world = s.graph.viewport.screen_to_world(ScreenPos::new(520.0 + offset_x, 260.0 + offset_y));
-                    s.add_document_node(Some(center_world));
-                })
-                .child(
-                    row()
-                        .center()
-                        .gap(space::S1)
-                        .child(text("📄").font(TextStyle::new(12.0, 600.0)).color(doc_color))
-                        .child(text("+ Document").font(TextStyle::new(12.5, 600.0)).color(doc_color)),
-                ),
-        )
-        // AI Discover Connections (Violet Primary)
-        .child(
-            el()
-                .px(13.0)
-                .py(5.0)
-                .radius(6.0)
-                .fill(ai_color)
-                .shadow(2.0, 8.0, Color { r: 0.45, g: 0.18, b: 0.80, a: 0.40 })
-                .cursor(Cursor::Pointer)
-                .on_press(|s: &mut AppState| {
-                    s.ai_panel_open = true;
-                    s.status_message = "Analyzing graph for latent connections...".into();
-                })
-                .child(
-                    text("✦ AI Discover")
-                        .font(TextStyle::new(12.5, 600.0))
-                        .color(Color::WHITE),
+                    text("◧")
+                        .font(theme::CONTROL_TEXT)
+                        .color(if s.inspector_open {
+                            theme::accent_blue()
+                        } else {
+                            theme::text_secondary()
+                        }),
                 ),
         )
 }
 
 fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32) -> El {
     let is_selected = s.selected_nodes.contains(&node.id);
-
-    // Dynamic zoom-scaled sizes
-    let (base_w, base_h) = match node.kind {
-        NodeKind::Note => (280.0, 170.0),
-        NodeKind::Document => (260.0, 125.0),
-        NodeKind::Image => (240.0, 110.0),
-        NodeKind::LlmSynthesis => (260.0, 130.0),
-        NodeKind::Concept => (240.0, 110.0),
-    };
-
+    let (base_w, base_h) = node_base_size(node.kind);
     let w = base_w * zoom;
     let h = base_h * zoom;
 
-    // Check if this node is currently a snap target for a pulled wire
     let is_snap_target = if let CanvasMode::DraggingWire {
         ref from_node,
         current_cursor,
@@ -567,73 +493,36 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
         false
     };
 
-    // Sleek dark slate background (#181a20)
-    let card_bg = Color { r: 0.094, g: 0.102, b: 0.125, a: 0.98 };
-
+    let kind_accent = theme::kind_accent(node.kind);
     let border_color = if is_snap_target {
-        Color { r: 1.0, g: 0.85, b: 0.20, a: 1.0 } // Gold glow on snap target
+        theme::accent_amber()
     } else if is_selected {
-        Color { r: 0.38, g: 0.65, b: 1.0, a: 1.0 }
+        kind_accent.alpha(0.85)
     } else {
-        Color { r: 0.18, g: 0.20, b: 0.26, a: 1.0 }
+        theme::border_default()
     };
 
-    // Distinct colored header banner & port colors:
-    // Amber for Note, Blue for Document, Emerald for Image, Violet for AI Synthesis, Pink for Concept
-    let (header_bg, port_color, icon, _kind_badge) = match node.kind {
-        NodeKind::Note => (
-            Color { r: 0.62, g: 0.38, b: 0.05, a: 0.95 },
-            Color { r: 0.95, g: 0.68, b: 0.12, a: 1.0 },
-            "✎",
-            "NOTE",
-        ),
-        NodeKind::Document => (
-            Color { r: 0.12, g: 0.30, b: 0.62, a: 0.95 },
-            Color { r: 0.28, g: 0.58, b: 0.98, a: 1.0 },
-            "📄",
-            "DOC",
-        ),
-        NodeKind::Image => (
-            Color { r: 0.05, g: 0.38, b: 0.25, a: 0.95 },
-            Color { r: 0.10, g: 0.78, b: 0.52, a: 1.0 },
-            "🖼",
-            "IMAGE",
-        ),
-        NodeKind::LlmSynthesis => (
-            Color { r: 0.40, g: 0.16, b: 0.62, a: 0.95 },
-            Color { r: 0.70, g: 0.45, b: 0.98, a: 1.0 },
-            "✦",
-            "AI SYNTH",
-        ),
-        NodeKind::Concept => (
-            Color { r: 0.60, g: 0.14, b: 0.38, a: 0.95 },
-            Color { r: 0.92, g: 0.32, b: 0.62, a: 1.0 },
-            "💡",
-            "CONCEPT",
-        ),
+    let card_bg = if is_selected {
+        theme::bg_card_selected()
+    } else {
+        theme::bg_card()
     };
 
-    let node_id_clone = node.id.clone();
+    let title_size = (12.5 * zoom).clamp(8.5, 19.0);
+    let body_size = (12.0 * zoom).clamp(8.0, 16.0);
+    let badge_size = (9.5 * zoom).clamp(7.0, 13.0);
+    let card_radius = (10.0 * zoom).clamp(5.0, 14.0);
+    let socket_r = (5.0 * zoom).clamp(3.0, 8.5);
+    let socket_d = socket_r * 2.0;
+
     let node_id_for_drag = node.id.clone();
     let out_node_id = node.id.clone();
     let del_node_id = node.id.clone();
     let note_click_id = node.id.clone();
     let doc_click_id = node.id.clone();
+    let other_click_id = node.id.clone();
 
-    // Typography sizes scaled by zoom
-    let title_size = (13.0 * zoom).clamp(8.5, 20.0);
-    let body_size = (11.5 * zoom).clamp(7.5, 16.0);
-    let badge_size = (9.0 * zoom).clamp(6.5, 13.0);
-    let socket_lbl_size = (10.0 * zoom).clamp(7.0, 13.0);
-
-    let card_radius = (10.0 * zoom).clamp(5.0, 14.0);
-    let banner_radius = (card_radius - 1.0).max(2.0);
-
-    // Socket circle dimensions scaled with zoom
-    let socket_r = (5.0 * zoom).clamp(3.0, 9.0);
-    let socket_d = socket_r * 2.0;
-
-    // Input socket circle protruding on left edge
+    // Sockets straddle left & right card boundaries outside the rounded inner clip wrapper
     let in_socket = if is_snap_target {
         let snap_r = socket_r * 1.6;
         let snap_d = snap_r * 2.0;
@@ -642,39 +531,49 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
             .absolute(-snap_r, h * 0.5 - snap_r)
             .size(snap_d, snap_d)
             .radius(snap_r)
-            .fill(Color { r: 1.0, g: 0.85, b: 0.20, a: 0.40 })
-            .border(2.0, Color { r: 1.0, g: 0.85, b: 0.20, a: 1.0 })
+            .fill(theme::accent_amber().alpha(0.35))
+            .border(1.5, theme::accent_amber())
             .center()
-            .child(el().size(snap_r, snap_r).radius(snap_r * 0.5).fill(Color { r: 1.0, g: 0.85, b: 0.20, a: 1.0 }))
+            .child(
+                el().size(snap_r, snap_r)
+                    .radius(snap_r * 0.5)
+                    .fill(theme::accent_amber()),
+            )
     } else {
         el()
             .key(format!("{}_in_socket", node.id.as_str()))
             .absolute(-socket_r, h * 0.5 - socket_r)
             .size(socket_d, socket_d)
             .radius(socket_r)
-            .fill(Color { r: 0.094, g: 0.102, b: 0.125, a: 1.0 })
-            .border(1.5, port_color)
+            .fill(theme::bg_canvas())
+            .border(1.5, kind_accent.alpha(0.85))
             .center()
-            .child(el().size(socket_r * 0.8, socket_r * 0.8).radius(socket_r * 0.4).fill(port_color))
+            .child(
+                el().size(socket_r * 0.75, socket_r * 0.75)
+                    .radius(socket_r * 0.375)
+                    .fill(kind_accent),
+            )
     };
 
-    // Output socket circle protruding on right edge (Interactive wire pulling)
     let out_socket = el()
         .key(format!("{}_out_socket", node.id.as_str()))
         .absolute(w - socket_r, h * 0.5 - socket_r)
         .size(socket_d, socket_d)
         .radius(socket_r)
-        .fill(Color { r: 0.094, g: 0.102, b: 0.125, a: 1.0 })
-        .border(1.5, port_color)
+        .fill(theme::bg_canvas())
+        .border(1.5, kind_accent.alpha(0.85))
         .cursor(Cursor::Crosshair)
         .center()
-        .child(el().size(socket_r * 0.8, socket_r * 0.8).radius(socket_r * 0.4).fill(port_color))
+        .child(
+            el().size(socket_r * 0.75, socket_r * 0.75)
+                .radius(socket_r * 0.375)
+                .fill(kind_accent),
+        )
         .on_drag(move |s: &mut AppState, d, _| match d.phase {
             Phase::Down => {
                 if let Some(node) = s.graph.get_node(&out_node_id) {
-                    let start_world = node
-                        .port_world_pos(&PortId::new(PortId::DEFAULT_OUT))
-                        .unwrap_or(node.pos);
+                    let start_world =
+                        port_world_pos_for(node, &PortId::new(PortId::DEFAULT_OUT));
                     s.canvas_mode = CanvasMode::DraggingWire {
                         from_node: out_node_id.clone(),
                         from_port: PortId::new(PortId::DEFAULT_OUT),
@@ -690,11 +589,11 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                 } = s.canvas_mode
                 {
                     if let Some(node) = s.graph.get_node(from_node) {
-                        let from_world = node.port_world_pos(from_port).unwrap_or(node.pos);
-                        let zoom = s.graph.viewport.zoom.max(0.01);
+                        let from_world = port_world_pos_for(node, from_port);
+                        let z = s.graph.viewport.zoom.max(0.01);
                         let cursor_world = WorldPos::new(
-                            from_world.x + (d.dx / zoom),
-                            from_world.y + (d.dy / zoom),
+                            from_world.x + (d.dx / z),
+                            from_world.y + (d.dy / z),
                         );
                         s.canvas_mode = CanvasMode::DraggingWire {
                             from_node: from_node.clone(),
@@ -715,7 +614,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                     let mut target_id = None;
                     for other in s.graph.nodes.values() {
                         if other.id != from_id {
-                            let (ow, oh) = other.size;
+                            let (ow, oh) = node_base_size(other.kind);
                             let in_pos = WorldPos::new(other.pos.x, other.pos.y + oh * 0.5);
                             if current_cursor.distance_to(&in_pos) < 65.0
                                 || (current_cursor.x >= other.pos.x - 25.0
@@ -736,221 +635,21 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
             }
         });
 
-    // 1. Build Header Banner: Simplified! Only [Icon] [Title] and subtle [✕] delete button!
+    // Drag Handle = Header ONLY (leaves card body clicks/inputs completely unblocked!)
     let header_bar = row()
+        .key(format!("node_header_{}", node.id.as_str()))
         .w_full()
-        .corners([banner_radius, banner_radius, 0.0, 0.0])
-        .px(8.0 * zoom)
-        .py(5.0 * zoom)
-        .gap(space::S2)
-        .center()
-        .fill(header_bg)
-        .border_sides([0.0, 0.0, 1.0, 0.0], Color { r: 0.0, g: 0.0, b: 0.0, a: 0.35 })
-        // Icon indicator
-        .child(
-            el()
-                .px(4.0 * zoom)
-                .py(1.5 * zoom)
-                .radius(3.5)
-                .fill(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.25 })
-                .child(text(icon).font(TextStyle::new(title_size, 700.0)).color(Color::WHITE)),
-        )
-        // Title: If selected note, editable inline text_input; otherwise crisp text
-        .child(if is_selected && node.kind == NodeKind::Note {
-            text_input(&s.edit_node_title, TextStyle::new(title_size, 700.0))
-                .single_line()
-                .color(Color::WHITE)
-                .caret(Color::WHITE, Color::WHITE.alpha(0.35))
-                .on_edit(|s: &mut AppState| &mut s.edit_node_title)
-                .on_input_change(|s: &mut AppState, _| {
-                    s.sync_node_edits();
-                })
-        } else {
-            text(&node.title)
-                .font(TextStyle::new(title_size, 700.0))
-                .color(Color::WHITE)
-        })
-        .child(el().grow(1.0))
-        // Subtle ✕ Delete button
-        .child(
-            el()
-                .px((5.0 * zoom).clamp(4.0, 7.0))
-                .py((2.0 * zoom).clamp(2.0, 5.0))
-                .radius((3.0 * zoom).clamp(2.0, 5.0))
-                .fill(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.25 })
-                .cursor(Cursor::Pointer)
-                .on_press(move |s: &mut AppState| {
-                    s.delete_node(&del_node_id);
-                })
-                .child(
-                    text("✕")
-                        .font(TextStyle::new((10.0 * zoom).clamp(8.0, 13.0), 600.0))
-                        .color(Color { r: 1.0, g: 1.0, b: 1.0, a: 0.70 }),
-                ),
-        );
-
-    // 2. Build Card Body specialized by node kind:
-    let card_body = match node.kind {
-        NodeKind::Note => {
-            // Note nodes: Always live text_input when selected, or clickable text that selects!
-            if is_selected {
-                col()
-                    .w_full()
-                    .grow(1.0)
-                    .px(8.0 * zoom)
-                    .py(6.0 * zoom)
-                    .gap(space::S1)
-                    .child(
-                        el()
-                            .w_full()
-                            .grow(1.0)
-                            .radius((4.0 * zoom).clamp(2.0, 6.0))
-                            .fill(Color { r: 0.07, g: 0.08, b: 0.10, a: 1.0 })
-                            .border(1.0, Color { r: 0.25, g: 0.35, b: 0.55, a: 0.75 })
-                            .px(6.0 * zoom)
-                            .py(5.0 * zoom)
-                            .child(
-                                text_input(&s.edit_node_content, TextStyle::new(body_size, 400.0).lh(body_size * 1.35))
-                                    .w_full()
-                                    .color(Color::WHITE)
-                                    .caret(port_color, port_color.alpha(0.35))
-                                    .placeholder("Type your notes directly here...", Color::WHITE.alpha(0.35))
-                                    .on_edit(|s: &mut AppState| &mut s.edit_node_content)
-                                    .on_input_change(|s: &mut AppState, _| {
-                                        s.sync_node_edits();
-                                    })
-                                    .on_submit(|s: &mut AppState, _| {
-                                        s.edit_node_content.insert("\n");
-                                        s.sync_node_edits();
-                                    }),
-                            ),
-                    )
-            } else {
-                let note_content = if node.content.trim().is_empty() {
-                    "Click to write notes..."
-                } else {
-                    node.content.trim()
-                };
-                col()
-                    .w_full()
-                    .grow(1.0)
-                    .px(8.0 * zoom)
-                    .py(6.0 * zoom)
-                    .cursor(Cursor::Text)
-                    .on_press(move |s: &mut AppState| {
-                        s.select_node(note_click_id.clone(), false);
-                    })
-                    .child(
-                        text(note_content)
-                            .font(TextStyle::new(body_size, 400.0).lh(body_size * 1.35))
-                            .color(if node.content.trim().is_empty() {
-                                Color::WHITE.alpha(0.35)
-                            } else {
-                                Color { r: 0.88, g: 0.90, b: 0.95, a: 0.95 }
-                            }),
-                    )
-            }
-        }
-        NodeKind::Document => {
-            // Document nodes: Clean and compact on canvas! Never overflows pages of text!
-            // Clicking selects the node and immediately pops open the full reader in the right panel.
-            let word_count = node.content.split_whitespace().count();
-            col()
-                .w_full()
-                .grow(1.0)
-                .px(10.0 * zoom)
-                .py(8.0 * zoom)
-                .gap(space::S2)
-                .center()
-                .cursor(Cursor::Pointer)
-                .on_press(move |s: &mut AppState| {
-                    s.select_node(doc_click_id.clone(), false);
-                    s.inspector_open = true;
-                    s.status_message = "Opened Document Reader in right panel".into();
-                })
-                .child(
-                    row()
-                        .center()
-                        .gap(space::S2)
-                        .child(
-                            el()
-                                .px(6.0 * zoom)
-                                .py(2.0 * zoom)
-                                .radius(3.0)
-                                .fill(Color { r: 0.15, g: 0.35, b: 0.75, a: 0.35 })
-                                .child(
-                                    text("📄 DOCUMENT")
-                                        .font(TextStyle::new(badge_size, 700.0))
-                                        .color(Color { r: 0.40, g: 0.70, b: 1.0, a: 1.0 }),
-                                ),
-                        )
-                        .child(
-                            text(format!("{} words", word_count))
-                                .font(TextStyle::new(socket_lbl_size, 500.0))
-                                .color(Color { r: 0.55, g: 0.60, b: 0.70, a: 0.85 }),
-                        ),
-                )
-                .child(
-                    el()
-                        .px(8.0 * zoom)
-                        .py(4.0 * zoom)
-                        .radius(4.0)
-                        .fill(Color { r: 0.12, g: 0.25, b: 0.50, a: 0.40 })
-                        .border(1.0, Color { r: 0.25, g: 0.50, b: 0.90, a: 0.65 })
-                        .child(
-                            text("Click to open reader →")
-                                .font(TextStyle::new(badge_size, 600.0))
-                                .color(Color { r: 0.55, g: 0.78, b: 1.0, a: 1.0 }),
-                        ),
-                )
-        }
-        _ => {
-            // Image, AI Synthesis, Concept: Compact preview
-            let preview_text = if node.content.trim().is_empty() {
-                match node.kind {
-                    NodeKind::Image => "Visual image asset.",
-                    NodeKind::LlmSynthesis => "AI synthesis node.",
-                    NodeKind::Concept => "High-level concept cluster.",
-                    _ => "",
-                }
-            } else {
-                node.content.trim()
-            };
-            col()
-                .w_full()
-                .grow(1.0)
-                .px(8.0 * zoom)
-                .py(6.0 * zoom)
-                .center()
-                .child(
-                    text(preview_text)
-                        .font(TextStyle::new(body_size, 400.0))
-                        .color(Color { r: 0.75, g: 0.78, b: 0.85, a: 0.90 }),
-                )
-        }
-    };
-
-    // 3. Assemble the Node Card Container
-    col()
-        .key(node.id.as_str())
-        .size(w, h)
-        .absolute(screen_pos.x, screen_pos.y)
-        .radius(card_radius)
-        .fill(card_bg)
-        .border(if is_selected { 1.5 } else { 1.0 }, border_color)
-        .shadow(4.0, 14.0, Color { r: 0.0, g: 0.0, b: 0.0, a: 0.45 })
-        .cursor(if s.space_held { Cursor::Grab } else { Cursor::Default })
-        .pointer_buttons([PointerButton::Primary, PointerButton::Middle, PointerButton::Secondary])
-        .on_press(move |s: &mut AppState| {
-            s.select_node(node_id_clone.clone(), false);
-        })
+        .px(10.0 * zoom)
+        .py(6.5 * zoom)
+        .gap(6.0 * zoom)
+        .center_y()
+        .fill(theme::bg_card_header())
+        .border_sides([0.0, 0.0, 1.0, 0.0], theme::border_subtle())
+        .cursor(Cursor::Grab)
+        .pointer_buttons([PointerButton::Primary, PointerButton::Middle])
         .on_drag(move |s: &mut AppState, d, tx| match d.phase {
             Phase::Down => {
-                // If middle-click, right-click (secondary), or spacebar is held, PAN the canvas!
-                if tx.button() == PointerButton::Middle
-                    || tx.button() == PointerButton::Secondary
-                    || s.space_held
-                {
+                if tx.button() == PointerButton::Middle || s.space_held {
                     s.canvas_mode = CanvasMode::Panning {
                         start_screen: ScreenPos::new(d.x, d.y),
                         start_offset: s.graph.viewport.offset,
@@ -958,127 +657,391 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                     return;
                 }
                 s.select_node(node_id_for_drag.clone(), false);
-                if let Some(node) = s.graph.get_node(&node_id_for_drag) {
+                if let Some(n) = s.graph.get_node(&node_id_for_drag) {
                     s.canvas_mode = CanvasMode::DraggingNode {
                         node_id: node_id_for_drag.clone(),
-                        start_pos: node.pos,
+                        start_pos: n.pos,
                     };
                 }
             }
             Phase::Move => {
-                if let CanvasMode::DraggingNode {
-                    ref node_id,
-                    start_pos,
-                } = s.canvas_mode
-                {
-                    let zoom = s.graph.viewport.zoom.max(0.01);
-                    if let Some(node) = s.graph.get_node_mut(node_id) {
-                        node.pos = WorldPos::new(
-                            start_pos.x + (d.dx / zoom),
-                            start_pos.y + (d.dy / zoom),
-                        );
+                let z = s.graph.viewport.zoom.max(0.01);
+                match &s.canvas_mode {
+                    CanvasMode::DraggingNode { node_id, start_pos } => {
+                        let node_id = node_id.clone();
+                        let start_pos = *start_pos;
+                        if let Some(n) = s.graph.get_node_mut(&node_id) {
+                            n.pos = WorldPos::new(
+                                start_pos.x + (d.dx / z),
+                                start_pos.y + (d.dy / z),
+                            );
+                        }
                     }
-                } else if let CanvasMode::Panning {
-                    start_offset,
-                    ..
-                } = s.canvas_mode
-                {
-                    let zoom = s.graph.viewport.zoom.max(0.01);
-                    s.graph.viewport.offset.x = start_offset.x - (d.dx / zoom);
-                    s.graph.viewport.offset.y = start_offset.y - (d.dy / zoom);
+                    CanvasMode::Panning { start_offset, .. } => {
+                        let start_offset = *start_offset;
+                        s.graph.viewport.offset.x = start_offset.x - (d.dx / z);
+                        s.graph.viewport.offset.y = start_offset.y - (d.dy / z);
+                    }
+                    _ => {}
                 }
             }
             Phase::Up => {
+                if !d.cancelled() && matches!(s.canvas_mode, CanvasMode::DraggingNode { .. }) {
+                    if let Some(bundle) = &s.bundle {
+                        let _ = bundle.save_graph_atomic(&s.graph);
+                    }
+                }
                 s.canvas_mode = CanvasMode::Idle;
             }
         })
-        .child(header_bar)
-        .child(card_body)
+        // Minimal luminous kind dot
+        .child(
+            el().size((7.0 * zoom).clamp(4.0, 9.0), (7.0 * zoom).clamp(4.0, 9.0))
+                .radius(4.0 * zoom)
+                .fill(kind_accent),
+        )
+        // Title (directly editable inline when Note is selected, capped so right-center header stays draggable)
+        .child(if is_selected && node.kind == NodeKind::Note {
+            el().min_w(40.0 * zoom).max_w(w * 0.55).child(
+                text_input(&s.canvas_title_edit, TextStyle::new(title_size, 600.0))
+                    .key(format!("note_title_{}", node.id.as_str()))
+                    .single_line()
+                    .color(theme::text_primary())
+                    .caret(kind_accent, kind_accent.alpha(0.25))
+                    .on_edit(|s: &mut AppState| &mut s.canvas_title_edit)
+                    .on_input_change(|s: &mut AppState, _| {
+                        s.sync_from_canvas_edits();
+                    }),
+            )
+        } else {
+            el().grow(1.0).min_w(0.0).child(
+                text(&node.title)
+                    .font(TextStyle::new(title_size, 600.0))
+                    .color(theme::text_primary())
+                    .truncate(),
+            )
+        })
+        .child(if is_selected && node.kind == NodeKind::Note {
+            el().grow(1.0).h_full()
+        } else {
+            el()
+        })
+        // Subtle delete × button
+        .child(
+            el()
+                .key(format!("node_del_{}", node.id.as_str()))
+                .px((5.0 * zoom).clamp(3.0, 7.0))
+                .py((1.5 * zoom).clamp(1.0, 4.0))
+                .radius(4.0 * zoom)
+                .hover(theme::accent_rose().alpha(0.18))
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.delete_node(&del_node_id);
+                })
+                .child(
+                    text("×")
+                        .font(TextStyle::new((12.0 * zoom).clamp(9.0, 15.0), 500.0))
+                        .color(theme::text_muted()),
+                ),
+        );
+
+    // Card Body (dedicated hit-target, zero drag theft, clipped cleanly!)
+    let card_body = match node.kind {
+        NodeKind::Note => {
+            if is_selected {
+                let body_min_h = (h - 56.0 * zoom).max(40.0);
+                col()
+                    .key(format!("node_body_{}", node.id.as_str()))
+                    .w_full()
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .clip_soft(0.0)
+                    .px(8.0 * zoom)
+                    .py(7.0 * zoom)
+                    .child(
+                        col()
+                            .w_full()
+                            .grow(1.0)
+                            .min_h(0.0)
+                            .radius(6.0 * zoom)
+                            .fill(theme::bg_input())
+                            .border(1.0, theme::border_default())
+                            .px(7.0 * zoom)
+                            .py(6.0 * zoom)
+                            .scroll(ScrollSpec { stick_bottom: false })
+                            .child(
+                                text_input(
+                                    &s.canvas_content_edit,
+                                    TextStyle::new(body_size, 400.0).lh(body_size * 1.42),
+                                )
+                                .key(format!("note_body_{}", node.id.as_str()))
+                                .w_full()
+                                .min_h(body_min_h)
+                                .color(theme::text_primary())
+                                .caret(kind_accent, kind_accent.alpha(0.25))
+                                .placeholder("Write your notes...", theme::text_muted())
+                                .on_edit(|s: &mut AppState| &mut s.canvas_content_edit)
+                                .on_input_change(|s: &mut AppState, _| {
+                                    s.sync_from_canvas_edits();
+                                })
+                                .on_submit(|s: &mut AppState, _| {
+                                    s.canvas_content_edit.insert("\n");
+                                    s.sync_from_canvas_edits();
+                                }),
+                            ),
+                    )
+            } else {
+                let is_empty = node.content.trim().is_empty();
+                let preview = if is_empty {
+                    "Click to write notes..."
+                } else {
+                    node.content.trim()
+                };
+                col()
+                    .key(format!("node_body_{}", node.id.as_str()))
+                    .w_full()
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .clip_soft(0.0)
+                    .px(10.0 * zoom)
+                    .py(8.0 * zoom)
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Text)
+                    .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                        s.select_node(note_click_id.clone(), false);
+                        tx.focus_when_shown(format!("note_body_{}", note_click_id.as_str()), false);
+                    })
+                    .child(
+                        text(preview)
+                            .font(TextStyle::new(body_size, 400.0).lh(body_size * 1.42))
+                            .color(if is_empty {
+                                theme::text_muted()
+                            } else {
+                                theme::text_secondary()
+                            })
+                            .w_full()
+                            .wrap(),
+                    )
+            }
+        }
+        NodeKind::Document => {
+            let word_count = node.content.split_whitespace().count();
+            col()
+                .key(format!("node_body_{}", node.id.as_str()))
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .clip_soft(0.0)
+                .px(10.0 * zoom)
+                .py(8.0 * zoom)
+                .justify_between()
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.select_node(doc_click_id.clone(), false);
+                    s.inspector_open = true;
+                    s.ai_panel_open = false;
+                    s.status_message = "Opened Document Reader".into();
+                })
+                .child(
+                    row()
+                        .center_y()
+                        .gap(6.0 * zoom)
+                        .child(
+                            el()
+                                .px(6.0 * zoom)
+                                .py(2.0 * zoom)
+                                .radius(4.0 * zoom)
+                                .fill(theme::accent_blue().alpha(0.14))
+                                .border(1.0, theme::accent_blue().alpha(0.30))
+                                .child(
+                                    text("DOC")
+                                        .font(TextStyle::new(badge_size, 700.0))
+                                        .color(theme::accent_blue()),
+                                ),
+                        )
+                        .child(
+                            text(format!("{} words", word_count))
+                                .font(TextStyle::new(badge_size, 500.0))
+                                .color(theme::text_muted()),
+                        ),
+                )
+                .child(
+                    row()
+                        .w_full()
+                        .center_y()
+                        .justify_between()
+                        .child(
+                            text("Open reader")
+                                .font(TextStyle::new(body_size * 0.9, 500.0))
+                                .color(theme::accent_blue()),
+                        )
+                        .child(
+                            text("→")
+                                .font(TextStyle::new(body_size * 0.9, 600.0))
+                                .color(theme::accent_blue()),
+                        ),
+                )
+        }
+        _ => {
+            let preview_text = if node.content.trim().is_empty() {
+                match node.kind {
+                    NodeKind::Image => "Visual image asset.",
+                    NodeKind::LlmSynthesis => "AI synthesis insight node.",
+                    NodeKind::Concept => "High-level concept anchor.",
+                    _ => "",
+                }
+            } else {
+                node.content.trim()
+            };
+            col()
+                .key(format!("node_body_{}", node.id.as_str()))
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .clip_soft(0.0)
+                .px(10.0 * zoom)
+                .py(8.0 * zoom)
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.select_node(other_click_id.clone(), false);
+                    s.inspector_open = true;
+                    s.ai_panel_open = false;
+                })
+                .child(
+                    text(preview_text)
+                        .font(TextStyle::new(body_size, 400.0).lh(body_size * 1.4))
+                        .color(theme::text_secondary())
+                        .w_full()
+                        .wrap(),
+                )
+        }
+    };
+
+    // Assemble card shell (no outer drag/press handlers!)
+    col()
+        .key(node.id.as_str())
+        .size(w, h)
+        .absolute(screen_pos.x, screen_pos.y)
+        .radius(card_radius)
+        .continuous_corners()
+        .fill(card_bg)
+        .border(if is_selected || is_snap_target { 1.5 } else { 1.0 }, border_color)
+        .shadow(6.0, 18.0, Color::BLACK.alpha(0.45))
+        .child(
+            col()
+                .w_full()
+                .h_full()
+                .clip_rounded(card_radius)
+                .continuous_corners()
+                .child(header_bar)
+                .child(card_body),
+        )
         .child(in_socket)
         .child(out_socket)
 }
 
-fn render_edge_pill(edge: &studynodes_graph::model::Edge, screen_pos: ScreenPos, zoom: f32) -> El {
+fn render_edge_pill(edge: &Edge, is_selected: bool, screen_pos: ScreenPos, zoom: f32) -> El {
     let edge_id_clone = edge.id.clone();
     let edge_id_for_accept = edge.id.clone();
     let edge_id_for_reject = edge.id.clone();
 
     let is_ghost = edge.status == EdgeStatus::Proposed;
     let pill_bg = if is_ghost {
-        Color { r: 0.35, g: 0.15, b: 0.45, a: 0.95 }
+        theme::accent_violet().alpha(0.16)
+    } else if is_selected {
+        theme::accent_blue().alpha(0.16)
     } else {
-        Color { r: 0.14, g: 0.16, b: 0.20, a: 0.95 }
+        theme::bg_chrome()
     };
 
     let pill_border = if is_ghost {
-        Color { r: 0.85, g: 0.45, b: 0.95, a: 1.0 }
+        theme::accent_violet().alpha(0.55)
+    } else if is_selected {
+        theme::accent_blue().alpha(0.75)
     } else {
-        Color { r: 0.28, g: 0.32, b: 0.38, a: 1.0 }
+        theme::border_default()
     };
 
-    let font_size = (11.0 * zoom).clamp(8.0, 13.0);
+    let font_size = (10.5 * zoom).clamp(8.0, 12.5);
+    let label_str = if edge.label.is_empty() {
+        format!("[{}]", edge.relation.display_label())
+    } else {
+        format!("[{}] {}", edge.relation.display_label(), edge.label)
+    };
 
-    let mut pill = row()
-        .key(edge.id.as_str())
-        .absolute(screen_pos.x - 60.0 * zoom, screen_pos.y - 14.0 * zoom)
-        .px(7.0 * zoom)
-        .py(3.0 * zoom)
-        .gap(space::S2)
-        .radius((6.0 * zoom).clamp(4.0, 8.0))
-        .fill(pill_bg)
-        .border(1.0, pill_border)
-        .shadow(2.0, 6.0, Color { r: 0.0, g: 0.0, b: 0.0, a: 0.35 })
-        .cursor(Cursor::Pointer)
-        .on_press(move |s: &mut AppState| {
-            s.select_edge(edge_id_clone.clone());
-        })
+    let mut content = row()
+        .center_y()
+        .gap(4.0 * zoom)
         .child(
-            text(format!("[{}]", edge.relation.display_label()))
-                .font(TextStyle::new(font_size, 600.0))
+            text(label_str)
+                .font(TextStyle::new(font_size, 500.0))
                 .color(if is_ghost {
-                    Color { r: 0.95, g: 0.65, b: 1.0, a: 1.0 }
+                    theme::accent_violet()
                 } else {
-                    Color { r: 0.60, g: 0.75, b: 1.0, a: 1.0 }
+                    theme::text_secondary()
                 }),
         );
 
-    if !edge.label.is_empty() {
-        pill = pill.child(
-            text(&edge.label)
-                .font(TextStyle::new(font_size, 500.0))
-                .color(Color::WHITE),
-        );
-    }
-
     if is_ghost {
-        pill = pill
+        content = content
             .child(
                 el()
                     .px(5.0 * zoom)
-                    .py(2.0 * zoom)
-                    .radius(3.0)
-                    .fill(Color { r: 0.10, g: 0.70, b: 0.40, a: 1.0 })
+                    .py(1.5 * zoom)
+                    .radius(4.0)
+                    .fill(theme::accent_emerald().alpha(0.18))
+                    .border(1.0, theme::accent_emerald().alpha(0.45))
                     .cursor(Cursor::Pointer)
                     .on_press(move |s: &mut AppState| {
                         s.graph.accept_edge(&edge_id_for_accept);
-                        s.status_message = "Accepted AI connection".into();
+                        if let Some(bundle) = &s.bundle {
+                            let _ = bundle.save_graph_atomic(&s.graph);
+                        }
+                        s.status_message = "Accepted AI link".into();
                     })
-                    .child(text("✓").font(TextStyle::new(font_size, 700.0)).color(Color::WHITE)),
+                    .child(
+                        text("✓")
+                            .font(TextStyle::new(font_size, 700.0))
+                            .color(theme::accent_emerald()),
+                    ),
             )
             .child(
                 el()
                     .px(5.0 * zoom)
-                    .py(2.0 * zoom)
-                    .radius(3.0)
-                    .fill(Color { r: 0.70, g: 0.20, b: 0.20, a: 1.0 })
+                    .py(1.5 * zoom)
+                    .radius(4.0)
+                    .fill(theme::accent_rose().alpha(0.16))
+                    .border(1.0, theme::accent_rose().alpha(0.40))
                     .cursor(Cursor::Pointer)
                     .on_press(move |s: &mut AppState| {
                         s.graph.reject_edge(&edge_id_for_reject);
-                        s.status_message = "Dismissed AI connection".into();
+                        if let Some(bundle) = &s.bundle {
+                            let _ = bundle.save_graph_atomic(&s.graph);
+                        }
+                        s.status_message = "Dismissed AI link".into();
                     })
-                    .child(text("✕").font(TextStyle::new(font_size, 700.0)).color(Color::WHITE)),
+                    .child(
+                        text("×")
+                            .font(TextStyle::new(font_size, 700.0))
+                            .color(theme::accent_rose()),
+                    ),
             );
     }
 
-    pill
+    el()
+        .key(format!("edge_pill_{}", edge.id.as_str()))
+        .absolute(screen_pos.x - 68.0 * zoom, screen_pos.y - 12.0 * zoom)
+        .px(8.0 * zoom)
+        .py(3.5 * zoom)
+        .radius(10.0)
+        .fill(pill_bg)
+        .hover(theme::hover_subtle())
+        .border(1.0, pill_border)
+        .cursor(Cursor::Pointer)
+        .on_press(move |s: &mut AppState| {
+            s.select_edge(edge_id_clone.clone());
+        })
+        .child(content)
 }

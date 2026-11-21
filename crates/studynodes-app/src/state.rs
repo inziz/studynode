@@ -4,9 +4,11 @@ use rune::TextEdit;
 use serde::{Deserialize, Serialize};
 
 use studynodes_graph::coords::{ScreenPos, WorldPos};
-use studynodes_graph::model::{EdgeId, NodeId, PortId};
+use studynodes_graph::model::{EdgeId, NodeId, NodeKind, PortId};
 use studynodes_graph::{CommandHistory, ProjectBundle, StudyGraph};
 use studynodes_llm::LlmProvider;
+
+use crate::touchpad_win32::TouchpadEvent;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppScreen {
@@ -53,11 +55,22 @@ pub enum CanvasMode {
     },
 }
 
+/// Canonical canvas dimensions `(base_w, base_h)` per node kind so rendered cards and wire sockets match.
+pub fn node_base_size(kind: NodeKind) -> (f32, f32) {
+    match kind {
+        NodeKind::Note => (280.0, 170.0),
+        NodeKind::Document => (256.0, 112.0),
+        NodeKind::Image => (240.0, 110.0),
+        NodeKind::LlmSynthesis => (260.0, 130.0),
+        NodeKind::Concept => (240.0, 110.0),
+    }
+}
+
 pub struct AppState {
     pub screen: AppScreen,
     pub projects_dir: PathBuf,
     pub recent_projects: Vec<ProjectMetadata>,
-    pub new_project_input: String,
+    pub new_project_input: TextEdit,
 
     // Active project state
     pub bundle: Option<ProjectBundle>,
@@ -76,14 +89,18 @@ pub struct AppState {
     #[allow(dead_code)]
     pub is_ai_loading: bool,
 
-    // Editing buffers
-    pub edit_node_title: TextEdit,
-    pub edit_node_content: TextEdit,
+    // Separate TextEdit instances per view region so simultaneous mounts never fight over focus.
+    pub canvas_title_edit: TextEdit,
+    pub canvas_content_edit: TextEdit,
+    pub inspector_title_edit: TextEdit,
+    pub inspector_content_edit: TextEdit,
+
     pub edit_edge_label: TextEdit,
     pub edit_edge_note: TextEdit,
     pub append_note_input: TextEdit,
     pub editing_node_id: Option<NodeId>,
     pub space_held: bool,
+    pub canvas_origin: [f32; 2],
 
     // Wire draft
     #[allow(dead_code)]
@@ -97,24 +114,27 @@ impl Default for AppState {
             screen: AppScreen::Dashboard,
             projects_dir,
             recent_projects: Vec::new(),
-            new_project_input: "My Study Project".into(),
+            new_project_input: TextEdit::new(""),
             bundle: None,
             graph: StudyGraph::new("Untitled Project"),
             history: CommandHistory::new(),
             canvas_mode: CanvasMode::Idle,
             selected_nodes: HashSet::new(),
             selected_edge: None,
-            inspector_open: true,
+            inspector_open: false,
             ai_panel_open: false,
             status_message: "Ready".into(),
             is_ai_loading: false,
-            edit_node_title: TextEdit::new(""),
-            edit_node_content: TextEdit::new(""),
+            canvas_title_edit: TextEdit::new(""),
+            canvas_content_edit: TextEdit::new(""),
+            inspector_title_edit: TextEdit::new(""),
+            inspector_content_edit: TextEdit::new(""),
             edit_edge_label: TextEdit::new(""),
             edit_edge_note: TextEdit::new(""),
             append_note_input: TextEdit::new(""),
             editing_node_id: None,
             space_held: false,
+            canvas_origin: [0.0, 40.0],
             wire_draft: None,
         };
 
@@ -170,8 +190,11 @@ impl AppState {
                 self.history = CommandHistory::new();
                 self.selected_nodes.clear();
                 self.selected_edge = None;
+                self.editing_node_id = None;
+                self.inspector_open = false;
+                self.ai_panel_open = false;
                 self.screen = AppScreen::Workspace;
-                self.status_message = format!("Created project '{}'", title);
+                self.status_message = format!("Created '{}'", title);
             }
             Err(e) => {
                 self.status_message = format!("Failed to create project: {}", e);
@@ -188,8 +211,11 @@ impl AppState {
                 self.history = CommandHistory::new();
                 self.selected_nodes.clear();
                 self.selected_edge = None;
+                self.editing_node_id = None;
+                self.inspector_open = false;
+                self.ai_panel_open = false;
                 self.screen = AppScreen::Workspace;
-                self.status_message = format!("Opened project '{}'", self.graph.title);
+                self.status_message = format!("Opened '{}'", self.graph.title);
             }
             Err(e) => {
                 self.status_message = format!("Failed to open project: {}", e);
@@ -205,24 +231,82 @@ impl AppState {
             let _ = bundle.save_graph_atomic(&self.graph);
         }
         self.screen = AppScreen::Dashboard;
+        crate::touchpad_win32::set_canvas_bounds(None);
         self.refresh_recent_projects();
     }
 
-    /// Sync active editing buffer back into the selected node.
-    pub fn sync_node_edits(&mut self) {
+    /// Persist canvas TextEdit buffers into the selected node and mirror to inspector without
+    /// altering canvas caret or focus.
+    pub fn sync_from_canvas_edits(&mut self) {
         if let Some(id) = self.selected_nodes.iter().next().cloned() {
             if let Some(node) = self.graph.get_node_mut(&id) {
-                let title = self.edit_node_title.text.clone();
-                let content = self.edit_node_content.text.clone();
+                let title = self.canvas_title_edit.text.clone();
+                let content = self.canvas_content_edit.text.clone();
                 let changed = node.title != title || node.content != content;
                 node.title = title;
                 node.content = content;
+                if self.inspector_title_edit.text != node.title {
+                    self.inspector_title_edit = TextEdit::new(&node.title);
+                }
+                if self.inspector_content_edit.text != node.content {
+                    self.inspector_content_edit = TextEdit::new(&node.content);
+                }
                 if changed {
                     if let Some(bundle) = &self.bundle {
                         let _ = bundle.save_graph_atomic(&self.graph);
                     }
                 }
             }
+        }
+    }
+
+    /// Persist inspector TextEdit buffers into the selected node and mirror to canvas without
+    /// altering inspector caret or focus.
+    pub fn sync_from_inspector_edits(&mut self) {
+        if let Some(id) = self.selected_nodes.iter().next().cloned() {
+            if let Some(node) = self.graph.get_node_mut(&id) {
+                let title = self.inspector_title_edit.text.clone();
+                let content = self.inspector_content_edit.text.clone();
+                let changed = node.title != title || node.content != content;
+                node.title = title;
+                node.content = content;
+                if self.canvas_title_edit.text != node.title {
+                    self.canvas_title_edit = TextEdit::new(&node.title);
+                }
+                if self.canvas_content_edit.text != node.content {
+                    self.canvas_content_edit = TextEdit::new(&node.content);
+                }
+                if changed {
+                    if let Some(bundle) = &self.bundle {
+                        let _ = bundle.save_graph_atomic(&self.graph);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sync whichever node edit buffer currently differs from the model.
+    pub fn sync_node_edits(&mut self) {
+        let Some(id) = self.selected_nodes.iter().next().cloned() else {
+            return;
+        };
+        let Some((cur_title, cur_content)) = self
+            .graph
+            .get_node(&id)
+            .map(|n| (n.title.clone(), n.content.clone()))
+        else {
+            return;
+        };
+
+        let canvas_dirty =
+            self.canvas_title_edit.text != cur_title || self.canvas_content_edit.text != cur_content;
+        let inspector_dirty = self.inspector_title_edit.text != cur_title
+            || self.inspector_content_edit.text != cur_content;
+
+        if canvas_dirty {
+            self.sync_from_canvas_edits();
+        } else if inspector_dirty {
+            self.sync_from_inspector_edits();
         }
     }
 
@@ -244,8 +328,18 @@ impl AppState {
         }
     }
 
-    /// Select a node and populate inspector buffer.
+    /// Select a node and populate edit buffers (preserving active edits/caret when already singly selected).
     pub fn select_node(&mut self, id: NodeId, additive: bool) {
+        if !additive && self.selected_nodes.len() == 1 && self.selected_nodes.contains(&id) {
+            if let Some(n) = self.graph.get_node(&id) {
+                if n.kind == NodeKind::Document {
+                    self.inspector_open = true;
+                    self.ai_panel_open = false;
+                }
+            }
+            return;
+        }
+
         self.sync_node_edits();
         self.sync_edge_edits();
         if !additive {
@@ -255,10 +349,33 @@ impl AppState {
         self.selected_nodes.insert(id.clone());
 
         if let Some(n) = self.graph.get_node(&id) {
-            self.edit_node_title = TextEdit::new(&n.title);
-            self.edit_node_content = TextEdit::new(&n.content);
-            self.inspector_open = true;
+            self.canvas_title_edit = TextEdit::new(&n.title);
+            self.canvas_content_edit = TextEdit::new(&n.content);
+            self.inspector_title_edit = TextEdit::new(&n.title);
+            self.inspector_content_edit = TextEdit::new(&n.content);
+            if n.kind == NodeKind::Document {
+                self.inspector_open = true;
+                self.ai_panel_open = false;
+                self.editing_node_id = None;
+            } else if n.kind == NodeKind::Note {
+                self.editing_node_id = Some(id);
+            } else {
+                self.editing_node_id = None;
+            }
         }
+    }
+
+    /// Clear all active node/edge selections (e.g. clicking empty canvas).
+    pub fn deselect_all(&mut self) {
+        self.sync_node_edits();
+        self.sync_edge_edits();
+        self.selected_nodes.clear();
+        self.selected_edge = None;
+        self.editing_node_id = None;
+        self.canvas_title_edit = TextEdit::new("");
+        self.canvas_content_edit = TextEdit::new("");
+        self.inspector_title_edit = TextEdit::new("");
+        self.inspector_content_edit = TextEdit::new("");
     }
 
     /// Enter in-card editing mode directly on the canvas.
@@ -266,7 +383,7 @@ impl AppState {
     pub fn start_editing_node(&mut self, id: NodeId) {
         self.select_node(id.clone(), false);
         self.editing_node_id = Some(id);
-        self.status_message = "Editing note directly on card".into();
+        self.status_message = "Editing note on canvas".into();
     }
 
     /// Exit in-card editing mode and sync back to model.
@@ -274,7 +391,7 @@ impl AppState {
     pub fn stop_editing_node(&mut self) {
         self.sync_node_edits();
         self.editing_node_id = None;
-        self.status_message = "Saved note changes".into();
+        self.status_message = "Saved note".into();
     }
 
     /// Delete a node and all connected edges from the graph.
@@ -287,7 +404,7 @@ impl AppState {
             if let Some(bundle) = &self.bundle {
                 let _ = bundle.save_graph_atomic(&self.graph);
             }
-            self.status_message = format!("Deleted '{}' (removed {} links)", removed.title, edges.len());
+            self.status_message = format!("Deleted '{}' ({} link(s) removed)", removed.title, edges.len());
         }
     }
 
@@ -309,7 +426,7 @@ impl AppState {
                     let _ = bundle.save_graph_atomic(&self.graph);
                 }
                 self.status_message = format!(
-                    "✦ AI explained '{}' ({} proposed connection(s))",
+                    "✦ AI explained '{}' ({} proposed link(s))",
                     self.graph.get_node(id).map(|n| n.title.as_str()).unwrap_or("node"),
                     res.proposed_edges.len()
                 );
@@ -318,7 +435,6 @@ impl AppState {
     }
 
     /// Connect two nodes via an Edge with auto-persistence.
-    #[allow(dead_code)]
     pub fn connect_nodes(&mut self, from_id: &NodeId, to_id: &NodeId) {
         if from_id == to_id {
             return;
@@ -340,7 +456,7 @@ impl AppState {
         if let Some(bundle) = &self.bundle {
             let _ = bundle.save_graph_atomic(&self.graph);
         }
-        self.status_message = format!("Connected wire: '{}' → '{}'", from_title, to_title);
+        self.status_message = format!("Linked '{}' → '{}'", from_title, to_title);
     }
 
     /// Select an edge and populate inspector buffer.
@@ -348,7 +464,10 @@ impl AppState {
         self.sync_node_edits();
         self.sync_edge_edits();
         self.selected_nodes.clear();
+        self.editing_node_id = None;
         self.selected_edge = Some(id.clone());
+        self.inspector_open = true;
+        self.ai_panel_open = false;
 
         if let Some(e) = self.graph.get_edge(&id) {
             self.edit_edge_label = TextEdit::new(&e.label);
@@ -365,7 +484,8 @@ impl AppState {
                     node.content.push('\n');
                 }
                 node.content.push_str(text_to_append);
-                self.edit_node_content = TextEdit::new(&node.content);
+                self.canvas_content_edit = TextEdit::new(&node.content);
+                self.inspector_content_edit = TextEdit::new(&node.content);
                 self.status_message = "Appended to note".into();
             }
         }
@@ -383,47 +503,43 @@ impl AppState {
         }
     }
 
-    /// Create and select a new Note node.
+    /// Create and select a new Note node with clean empty content ready for immediate typing.
     pub fn add_note_node(&mut self, pos_opt: Option<WorldPos>) -> NodeId {
         let pos = pos_opt.unwrap_or_else(|| {
             let center = self.graph.viewport.screen_to_world(ScreenPos::new(360.0, 240.0));
             WorldPos::new(center.x, center.y)
         });
-        let mut node = studynodes_graph::model::Node::new(
-            studynodes_graph::model::NodeKind::Note,
-            "New Note",
-            pos,
-        );
-        node.content = "Write study observations or synthesis notes here...".into();
+        let mut node = studynodes_graph::model::Node::new(NodeKind::Note, "New Note", pos);
+        node.size = node_base_size(NodeKind::Note);
+        node.content = String::new();
         let id = node.id.clone();
         self.graph.add_node(node);
         self.select_node(id.clone(), false);
         if let Some(bundle) = &self.bundle {
             let _ = bundle.save_graph_atomic(&self.graph);
         }
-        self.status_message = "Created new Note".into();
+        self.status_message = "Created Note".into();
         id
     }
 
-    /// Create and select a new Document node.
+    /// Create and select a new Document node and open its right-side reader.
     pub fn add_document_node(&mut self, pos_opt: Option<WorldPos>) -> NodeId {
         let pos = pos_opt.unwrap_or_else(|| {
             let center = self.graph.viewport.screen_to_world(ScreenPos::new(420.0, 280.0));
             WorldPos::new(center.x, center.y)
         });
-        let mut node = studynodes_graph::model::Node::new(
-            studynodes_graph::model::NodeKind::Document,
-            "New Document",
-            pos,
-        );
-        node.content = "# Research Document\n\nIngest a PDF, EPUB, or markdown file, or write source document text here.".into();
+        let mut node = studynodes_graph::model::Node::new(NodeKind::Document, "New Document", pos);
+        node.size = node_base_size(NodeKind::Document);
+        node.content =
+            "# Research Document\n\nIngest a PDF, EPUB, or markdown file, or paste source text here."
+                .into();
         let id = node.id.clone();
         self.graph.add_node(node);
         self.select_node(id.clone(), false);
         if let Some(bundle) = &self.bundle {
             let _ = bundle.save_graph_atomic(&self.graph);
         }
-        self.status_message = "Created new Document node".into();
+        self.status_message = "Created Document".into();
         id
     }
 
@@ -446,10 +562,13 @@ MultiHead(Q, K, V) = Concat(head_1, ..., head_h) W^O
 where head_i = Attention(Q W_i^Q, K W_i^K, V W_i^V)
 
 ### Scaled Dot-Product Attention
-Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V"#.into();
-            self.edit_node_title = TextEdit::new(&node.title);
-            self.edit_node_content = TextEdit::new(&node.content);
-            self.status_message = "Loaded sample academic paper into document".into();
+Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V"#
+                .into();
+            self.canvas_title_edit = TextEdit::new(&node.title);
+            self.canvas_content_edit = TextEdit::new(&node.content);
+            self.inspector_title_edit = TextEdit::new(&node.title);
+            self.inspector_content_edit = TextEdit::new(&node.content);
+            self.status_message = "Loaded sample academic paper".into();
         }
         if let Some(bundle) = &self.bundle {
             let _ = bundle.save_graph_atomic(&self.graph);
@@ -469,22 +588,28 @@ Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V"#.into();
             .unwrap_or("")
             .to_lowercase();
 
-        let text_content = if matches!(ext.as_str(), "txt" | "md" | "json" | "rs" | "toml" | "csv" | "tex") {
-            std::fs::read_to_string(path).ok()
-        } else {
-            None
-        };
+        let text_content =
+            if matches!(ext.as_str(), "txt" | "md" | "json" | "rs" | "toml" | "csv" | "tex") {
+                std::fs::read_to_string(path).ok()
+            } else {
+                None
+            };
 
         if let Some(bundle) = &self.bundle {
             if let Ok((hash, _)) = bundle.ingest_asset(path) {
                 if let Some(node) = self.graph.get_node_mut(node_id) {
                     node.asset_hash = Some(hash.clone());
-                    if node.title.is_empty() || node.title == "New Document" || node.title == "New Note" {
+                    if node.title.is_empty()
+                        || node.title == "New Document"
+                        || node.title == "New Note"
+                    {
                         node.title = filename.clone();
                     }
                     if let Some(content) = text_content {
                         node.content = content;
-                    } else if node.content.is_empty() || node.content.starts_with("# Research Document") {
+                    } else if node.content.is_empty()
+                        || node.content.starts_with("# Research Document")
+                    {
                         node.content = format!(
                             "# Document: {}\n\n• File: {}\n• SHA-256: {}\n• Ingested into project assets library.\n",
                             filename,
@@ -492,11 +617,13 @@ Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V"#.into();
                             hash
                         );
                     }
-                    self.edit_node_title = TextEdit::new(&node.title);
-                    self.edit_node_content = TextEdit::new(&node.content);
+                    self.canvas_title_edit = TextEdit::new(&node.title);
+                    self.canvas_content_edit = TextEdit::new(&node.content);
+                    self.inspector_title_edit = TextEdit::new(&node.title);
+                    self.inspector_content_edit = TextEdit::new(&node.content);
                 }
                 let _ = bundle.save_graph_atomic(&self.graph);
-                self.status_message = format!("Ingested '{}' into document node", filename);
+                self.status_message = format!("Ingested '{}'", filename);
                 return;
             }
         }
@@ -508,12 +635,14 @@ Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V"#.into();
                     node.title = filename.clone();
                 }
                 node.content = content;
-                self.edit_node_title = TextEdit::new(&node.title);
-                self.edit_node_content = TextEdit::new(&node.content);
+                self.canvas_title_edit = TextEdit::new(&node.title);
+                self.canvas_content_edit = TextEdit::new(&node.content);
+                self.inspector_title_edit = TextEdit::new(&node.title);
+                self.inspector_content_edit = TextEdit::new(&node.content);
             }
-            self.status_message = format!("Loaded text from '{}'", filename);
+            self.status_message = format!("Loaded '{}'", filename);
         } else {
-            self.status_message = format!("Ingested file reference: '{}'", filename);
+            self.status_message = format!("Ingested '{}'", filename);
         }
     }
 
@@ -541,23 +670,23 @@ Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V"#.into();
                     .to_lowercase();
 
                 let kind = match ext.as_str() {
-                    "png" | "jpg" | "jpeg" | "gif" | "svg" => studynodes_graph::model::NodeKind::Image,
-                    "pdf" | "epub" => studynodes_graph::model::NodeKind::Document,
+                    "png" | "jpg" | "jpeg" | "gif" | "svg" => NodeKind::Image,
+                    "pdf" | "epub" => NodeKind::Document,
                     "md" | "txt" => {
-                        // Extract content if small text file
                         let content = std::fs::read_to_string(path).unwrap_or_default();
                         let mut node = studynodes_graph::model::Node::new(
-                            studynodes_graph::model::NodeKind::Note,
+                            NodeKind::Note,
                             filename.clone(),
                             WorldPos::new(drop_world.x + offset_x, drop_world.y),
                         );
+                        node.size = node_base_size(NodeKind::Note);
                         node.content = content;
                         node.asset_hash = Some(hash.clone());
                         self.graph.add_node(node);
                         offset_x += 300.0;
                         continue;
                     }
-                    _ => studynodes_graph::model::NodeKind::Document,
+                    _ => NodeKind::Document,
                 };
 
                 let mut node = studynodes_graph::model::Node::new(
@@ -565,6 +694,7 @@ Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V"#.into();
                     filename,
                     WorldPos::new(drop_world.x + offset_x, drop_world.y),
                 );
+                node.size = node_base_size(kind);
                 node.asset_hash = Some(hash);
                 self.graph.add_node(node);
                 offset_x += 300.0;
@@ -572,6 +702,28 @@ Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V"#.into();
         }
 
         let _ = bundle.save_graph_atomic(&self.graph);
-        self.status_message = format!("Ingested {} file(s) into project canvas", files.len());
+        self.status_message = format!("Ingested {} file(s)", files.len());
+    }
+
+    /// Apply unlocked simultaneous 2D touchpad Pan and Zoom events.
+    pub fn apply_touchpad_events(&mut self, events: Vec<TouchpadEvent>) -> bool {
+        if self.screen != AppScreen::Workspace || events.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        for ev in events {
+            match ev {
+                TouchpadEvent::Pan { dx, dy } => {
+                    self.graph.viewport.pan_by_screen_delta(dx, dy);
+                    changed = true;
+                }
+                TouchpadEvent::Zoom { factor, x, y } => {
+                    let local = ScreenPos::new(x - self.canvas_origin[0], y - self.canvas_origin[1]);
+                    self.graph.viewport.zoom_at(local, factor);
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 }

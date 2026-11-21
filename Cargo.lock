@@ -3601,6 +3601,7 @@ dependencies = [
 name = "studynodes-app"
 version = "0.1.0"
 dependencies = [
+ "raw-window-handle",
  "rune",
  "rune-kit",
  "serde",
@@ -3610,6 +3611,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+ "windows",
+ "windows-core",
 ]
 
 [[package]]

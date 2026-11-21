@@ -29,3 +29,9 @@ sctk-adwaita = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9
 parley_engine = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/vendor/parley_engine" }
 accesskit_windows = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/vendor/accesskit_windows" }
 accesskit_macos = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/vendor/accesskit_macos" }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = 0
