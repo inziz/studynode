@@ -130,6 +130,52 @@ fn seg_tab(key: &'static str, label: &str, active: bool) -> El {
 }
 
 pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
+    let panel_width = s.inspector_width.clamp(300.0, 860.0);
+
+    let resize_handle = el()
+        .key("inspector_resize_handle")
+        .w(6.0)
+        .h_full()
+        .fill(theme::bg_sidebar())
+        .hover(theme::accent_claude().alpha(0.32))
+        .border_sides([0.0, 0.0, 0.0, 1.0], theme::border_subtle())
+        .center()
+        .cursor(Cursor::ResizeColumn)
+        .on_drag(|s: &mut AppState, d, _| match d.phase {
+            Phase::Down => {
+                s.inspector_resize_start_w = s.inspector_width;
+            }
+            Phase::Move => {
+                s.inspector_width = (s.inspector_resize_start_w - d.dx).clamp(300.0, 860.0);
+            }
+            Phase::Up => {
+                s.reader_prefs.inspector_width = s.inspector_width;
+                let _ = doc_reader::save_preferences(&s.projects_dir, &s.reader_prefs);
+            }
+        })
+        .child(
+            el().w(1.5)
+                .h(36.0)
+                .radius(1.0)
+                .fill(theme::border_strong()),
+        );
+
+    // Distraction-Free Read-Only Reader layout (Document / Image) when active
+    if !s.ai_panel_open && s.reader_read_only {
+        if let Some(selected_node_id) = s.selected_nodes.iter().next() {
+            if let Some(node) = s.graph.get_node(selected_node_id) {
+                if matches!(node.kind, NodeKind::Document | NodeKind::Image) {
+                    let ro_panel = render_readonly_doc_panel(s, node, panel_width);
+                    return row()
+                        .key("inspector_container")
+                        .h_full()
+                        .child(resize_handle)
+                        .child(ro_panel);
+                }
+            }
+        }
+    }
+
     let mut content = col().w_full().gap(space::S3);
 
     if s.ai_panel_open {
@@ -270,7 +316,7 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                             .child(subtle_badge(&format!("{}w", word_count), theme::text_secondary()))
                             .child(subtle_badge(&format!("~{}m", read_min), theme::text_muted()))
                             .child(el().grow(1.0))
-                            // Integrated | Custom switcher
+                            // Integrated | Custom switcher + Read-Only toggle
                             .child(
                                 row()
                                     .key("reader_mode_switch")
@@ -292,6 +338,26 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                                                 s.set_reader_mode(ReaderMode::CustomExternal);
                                                 s.reader_settings_open = true;
                                             }),
+                                    ),
+                            )
+                            .child(
+                                el()
+                                    .key("btn_toggle_readonly")
+                                    .h(24.0)
+                                    .px(8.0)
+                                    .radius(4.0)
+                                    .fill(theme::bg_control())
+                                    .hover(theme::hover_subtle())
+                                    .border(1.0, theme::border_subtle())
+                                    .center()
+                                    .cursor(Cursor::Pointer)
+                                    .on_press(|s: &mut AppState| {
+                                        s.set_reader_read_only(true);
+                                    })
+                                    .child(
+                                        text("Read")
+                                            .font(theme::BADGE_TEXT)
+                                            .color(theme::text_primary()),
                                     ),
                             )
                             .child(popout_panel_btn())
@@ -361,6 +427,7 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                                             .child(
                                                 text_input(&s.custom_reader_edit, theme::STATUS_TEXT)
                                                     .key("custom_reader_path_input")
+                                                    .label("Custom reader executable")
                                                     .single_line()
                                                     .w_full()
                                                     .color(theme::text_primary())
@@ -458,6 +525,7 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                                     .child(
                                         text_input(&s.inspector_title_edit, theme::PANEL_TITLE)
                                             .key("inspector_title")
+                                            .label("Document title")
                                             .single_line()
                                             .w_full()
                                             .color(theme::text_primary())
@@ -766,6 +834,7 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                         .child(
                             text_input(&s.inspector_content_edit, theme::MONO_BODY)
                                 .key("inspector_content")
+                                .label("Document source")
                                 .w_full()
                                 .min_h(250.0)
                                 .color(theme::text_primary())
@@ -863,6 +932,7 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                                     .child(
                                         text_input(&s.append_note_input, theme::CONTROL_TEXT)
                                             .key("append_note")
+                                            .label("Append markdown note or excerpt")
                                             .single_line()
                                             .w_full()
                                             .color(theme::text_primary())
@@ -989,6 +1059,7 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                                     .child(
                                         text_input(&s.inspector_title_edit, theme::PANEL_TITLE)
                                             .key("inspector_title")
+                                            .label("Node title")
                                             .single_line()
                                             .w_full()
                                             .color(theme::text_primary())
@@ -1049,6 +1120,7 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                                             .child(
                                                 text_input(&s.inspector_content_edit, theme::BODY_TEXT)
                                                     .key("inspector_content")
+                                                    .label("Note body")
                                                     .w_full()
                                                     .min_h(160.0)
                                                     .color(theme::text_primary())
@@ -1324,6 +1396,7 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                                 .child(
                                     text_input(&s.edit_edge_label, theme::CONTROL_TEXT)
                                         .key("edge_label")
+                                        .label("Connection label")
                                         .single_line()
                                         .w_full()
                                         .color(theme::text_primary())
@@ -1359,6 +1432,7 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                                 .child(
                                     text_input(&s.edit_edge_note, theme::BODY_TEXT)
                                         .key("edge_note")
+                                        .label("Connection note")
                                         .w_full()
                                         .min_h(80.0)
                                         .color(theme::text_primary())
@@ -1446,36 +1520,6 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
             );
     }
 
-    let panel_width = s.inspector_width.clamp(300.0, 860.0);
-
-    let resize_handle = el()
-        .key("inspector_resize_handle")
-        .w(6.0)
-        .h_full()
-        .fill(theme::bg_sidebar())
-        .hover(theme::accent_claude().alpha(0.32))
-        .border_sides([0.0, 0.0, 0.0, 1.0], theme::border_subtle())
-        .center()
-        .cursor(Cursor::ResizeColumn)
-        .on_drag(|s: &mut AppState, d, _| match d.phase {
-            Phase::Down => {
-                s.inspector_resize_start_w = s.inspector_width;
-            }
-            Phase::Move => {
-                s.inspector_width = (s.inspector_resize_start_w - d.dx).clamp(300.0, 860.0);
-            }
-            Phase::Up => {
-                s.reader_prefs.inspector_width = s.inspector_width;
-                let _ = doc_reader::save_preferences(&s.projects_dir, &s.reader_prefs);
-            }
-        })
-        .child(
-            el().w(1.5)
-                .h(36.0)
-                .radius(1.0)
-                .fill(theme::border_strong()),
-        );
-
     let panel = col()
         .key("inspector_panel")
         .w(panel_width)
@@ -1490,4 +1534,239 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
         .h_full()
         .child(resize_handle)
         .child(panel)
+}
+
+fn render_readonly_doc_panel(
+    s: &AppState,
+    node: &studynodes_graph::model::Node,
+    panel_width: f32,
+) -> El {
+    let doc_format = s.node_doc_format(&node.id);
+    let fmt_badge = doc_reader::format_badge(doc_format);
+    let has_pdf = s.active_pdf.as_ref().is_some_and(|p| p.node_id == node.id);
+
+    let mut small_toolbar = row()
+        .key("reader_readonly_toolbar")
+        .w_full()
+        .center_y()
+        .gap(6.0)
+        .px(8.0)
+        .py(6.0)
+        .radius(4.0)
+        .fill(theme::bg_card())
+        .border(1.0, theme::border_subtle())
+        .child(badge_pill(fmt_badge, theme::text_primary()))
+        .child(
+            el().grow(1.0).min_w(0.0).child(
+                text(&node.title)
+                    .font(theme::CONTROL_TEXT)
+                    .color(theme::text_primary())
+                    .truncate(),
+            ),
+        );
+
+    if has_pdf {
+        small_toolbar = small_toolbar.child(
+            row()
+                .key("doc_view_tabs")
+                .padding(2.0)
+                .gap(2.0)
+                .radius(4.0)
+                .fill(theme::bg_input())
+                .border(1.0, theme::border_subtle())
+                .child(
+                    seg_tab(
+                        "tab_doc_pages",
+                        "Pages",
+                        s.doc_view_tab == DocViewTab::Pages || s.doc_view_tab == DocViewTab::Source,
+                    )
+                    .on_press(|s: &mut AppState| {
+                        s.doc_view_tab = DocViewTab::Pages;
+                    }),
+                )
+                .child(
+                    seg_tab("tab_doc_preview", "Text", s.doc_view_tab == DocViewTab::Preview)
+                        .on_press(|s: &mut AppState| {
+                            s.doc_view_tab = DocViewTab::Preview;
+                        }),
+                ),
+        );
+    }
+
+    small_toolbar = small_toolbar
+        .child(
+            el()
+                .key("btn_toggle_readonly")
+                .h(24.0)
+                .px(8.0)
+                .radius(4.0)
+                .fill(theme::accent_claude().alpha(0.16))
+                .hover(theme::hover_subtle())
+                .border(1.0, theme::accent_claude().alpha(0.45))
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut AppState| {
+                    s.set_reader_read_only(false);
+                })
+                .child(
+                    text("✎ Edit")
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::accent_claude()),
+                ),
+        )
+        .child(popout_panel_btn())
+        .child(close_panel_btn());
+
+    let effective_tab = if s.doc_view_tab == DocViewTab::Source {
+        if has_pdf {
+            DocViewTab::Pages
+        } else {
+            DocViewTab::Preview
+        }
+    } else {
+        s.doc_view_tab
+    };
+
+    let reader_body = if has_pdf && effective_tab == DocViewTab::Pages {
+        let pdf = s.active_pdf.as_ref().unwrap();
+        let cur_page = pdf.page_index;
+        let total_pages = pdf.page_count.max(1);
+        let cur_zoom = pdf.zoom;
+        let aspect = if pdf.page_size.0 > 0 && pdf.page_size.1 > 0 {
+            Some(pdf.page_size.0 as f32 / pdf.page_size.1 as f32)
+        } else {
+            None
+        };
+
+        let mut pdf_col = col().w_full().grow(1.0).min_h(0.0).gap(8.0).child(
+            row()
+                .key("readonly_pdf_controls")
+                .w_full()
+                .center_y()
+                .gap(6.0)
+                .px(8.0)
+                .py(5.0)
+                .radius(4.0)
+                .fill(theme::bg_card())
+                .border(1.0, theme::border_subtle())
+                .child(quick_chip("btn_pdf_prev", "‹", theme::text_primary(), move |s| {
+                    s.set_pdf_page(cur_page.saturating_sub(1));
+                }))
+                .child(
+                    text(format!("{} / {}", cur_page + 1, total_pages))
+                        .font(theme::STATUS_TEXT)
+                        .color(theme::text_secondary()),
+                )
+                .child(quick_chip("btn_pdf_next", "›", theme::text_primary(), move |s| {
+                    s.set_pdf_page(cur_page + 1);
+                }))
+                .child(el().grow(1.0))
+                .child(quick_chip("btn_pdf_zout", "−", theme::text_secondary(), move |s| {
+                    s.set_pdf_zoom(cur_zoom - 0.25);
+                }))
+                .child(
+                    text(format!("{}%", (cur_zoom * 100.0).round() as u32))
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_muted()),
+                )
+                .child(quick_chip("btn_pdf_zin", "+", theme::text_secondary(), move |s| {
+                    s.set_pdf_zoom(cur_zoom + 0.25);
+                })),
+        );
+
+        if let Some(err) = &pdf.error {
+            pdf_col = pdf_col.child(
+                el()
+                    .w_full()
+                    .padding(10.0)
+                    .radius(4.0)
+                    .fill(theme::bg_input())
+                    .border(1.0, theme::accent_danger().alpha(0.45))
+                    .child(
+                        text(format!("PDF render note: {}", err))
+                            .font(theme::BODY_TEXT)
+                            .color(theme::text_secondary())
+                            .w_full()
+                            .wrap(),
+                    ),
+            );
+        } else {
+            let mut page_el = el()
+                .key(format!("pdf_page_canvas_{}", cur_page))
+                .w_full()
+                .radius(4.0)
+                .border(1.0, theme::border_default())
+                .clip_soft(0.0)
+                .pixels_fit(&pdf.pixels, SurfaceFit::Fit);
+            if let Some(ar) = aspect {
+                page_el = page_el.aspect_ratio(ar);
+            } else {
+                page_el = page_el.min_h(320.0);
+            }
+            pdf_col = pdf_col.child(
+                col()
+                    .w_full()
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .scroll(ScrollSpec { stick_bottom: false })
+                    .child(page_el),
+            );
+        }
+        pdf_col
+    } else {
+        let mut preview_col = col()
+            .key("integrated_md_reader")
+            .w_full()
+            .grow(1.0)
+            .min_h(0.0)
+            .gap(10.0)
+            .scroll(ScrollSpec { stick_bottom: false });
+
+        if let Some((img_nid, _, img)) = &s.active_image {
+            if img_nid == &node.id && doc_format == DocFormat::Image {
+                preview_col = preview_col.child(
+                    el()
+                        .key("integrated_image_preview")
+                        .w_full()
+                        .min_h(260.0)
+                        .max_h(440.0)
+                        .radius(4.0)
+                        .border(1.0, theme::border_default())
+                        .pixels_fit(img.pixels(), SurfaceFit::Fit),
+                );
+            }
+        }
+
+        let md_src = if node.content.trim().is_empty() {
+            "*Read-only mode. Click **✎ Edit** in the toolbar to ingest a file or write Markdown.*".to_string()
+        } else {
+            doc_reader::wrap_for_preview(&node.content, doc_format)
+        };
+
+        let md_w = (panel_width - 56.0).max(220.0);
+        let md_style = theme::markdown_style().text_width(md_w);
+        let md_el = Markdown::new(&md_src).selectable(true).render(&md_style);
+
+        preview_col.child(md_el)
+    };
+
+    col()
+        .key("inspector_panel")
+        .w(panel_width)
+        .h_full()
+        .fill(theme::bg_sidebar())
+        .padding(12.0)
+        .gap(8.0)
+        .child(small_toolbar)
+        .child(
+            col()
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .radius(4.0)
+                .fill(theme::bg_input())
+                .border(1.0, theme::border_default())
+                .padding(14.0)
+                .child(reader_body),
+        )
 }

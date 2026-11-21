@@ -136,6 +136,7 @@ pub fn render_canvas_view(s: &AppState) -> El {
         .pointer_buttons([PointerButton::Primary, PointerButton::Middle])
         .on_layout_tx(|s: &mut AppState, r, tx| {
             s.canvas_origin = [r[0], r[1]];
+            s.canvas_size = [r[2].max(200.0), r[3].max(200.0)];
             crate::touchpad_win32::set_canvas_bounds(Some(r));
             tx.live_only();
         })
@@ -514,6 +515,17 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                                 .color(theme::text_primary()),
                         ),
                 ),
+        )
+        // Jump to nearest nodes button (never get lost on infinite canvas)
+        .child(
+            topbar_pill_btn(
+                "btn_locate_nearest",
+                Some(("◎", theme::accent_claude())),
+                "Nearest",
+            )
+            .on_press(|s: &mut AppState| {
+                s.locate_nearest_nodes();
+            }),
         )
         // Compact segmented zoom pill
         .child(

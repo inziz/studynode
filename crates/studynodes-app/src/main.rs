@@ -833,4 +833,116 @@ mod tests {
         assert!(!rt.state.inspector_popped_out);
         assert!(rt.state.inspector_open);
     }
+
+    #[test]
+    fn test_reader_readonly_mode_hides_edit_chrome_and_syncs_bridge() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Read-Only Reader Test");
+        let doc_id = rt.state.add_document_node(Some(WorldPos::new(80.0, 90.0)));
+        rt.state.load_sample_document(&doc_id);
+        rt.invalidate();
+        settle_frames(rt, 4);
+
+        // Opens directly in Read-Only focus mode with minimal toolbar and hidden edit inputs
+        assert!(rt.state.reader_read_only);
+        assert!(rt.state.reader_bridge.lock().unwrap().snapshot.read_only);
+        let keys_ro: Vec<_> = rt
+            .elements()
+            .into_iter()
+            .filter_map(|e| e.key)
+            .collect();
+        assert!(keys_ro.contains(&"reader_readonly_toolbar".to_string()));
+        assert!(!keys_ro.contains(&"inspector_title".to_string()));
+        assert!(!keys_ro.contains(&"btn_doc_ingest".to_string()));
+        assert!(!keys_ro.contains(&"append_note".to_string()));
+        assert!(!keys_ro.contains(&"btn_delete_doc".to_string()));
+
+        // Clicking '✎ Edit' reveals full editing UI and syncs bridge snapshot
+        let r = element_rect(rt, "btn_toggle_readonly");
+        let (cx, cy) = (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
+        rt.pointer_move(cx, cy);
+        rt.pointer_down(cx, cy);
+        rt.pointer_up(cx, cy);
+        settle_frames(rt, 3);
+
+        assert!(!rt.state.reader_read_only);
+        assert!(!rt.state.reader_bridge.lock().unwrap().snapshot.read_only);
+        let keys_edit: Vec<_> = rt
+            .elements()
+            .into_iter()
+            .filter_map(|e| e.key)
+            .collect();
+        assert!(keys_edit.contains(&"inspector_title".to_string()));
+        assert!(keys_edit.contains(&"btn_doc_ingest".to_string()));
+
+        // Pop-out window opens directly in Read-Only mode even if sidebar was in Edit mode
+        rt.state.pop_out_reader();
+        settle_frames(rt, 2);
+        assert!(rt.state.reader_read_only);
+        assert!(rt.state.reader_bridge.lock().unwrap().snapshot.read_only);
+
+        // Bridge SetReadOnly(false) toggles Edit mode back from standalone window
+        {
+            let mut b = rt.state.reader_bridge.lock().unwrap();
+            b.push_command(crate::reader_window::ReaderCommand::SetReadOnly(false));
+        }
+        assert!(rt.state.poll_reader_bridge());
+        assert!(!rt.state.reader_read_only);
+    }
+
+    #[test]
+    fn test_locate_nearest_nodes_recovers_from_far_pan() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Nearest Nodes Test");
+
+        let n1 = rt.state.add_note_node(Some(WorldPos::new(160.0, 140.0)));
+        let n2 = rt.state.add_note_node(Some(WorldPos::new(480.0, 220.0)));
+        rt.state.inspector_open = false;
+
+        // Pan far into empty void where zero nodes are visible
+        rt.state.graph.viewport.offset = WorldPos::new(15000.0, -8000.0);
+        rt.state.graph.viewport.zoom = 0.25;
+        rt.invalidate();
+        settle_frames(rt, 4);
+
+        let r1_far = element_rect(rt, n1.as_str());
+        assert!(r1_far[0] < -1000.0, "node 1 must start offscreen after far pan");
+
+        // Click topbar 'Nearest' button via real pointer input
+        let br = element_rect(rt, "btn_locate_nearest");
+        let (bx, by) = (br[0] + br[2] * 0.5, br[1] + br[3] * 0.5);
+        rt.pointer_move(bx, by);
+        rt.pointer_down(bx, by);
+        rt.pointer_up(bx, by);
+        settle_frames(rt, 2);
+
+        // Camera state jumps immediately to frame the cluster
+        assert!(rt.state.graph.viewport.zoom >= 0.45);
+        assert!(rt.state.graph.viewport.offset.x.abs() < 1000.0);
+
+        // Allow Rune's layout transition springs to finish settling rendered element rects
+        settle_frames(rt, 45);
+
+        let canvas_r = element_rect(rt, "graph_canvas");
+        let r1_near = element_rect(rt, n1.as_str());
+        let r2_near = element_rect(rt, n2.as_str());
+        assert!(
+            r1_near[0] >= canvas_r[0] - 1.0
+                && r1_near[0] + r1_near[2] <= canvas_r[0] + canvas_r[2] + 1.0
+                && r2_near[0] >= canvas_r[0] - 1.0
+                && r2_near[0] + r2_near[2] <= canvas_r[0] + canvas_r[2] + 1.0,
+            "both nearest nodes must be centered inside canvas_r={canvas_r:?}, got r1={r1_near:?}, r2={r2_near:?}"
+        );
+
+        // Empty-canvas fallback resets cleanly to origin at 100%
+        rt.state.delete_node(&n1);
+        rt.state.delete_node(&n2);
+        rt.state.graph.viewport.offset = WorldPos::new(900.0, 900.0);
+        rt.state.graph.viewport.zoom = 2.0;
+        assert!(rt.state.locate_nearest_nodes().is_none());
+        assert_eq!(rt.state.graph.viewport.offset, WorldPos::ZERO);
+        assert!((rt.state.graph.viewport.zoom - 1.0).abs() < 1e-4);
+    }
 }

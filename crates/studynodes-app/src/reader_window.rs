@@ -27,6 +27,7 @@ pub struct ReaderSnapshot {
     pub pdf_page_index: usize,
     pub pdf_page_count: usize,
     pub pdf_zoom: f32,
+    pub read_only: bool,
 }
 
 impl Default for ReaderSnapshot {
@@ -44,6 +45,7 @@ impl Default for ReaderSnapshot {
             pdf_page_index: 0,
             pdf_page_count: 1,
             pdf_zoom: 1.5,
+            read_only: true,
         }
     }
 }
@@ -52,6 +54,7 @@ impl Default for ReaderSnapshot {
 pub enum ReaderCommand {
     DockBack,
     WindowClosed,
+    SetReadOnly(bool),
     UpdateTitleContent {
         node_id: NodeId,
         title: String,
@@ -323,6 +326,7 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
 
     let insets = cx.chrome_insets();
     let snap = &s.snapshot;
+    let is_ro = snap.read_only;
     let has_pdf = snap.doc_format == DocFormat::Pdf && snap.asset_path.is_some();
     let word_count = snap.content.split_whitespace().count();
     let read_min = (word_count as f32 / 200.0).ceil().max(1.0) as usize;
@@ -351,10 +355,18 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
         .child(text("·").font(theme::STATUS_TEXT).color(theme::text_muted()))
         .child(
             el().shrink().min_w(0.0).child(
-                text(&snap.project_title)
-                    .font(theme::STATUS_TEXT)
-                    .color(theme::text_secondary())
-                    .truncate(),
+                text(if is_ro && snap.node_id.is_some() && !snap.title.is_empty() {
+                    &snap.title
+                } else {
+                    &snap.project_title
+                })
+                .font(theme::STATUS_TEXT)
+                .color(if is_ro {
+                    theme::text_primary()
+                } else {
+                    theme::text_secondary()
+                })
+                .truncate(),
             ),
         )
         .child(
@@ -369,13 +381,17 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                         .font(theme::BADGE_TEXT)
                         .color(theme::text_primary()),
                 ),
-        )
-        .child(
+        );
+
+    if !is_ro {
+        titlebar = titlebar.child(
             text(format!("{}w · ~{}m", word_count, read_min))
                 .font(theme::STATUS_TEXT)
                 .color(theme::text_muted()),
-        )
-        .child(el().grow(1.0));
+        );
+    }
+
+    titlebar = titlebar.child(el().grow(1.0));
 
     if let Some(nid) = snap.node_id.clone() {
         let mut switcher = row()
@@ -397,11 +413,11 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
             );
         }
 
-        switcher = switcher
-            .child(
+        if has_pdf || !is_ro {
+            switcher = switcher.child(
                 seg_btn(
                     "popout_tab_preview",
-                    "Preview",
+                    if has_pdf && is_ro { "Text" } else { "Preview" },
                     snap.doc_view_tab == DocViewTab::Preview
                         || (!has_pdf && snap.doc_view_tab == DocViewTab::Pages),
                 )
@@ -409,18 +425,71 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                     s.snapshot.doc_view_tab = DocViewTab::Preview;
                     s.send_cmd(ReaderCommand::SetDocViewTab(DocViewTab::Preview));
                 }),
-            )
-            .child(
+            );
+        }
+
+        if !is_ro {
+            switcher = switcher.child(
                 seg_btn("popout_tab_source", "Source", snap.doc_view_tab == DocViewTab::Source)
                     .on_press(|s: &mut PopoutReaderState| {
                         s.snapshot.doc_view_tab = DocViewTab::Source;
                         s.send_cmd(ReaderCommand::SetDocViewTab(DocViewTab::Source));
                     }),
             );
+        }
 
-        titlebar = titlebar
-            .child(switcher)
-            .child(
+        if has_pdf || !is_ro {
+            titlebar = titlebar.child(switcher);
+        }
+
+        titlebar = titlebar.child(
+            el()
+                .key("btn_popout_toggle_readonly")
+                .h(26.0)
+                .px(9.0)
+                .radius(4.0)
+                .fill(if is_ro {
+                    theme::accent_claude().alpha(0.16)
+                } else {
+                    theme::bg_control()
+                })
+                .hover(theme::hover_subtle())
+                .border(
+                    1.0,
+                    if is_ro {
+                        theme::accent_claude().alpha(0.45)
+                    } else {
+                        theme::border_subtle()
+                    },
+                )
+                .center()
+                .cursor(Cursor::Pointer)
+                .no_window_drag()
+                .on_press(move |s: &mut PopoutReaderState| {
+                    let next = !s.snapshot.read_only;
+                    s.snapshot.read_only = next;
+                    if next && s.snapshot.doc_view_tab == DocViewTab::Source {
+                        s.snapshot.doc_view_tab = if has_pdf {
+                            DocViewTab::Pages
+                        } else {
+                            DocViewTab::Preview
+                        };
+                    }
+                    s.send_cmd(ReaderCommand::SetReadOnly(next));
+                })
+                .child(
+                    text(if is_ro { "✎ Edit" } else { "Read" })
+                        .font(theme::STATUS_TEXT)
+                        .color(if is_ro {
+                            theme::accent_claude()
+                        } else {
+                            theme::text_primary()
+                        }),
+                ),
+        );
+
+        if !is_ro {
+            titlebar = titlebar.child(
                 el()
                     .key("btn_popout_external")
                     .h(26.0)
@@ -441,6 +510,7 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                             .color(theme::text_primary()),
                     ),
             );
+        }
     }
 
     titlebar = titlebar.child(
@@ -474,63 +544,17 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
         let nid_for_task = node_id.clone();
         let nid_for_append = node_id.clone();
 
-        let top_meta = row()
-            .w_full()
-            .center_y()
-            .gap(10.0)
-            .child(
-                el()
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .px(12.0)
-                    .py(8.0)
-                    .radius(4.0)
-                    .fill(theme::bg_input())
-                    .border(1.0, theme::border_default())
-                    .child(
-                        text_input(&s.title_edit, TextStyle::new(15.0, 600.0))
-                            .key("popout_doc_title")
-                            .label("Document title")
-                            .single_line()
-                            .w_full()
-                            .color(theme::text_primary())
-                            .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
-                            .placeholder("Document title...", theme::text_muted())
-                            .on_edit(|s: &mut PopoutReaderState| &mut s.title_edit)
-                            .on_input_change(move |s: &mut PopoutReaderState, _| {
-                                let title = s.title_edit.text.clone();
-                                let content = s.source_edit.text.clone();
-                                s.snapshot.title = title.clone();
-                                s.send_cmd(ReaderCommand::UpdateTitleContent {
-                                    node_id: nid_for_title.clone(),
-                                    title,
-                                    content,
-                                });
-                            }),
-                    ),
-            )
-            .child(
-                el()
-                    .key("btn_popout_ai")
-                    .h(32.0)
-                    .px(12.0)
-                    .radius(4.0)
-                    .fill(theme::accent_claude().alpha(0.14))
-                    .hover(theme::accent_claude().alpha(0.22))
-                    .border(1.0, theme::accent_claude().alpha(0.45))
-                    .center()
-                    .cursor(Cursor::Pointer)
-                    .on_press(move |s: &mut PopoutReaderState| {
-                        s.send_cmd(ReaderCommand::ExplainAi(nid_for_ai.clone()));
-                    })
-                    .child(
-                        text("✦ Summarize")
-                            .font(theme::CONTROL_TEXT)
-                            .color(theme::text_primary()),
-                    ),
-            );
+        let effective_tab = if is_ro && snap.doc_view_tab == DocViewTab::Source {
+            if has_pdf {
+                DocViewTab::Pages
+            } else {
+                DocViewTab::Preview
+            }
+        } else {
+            snap.doc_view_tab
+        };
 
-        let reader_surface = if has_pdf && snap.doc_view_tab == DocViewTab::Pages {
+        let reader_surface = if has_pdf && effective_tab == DocViewTab::Pages {
             let cur_page = snap.pdf_page_index;
             let total_pages = snap.pdf_page_count.max(1);
             let cur_zoom = snap.pdf_zoom;
@@ -540,59 +564,77 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                 None
             };
 
-            let mut pdf_col = col().w_full().grow(1.0).min_h(0.0).gap(10.0).child(
-                row()
-                    .w_full()
-                    .center_y()
-                    .gap(8.0)
-                    .padding(8.0)
-                    .radius(4.0)
-                    .fill(theme::bg_card())
-                    .border(1.0, theme::border_subtle())
-                    .child(toolbar_chip(
-                        "popout_pdf_prev",
-                        "‹ Prev",
-                        theme::text_primary(),
-                        move |s| {
-                            s.send_cmd(ReaderCommand::SetPdfPage(cur_page.saturating_sub(1)));
-                        },
-                    ))
-                    .child(
-                        text(format!("Page {} / {}", cur_page + 1, total_pages))
-                            .font(theme::CONTROL_TEXT)
-                            .color(theme::text_secondary()),
-                    )
-                    .child(toolbar_chip(
-                        "popout_pdf_next",
-                        "Next ›",
-                        theme::text_primary(),
-                        move |s| {
-                            s.send_cmd(ReaderCommand::SetPdfPage(cur_page + 1));
-                        },
-                    ))
-                    .child(el().grow(1.0))
-                    .child(toolbar_chip(
-                        "popout_pdf_zout",
-                        "−",
-                        theme::text_secondary(),
-                        move |s| {
-                            s.send_cmd(ReaderCommand::SetPdfZoom(cur_zoom - 0.25));
-                        },
-                    ))
-                    .child(
-                        text(format!("{}%", (cur_zoom * 100.0).round() as u32))
-                            .font(theme::STATUS_TEXT)
-                            .color(theme::text_muted()),
-                    )
-                    .child(toolbar_chip(
-                        "popout_pdf_zin",
-                        "+",
-                        theme::text_secondary(),
-                        move |s| {
-                            s.send_cmd(ReaderCommand::SetPdfZoom(cur_zoom + 0.25));
-                        },
-                    )),
-            );
+            let pdf_bar = row()
+                .key(if is_ro {
+                    "popout_readonly_toolbar"
+                } else {
+                    "popout_pdf_toolbar"
+                })
+                .center_y()
+                .gap(6.0)
+                .px(8.0)
+                .py(5.0)
+                .radius(6.0)
+                .fill(theme::bg_card())
+                .border(1.0, theme::border_subtle())
+                .child(toolbar_chip(
+                    "popout_pdf_prev",
+                    if is_ro { "‹" } else { "‹ Prev" },
+                    theme::text_primary(),
+                    move |s| {
+                        s.send_cmd(ReaderCommand::SetPdfPage(cur_page.saturating_sub(1)));
+                    },
+                ))
+                .child(
+                    text(if is_ro {
+                        format!("{} / {}", cur_page + 1, total_pages)
+                    } else {
+                        format!("Page {} / {}", cur_page + 1, total_pages)
+                    })
+                    .font(theme::STATUS_TEXT)
+                    .color(theme::text_secondary()),
+                )
+                .child(toolbar_chip(
+                    "popout_pdf_next",
+                    if is_ro { "›" } else { "Next ›" },
+                    theme::text_primary(),
+                    move |s| {
+                        s.send_cmd(ReaderCommand::SetPdfPage(cur_page + 1));
+                    },
+                ))
+                .child(el().w(1.0).h(14.0).fill(theme::border_subtle()))
+                .child(toolbar_chip(
+                    "popout_pdf_zout",
+                    "−",
+                    theme::text_secondary(),
+                    move |s| {
+                        s.send_cmd(ReaderCommand::SetPdfZoom(cur_zoom - 0.25));
+                    },
+                ))
+                .child(
+                    text(format!("{}%", (cur_zoom * 100.0).round() as u32))
+                        .font(theme::STATUS_TEXT)
+                        .color(theme::text_muted()),
+                )
+                .child(toolbar_chip(
+                    "popout_pdf_zin",
+                    "+",
+                    theme::text_secondary(),
+                    move |s| {
+                        s.send_cmd(ReaderCommand::SetPdfZoom(cur_zoom + 0.25));
+                    },
+                ));
+
+            let mut pdf_col = col()
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .gap(10.0)
+                .child(if is_ro {
+                    row().w_full().center().child(pdf_bar)
+                } else {
+                    pdf_bar.w_full()
+                });
 
             if let Some(err) = &s.pdf_error {
                 pdf_col = pdf_col.child(
@@ -614,7 +656,7 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                 let mut page_el = el()
                     .key(format!("popout_pdf_canvas_{}", cur_page))
                     .w_full()
-                    .max_w(860.0)
+                    .max_w(900.0)
                     .radius(4.0)
                     .border(1.0, theme::border_default())
                     .clip_soft(0.0)
@@ -635,7 +677,7 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                 );
             }
             pdf_col
-        } else if snap.doc_view_tab == DocViewTab::Source {
+        } else if effective_tab == DocViewTab::Source {
             col()
                 .w_full()
                 .grow(1.0)
@@ -690,7 +732,7 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                             .key("popout_image_preview")
                             .w_full()
                             .min_h(360.0)
-                            .max_h(560.0)
+                            .max_h(580.0)
                             .radius(4.0)
                             .border(1.0, theme::border_default())
                             .pixels_fit(img.pixels(), SurfaceFit::Fit),
@@ -699,44 +741,82 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
             }
 
             let md_src = if snap.content.trim().is_empty() {
-                "*Empty document. Ingest a file in the workspace or switch to **Source** to write Markdown.*".to_string()
+                "*Empty document. Click **✎ Edit** to ingest or write Markdown.*".to_string()
             } else {
                 doc_reader::wrap_for_preview(&snap.content, snap.doc_format)
             };
 
             let md_w = (s.viewport_width - 120.0).clamp(360.0, 820.0);
             let md_style = theme::markdown_style().text_width(md_w);
-            let md_el = Markdown::new(&md_src)
-                .selectable(true)
-                .on_task(move |s: &mut PopoutReaderState, _block_key, offset, checked| {
-                    s.send_cmd(ReaderCommand::ToggleTask {
-                        node_id: nid_for_task.clone(),
-                        marker_offset: offset,
-                        checked,
-                    });
-                })
-                .render(&md_style);
+            let mut md_builder = Markdown::new(&md_src).selectable(true);
+            if !is_ro {
+                md_builder = md_builder.on_task(
+                    move |s: &mut PopoutReaderState, _block_key, offset, checked| {
+                        s.send_cmd(ReaderCommand::ToggleTask {
+                            node_id: nid_for_task.clone(),
+                            marker_offset: offset,
+                            checked,
+                        });
+                    },
+                );
+            }
+            let md_el = md_builder.render(&md_style);
 
             preview_col = preview_col.child(md_el);
 
-            col()
+            let content_box = col()
                 .w_full()
                 .grow(1.0)
                 .min_h(0.0)
-                .padding(20.0)
+                .padding(if is_ro { 24.0 } else { 20.0 })
                 .radius(4.0)
                 .fill(theme::bg_input())
                 .border(1.0, theme::border_default())
                 .items_center()
                 .scroll(ScrollSpec { stick_bottom: false })
-                .child(preview_col)
+                .child(preview_col);
+
+            if is_ro {
+                col()
+                    .w_full()
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .gap(10.0)
+                    .child(
+                        row().w_full().center().child(
+                            row()
+                                .key("popout_readonly_toolbar")
+                                .center_y()
+                                .gap(8.0)
+                                .px(10.0)
+                                .py(4.5)
+                                .radius(6.0)
+                                .fill(theme::bg_card())
+                                .border(1.0, theme::border_subtle())
+                                .child(
+                                    text(&snap.title)
+                                        .font(theme::CONTROL_TEXT)
+                                        .color(theme::text_primary())
+                                        .truncate(),
+                                )
+                                .child(
+                                    text(format!("· ~{}m read · read-only", read_min))
+                                        .font(theme::STATUS_TEXT)
+                                        .color(theme::text_muted()),
+                                ),
+                        ),
+                    )
+                    .child(content_box)
+            } else {
+                content_box
+            }
         };
 
         let mut body_col = col()
             .w_full()
             .grow(1.0)
             .min_h(0.0)
-            .padding(18.0)
+            .padding(if is_ro { 14.0 } else { 18.0 })
             .gap(12.0)
             .on_layout_tx(|s: &mut PopoutReaderState, r, tx| {
                 if r[2] > 100.0 && (s.viewport_width - r[2]).abs() > 6.0 {
@@ -744,92 +824,154 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                 } else {
                     tx.live_only();
                 }
-            })
-            .child(top_meta);
+            });
 
-        if let Some(summary) = &snap.summary {
-            body_col = body_col.child(
-                el()
-                    .w_full()
-                    .padding(10.0)
-                    .radius(4.0)
-                    .fill(theme::bg_card())
-                    .border(1.0, theme::accent_claude().alpha(0.35))
-                    .child(
-                        text(format!("✦ {}", summary))
-                            .font(theme::BODY_TEXT)
-                            .color(theme::text_primary())
-                            .w_full()
-                            .wrap(),
-                    ),
-            );
-        }
-
-        let nid_append_submit = nid_for_append.clone();
-        body_col = body_col.child(reader_surface).child(
-            row()
+        if !is_ro {
+            let top_meta = row()
                 .w_full()
-                .gap(8.0)
+                .center_y()
+                .gap(10.0)
                 .child(
                     el()
                         .grow(1.0)
-                        .px(10.0)
-                        .py(7.0)
+                        .min_w(0.0)
+                        .px(12.0)
+                        .py(8.0)
                         .radius(4.0)
                         .fill(theme::bg_input())
                         .border(1.0, theme::border_default())
                         .child(
-                            text_input(&s.append_edit, theme::CONTROL_TEXT)
-                                .key("popout_append_note")
-                                .label("Append note or excerpt")
+                            text_input(&s.title_edit, TextStyle::new(15.0, 600.0))
+                                .key("popout_doc_title")
+                                .label("Document title")
                                 .single_line()
                                 .w_full()
                                 .color(theme::text_primary())
-                                .caret(
-                                    theme::accent_claude(),
-                                    theme::accent_claude().alpha(0.25),
-                                )
-                                .placeholder("Append note or excerpt...", theme::text_muted())
-                                .on_edit(|s: &mut PopoutReaderState| &mut s.append_edit)
-                                .on_submit(move |s: &mut PopoutReaderState, _| {
-                                    let txt = s.append_edit.text.trim().to_string();
-                                    if !txt.is_empty() {
-                                        s.append_edit = TextEdit::new("");
-                                        s.send_cmd(ReaderCommand::AppendText {
-                                            node_id: nid_append_submit.clone(),
-                                            text: txt,
-                                        });
-                                    }
+                                .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                                .placeholder("Document title...", theme::text_muted())
+                                .on_edit(|s: &mut PopoutReaderState| &mut s.title_edit)
+                                .on_input_change(move |s: &mut PopoutReaderState, _| {
+                                    let title = s.title_edit.text.clone();
+                                    let content = s.source_edit.text.clone();
+                                    s.snapshot.title = title.clone();
+                                    s.send_cmd(ReaderCommand::UpdateTitleContent {
+                                        node_id: nid_for_title.clone(),
+                                        title,
+                                        content,
+                                    });
                                 }),
                         ),
                 )
                 .child(
                     el()
-                        .key("btn_popout_append")
+                        .key("btn_popout_ai")
+                        .h(32.0)
                         .px(12.0)
-                        .py(7.0)
                         .radius(4.0)
-                        .fill(theme::bg_control())
-                        .hover(theme::hover_subtle())
-                        .border(1.0, theme::border_default())
+                        .fill(theme::accent_claude().alpha(0.14))
+                        .hover(theme::accent_claude().alpha(0.22))
+                        .border(1.0, theme::accent_claude().alpha(0.45))
+                        .center()
                         .cursor(Cursor::Pointer)
                         .on_press(move |s: &mut PopoutReaderState| {
-                            let txt = s.append_edit.text.trim().to_string();
-                            if !txt.is_empty() {
-                                s.append_edit = TextEdit::new("");
-                                s.send_cmd(ReaderCommand::AppendText {
-                                    node_id: nid_for_append.clone(),
-                                    text: txt,
-                                });
-                            }
+                            s.send_cmd(ReaderCommand::ExplainAi(nid_for_ai.clone()));
                         })
                         .child(
-                            text("+ Append")
+                            text("✦ Summarize")
                                 .font(theme::CONTROL_TEXT)
                                 .color(theme::text_primary()),
                         ),
-                ),
-        );
+                );
+            body_col = body_col.child(top_meta);
+
+            if let Some(summary) = &snap.summary {
+                body_col = body_col.child(
+                    el()
+                        .w_full()
+                        .padding(10.0)
+                        .radius(4.0)
+                        .fill(theme::bg_card())
+                        .border(1.0, theme::accent_claude().alpha(0.35))
+                        .child(
+                            text(format!("✦ {}", summary))
+                                .font(theme::BODY_TEXT)
+                                .color(theme::text_primary())
+                                .w_full()
+                                .wrap(),
+                        ),
+                );
+            }
+        }
+
+        body_col = body_col.child(reader_surface);
+
+        if !is_ro {
+            let nid_append_submit = nid_for_append.clone();
+            body_col = body_col.child(
+                row()
+                    .w_full()
+                    .gap(8.0)
+                    .child(
+                        el()
+                            .grow(1.0)
+                            .px(10.0)
+                            .py(7.0)
+                            .radius(4.0)
+                            .fill(theme::bg_input())
+                            .border(1.0, theme::border_default())
+                            .child(
+                                text_input(&s.append_edit, theme::CONTROL_TEXT)
+                                    .key("popout_append_note")
+                                    .label("Append note or excerpt")
+                                    .single_line()
+                                    .w_full()
+                                    .color(theme::text_primary())
+                                    .caret(
+                                        theme::accent_claude(),
+                                        theme::accent_claude().alpha(0.25),
+                                    )
+                                    .placeholder("Append note or excerpt...", theme::text_muted())
+                                    .on_edit(|s: &mut PopoutReaderState| &mut s.append_edit)
+                                    .on_submit(move |s: &mut PopoutReaderState, _| {
+                                        let txt = s.append_edit.text.trim().to_string();
+                                        if !txt.is_empty() {
+                                            s.append_edit = TextEdit::new("");
+                                            s.send_cmd(ReaderCommand::AppendText {
+                                                node_id: nid_append_submit.clone(),
+                                                text: txt,
+                                            });
+                                        }
+                                    }),
+                            ),
+                    )
+                    .child(
+                        el()
+                            .key("btn_popout_append")
+                            .px(12.0)
+                            .py(7.0)
+                            .radius(4.0)
+                            .fill(theme::bg_control())
+                            .hover(theme::hover_subtle())
+                            .border(1.0, theme::border_default())
+                            .cursor(Cursor::Pointer)
+                            .on_press(move |s: &mut PopoutReaderState| {
+                                let txt = s.append_edit.text.trim().to_string();
+                                if !txt.is_empty() {
+                                    s.append_edit = TextEdit::new("");
+                                    s.send_cmd(ReaderCommand::AppendText {
+                                        node_id: nid_for_append.clone(),
+                                        text: txt,
+                                    });
+                                }
+                            })
+                            .child(
+                                text("+ Append")
+                                    .font(theme::CONTROL_TEXT)
+                                    .color(theme::text_primary()),
+                            ),
+                    ),
+            );
+        }
 
         body_col
     } else {
@@ -857,4 +999,78 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
         .fill(theme::bg_canvas())
         .child(titlebar)
         .child(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rune::{Env, Runtime};
+
+    #[test]
+    fn test_popout_reader_readonly_vs_edit_toolbar() {
+        let bridge = Arc::new(Mutex::new(ReaderBridge::default()));
+        {
+            let mut b = bridge.lock().unwrap();
+            b.snapshot = ReaderSnapshot {
+                revision: 1,
+                project_title: "Neuroscience".into(),
+                node_id: Some(NodeId::from_str("doc-1")),
+                title: "Primary Paper".into(),
+                content: "# Sample\nFocused reading paragraph.".into(),
+                summary: Some("Summary".into()),
+                doc_format: DocFormat::Markdown,
+                asset_path: None,
+                doc_view_tab: DocViewTab::Preview,
+                pdf_page_index: 0,
+                pdf_page_count: 1,
+                pdf_zoom: 1.5,
+                read_only: true,
+            };
+        }
+
+        let mut rt = Runtime::new(
+            PopoutReaderState::new(bridge.clone()),
+            render_popout_reader,
+            (960.0, 820.0),
+            Env {
+                system_dark: true,
+                scale: 2.0,
+            },
+        );
+        rt.frame(0.0);
+        rt.frame(1.0 / 60.0);
+
+        let ro_keys: Vec<_> = rt.elements().into_iter().filter_map(|e| e.key).collect();
+        assert!(ro_keys.contains(&"popout_readonly_toolbar".to_string()));
+        assert!(ro_keys.contains(&"btn_popout_toggle_readonly".to_string()));
+        assert!(ro_keys.contains(&"btn_popout_dock_back".to_string()));
+        assert!(!ro_keys.contains(&"popout_doc_title".to_string()));
+        assert!(!ro_keys.contains(&"popout_append_note".to_string()));
+        assert!(!ro_keys.contains(&"btn_popout_ai".to_string()));
+        assert!(!ro_keys.contains(&"popout_tab_source".to_string()));
+
+        // Toggle into Edit mode via button click
+        let btn_r = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("btn_popout_toggle_readonly"))
+            .unwrap()
+            .rect;
+        let (bx, by) = (btn_r[0] + btn_r[2] * 0.5, btn_r[1] + btn_r[3] * 0.5);
+        rt.pointer_move(bx, by);
+        rt.pointer_down(bx, by);
+        rt.pointer_up(bx, by);
+        rt.frame(1.0 / 60.0);
+        rt.frame(1.0 / 60.0);
+
+        assert!(!rt.state.snapshot.read_only);
+        let edit_keys: Vec<_> = rt.elements().into_iter().filter_map(|e| e.key).collect();
+        assert!(edit_keys.contains(&"popout_doc_title".to_string()));
+        assert!(edit_keys.contains(&"popout_append_note".to_string()));
+        assert!(edit_keys.contains(&"btn_popout_ai".to_string()));
+        assert!(edit_keys.contains(&"popout_tab_source".to_string()));
+
+        let cmds = std::mem::take(&mut bridge.lock().unwrap().commands);
+        assert!(matches!(cmds.as_slice(), [ReaderCommand::SetReadOnly(false)]));
+    }
 }

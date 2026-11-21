@@ -22,6 +22,10 @@ fn default_inspector_width() -> f32 {
     460.0
 }
 
+fn default_read_only() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReaderPreferences {
     pub mode: ReaderMode,
@@ -30,6 +34,9 @@ pub struct ReaderPreferences {
     /// User-adjusted docked right panel width in logical points.
     #[serde(default = "default_inspector_width")]
     pub inspector_width: f32,
+    /// Distraction-free read-only mode hiding editing controls behind a minimal toolbar.
+    #[serde(default = "default_read_only")]
+    pub read_only: bool,
 }
 
 impl Default for ReaderPreferences {
@@ -38,6 +45,7 @@ impl Default for ReaderPreferences {
             mode: ReaderMode::Integrated,
             custom_reader_path: String::new(),
             inspector_width: default_inspector_width(),
+            read_only: default_read_only(),
         }
     }
 }

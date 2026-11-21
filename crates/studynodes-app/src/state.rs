@@ -162,9 +162,11 @@ pub struct AppState {
     pub editing_node_id: Option<NodeId>,
     pub space_held: bool,
     pub canvas_origin: [f32; 2],
+    pub canvas_size: [f32; 2],
 
     // Integrated & Custom Document Reader + Card Preview state
     pub reader_prefs: ReaderPreferences,
+    pub reader_read_only: bool,
     pub custom_reader_edit: TextEdit,
     pub reader_settings_open: bool,
     pub doc_view_tab: DocViewTab,
@@ -238,6 +240,7 @@ impl AppState {
         let reader_prefs = doc_reader::load_preferences(&projects_dir);
         let custom_reader_edit = TextEdit::new(&reader_prefs.custom_reader_path);
         let inspector_width = reader_prefs.inspector_width.clamp(300.0, 860.0);
+        let reader_read_only = reader_prefs.read_only;
 
         let mut state = Self {
             screen: AppScreen::Dashboard,
@@ -273,7 +276,9 @@ impl AppState {
             editing_node_id: None,
             space_held: false,
             canvas_origin: [0.0, 40.0],
+            canvas_size: [1280.0, 734.0],
             reader_prefs,
+            reader_read_only,
             custom_reader_edit,
             reader_settings_open: false,
             doc_view_tab: DocViewTab::Preview,
@@ -1143,6 +1148,7 @@ impl AppState {
                         pdf_page_index,
                         pdf_page_count,
                         pdf_zoom,
+                        read_only: self.reader_read_only,
                     }
                 }
                 None => ReaderSnapshot {
@@ -1158,6 +1164,7 @@ impl AppState {
                     pdf_page_index: 0,
                     pdf_page_count: 1,
                     pdf_zoom: 1.5,
+                    read_only: self.reader_read_only,
                 },
             };
             if b.is_open {
@@ -1166,9 +1173,20 @@ impl AppState {
         }
     }
 
-    /// Pop the right reader/inspector panel out into a dedicated full-view native window.
+    /// Pop the right reader/inspector panel out into a dedicated full-view native window
+    /// directly in Read-Only Focus Mode.
     pub fn pop_out_reader(&mut self) {
         self.sync_node_edits();
+        self.reader_read_only = true;
+        self.reader_prefs.read_only = true;
+        let _ = doc_reader::save_preferences(&self.projects_dir, &self.reader_prefs);
+        if self.doc_view_tab == DocViewTab::Source {
+            self.doc_view_tab = if self.active_pdf.is_some() {
+                DocViewTab::Pages
+            } else {
+                DocViewTab::Preview
+            };
+        }
         self.push_reader_snapshot();
         self.inspector_popped_out = true;
         self.inspector_open = false;
@@ -1223,6 +1241,10 @@ impl AppState {
                         self.inspector_open = true;
                     }
                     self.popout_window = None;
+                }
+                ReaderCommand::SetReadOnly(ro) => {
+                    self.set_reader_read_only(ro);
+                    push_snap = true;
                 }
                 ReaderCommand::UpdateTitleContent {
                     node_id,
@@ -1288,6 +1310,120 @@ impl AppState {
             self.push_reader_snapshot();
         }
         true
+    }
+
+    pub fn set_reader_read_only(&mut self, read_only: bool) {
+        if read_only {
+            self.sync_node_edits();
+            if self.doc_view_tab == DocViewTab::Source {
+                self.doc_view_tab = if self.active_pdf.is_some() {
+                    DocViewTab::Pages
+                } else {
+                    DocViewTab::Preview
+                };
+            }
+        }
+        self.reader_read_only = read_only;
+        self.reader_prefs.read_only = read_only;
+        let _ = doc_reader::save_preferences(&self.projects_dir, &self.reader_prefs);
+        self.push_reader_snapshot();
+        self.status_message = if read_only {
+            "Reader: Read-Only focus mode".into()
+        } else {
+            "Reader: Edit mode enabled".into()
+        };
+    }
+
+    /// Recenter the canvas camera on the nearest cluster of nodes to the current viewport center
+    /// so the user never gets lost panning on the infinite canvas.
+    pub fn locate_nearest_nodes(&mut self) -> Option<NodeId> {
+        if self.graph.nodes.is_empty() {
+            self.graph.viewport = studynodes_graph::coords::Camera::default();
+            self.status_message = "Canvas empty — reset view to origin".into();
+            return None;
+        }
+
+        let canvas_w = self.canvas_size[0].max(320.0);
+        let canvas_h = self.canvas_size[1].max(240.0);
+        let view_center = self
+            .graph
+            .viewport
+            .screen_to_world(ScreenPos::new(canvas_w * 0.5, canvas_h * 0.5));
+
+        let mut ranked: Vec<(f32, NodeId, WorldPos)> = self
+            .graph
+            .nodes
+            .values()
+            .map(|n| {
+                let sz = node_base_size(n.kind);
+                let center = WorldPos::new(n.pos.x + sz.0 * 0.5, n.pos.y + sz.1 * 0.5);
+                let dx = center.x - view_center.x;
+                let dy = center.y - view_center.y;
+                (dx * dx + dy * dy, n.id.clone(), center)
+            })
+            .collect();
+        ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        const CLUSTER_RADIUS: f32 = 680.0;
+        let (nearest_dist_sq, mut anchor_id, mut anchor_center) = ranked[0].clone();
+
+        // If already centered directly on the nearest node, jump to the closest distinct
+        // cluster further away (when one exists) so repeated presses help explore.
+        if nearest_dist_sq < 42.0 * 42.0 {
+            if let Some((_, far_id, far_center)) = ranked
+                .iter()
+                .find(|(_, _, c)| c.distance_to(&anchor_center) > CLUSTER_RADIUS)
+            {
+                anchor_id = far_id.clone();
+                anchor_center = *far_center;
+            }
+        }
+
+        let neighbor_ids: HashSet<NodeId> = self.graph.neighbors(&anchor_id).into_iter().collect();
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        let mut count = 0usize;
+
+        for n in self.graph.nodes.values() {
+            let (w, h) = node_base_size(n.kind);
+            let c = WorldPos::new(n.pos.x + w * 0.5, n.pos.y + h * 0.5);
+            if n.id == anchor_id
+                || neighbor_ids.contains(&n.id)
+                || c.distance_to(&anchor_center) <= CLUSTER_RADIUS
+            {
+                min_x = min_x.min(n.pos.x);
+                min_y = min_y.min(n.pos.y);
+                max_x = max_x.max(n.pos.x + w);
+                max_y = max_y.max(n.pos.y + h);
+                count += 1;
+            }
+        }
+
+        if count == 0 {
+            return None;
+        }
+
+        let bbox_w = (max_x - min_x).max(240.0) + 120.0;
+        let bbox_h = (max_y - min_y).max(180.0) + 120.0;
+        let bbox_center = WorldPos::new((min_x + max_x) * 0.5, (min_y + max_y) * 0.5);
+
+        let fit_zoom = (canvas_w / bbox_w).min(canvas_h / bbox_h).clamp(0.45, 1.0);
+        if self.graph.viewport.zoom > 1.35 || self.graph.viewport.zoom < 0.45 || count > 1 {
+            self.graph.viewport.zoom = fit_zoom;
+        }
+        self.graph
+            .viewport
+            .center_on(bbox_center, canvas_w, canvas_h);
+
+        let title = self
+            .graph
+            .get_node(&anchor_id)
+            .map(|n| n.title.as_str())
+            .unwrap_or("nodes");
+        self.status_message = format!("Located {} nearest node(s) near '{}'", count, title);
+        Some(anchor_id)
     }
 
     pub fn set_reader_mode(&mut self, mode: ReaderMode) {
