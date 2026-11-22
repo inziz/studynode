@@ -9,6 +9,8 @@ pub struct StudyGraph {
     pub schema_version: u32,
     pub project_id: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
     pub viewport: Camera,
     pub nodes: HashMap<NodeId, Node>,
     pub edges: HashMap<EdgeId, Edge>,
@@ -28,6 +30,7 @@ impl StudyGraph {
             schema_version: Self::CURRENT_SCHEMA_VERSION,
             project_id: uuid::Uuid::new_v4().to_string(),
             title: title.into(),
+            collection: None,
             viewport: Camera::default(),
             nodes: HashMap::new(),
             edges: HashMap::new(),

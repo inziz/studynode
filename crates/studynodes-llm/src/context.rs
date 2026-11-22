@@ -36,9 +36,113 @@ pub struct LlmContext {
     pub focus_nodes: Vec<FocusedNodeContext>,
     pub neighbor_nodes: Vec<NeighborNodeContext>,
     pub existing_edges: Vec<ExistingEdgeContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_date: Option<String>,
 }
 
 impl LlmContext {
+    /// Attach an optional output language preference (e.g. `"Spanish"`).
+    pub fn with_preferred_language(mut self, lang: Option<String>) -> Self {
+        self.preferred_language = lang
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        self
+    }
+
+    /// Attach the current local calendar date (`YYYY-MM-DD`) so AI scheduling resolves relative dates.
+    pub fn with_current_date(mut self, date: Option<String>) -> Self {
+        self.current_date = date
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        self
+    }
+
+    fn format_node_metadata_suffix(n: &studynodes_graph::model::Node) -> String {
+        let mut out = String::new();
+        if let Some(url) = n
+            .meta
+            .media_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            out.push_str(&format!("\n[Media URL]: {}", url));
+        }
+        if !n.meta.timestamps.is_empty() {
+            out.push_str("\n[Timestamps]:");
+            for ts in &n.meta.timestamps {
+                let total = ts.seconds.round().max(0.0) as u64;
+                let h = total / 3600;
+                let m = (total % 3600) / 60;
+                let s = total % 60;
+                let stamp = if h > 0 {
+                    format!("{}:{:02}:{:02}", h, m, s)
+                } else {
+                    format!("{:02}:{:02}", m, s)
+                };
+                out.push_str(&format!("\n- {} ({}s): {}", stamp, total, ts.label));
+            }
+        }
+        if n.kind == studynodes_graph::model::NodeKind::Calendar {
+            let mode_str = match n.meta.calendar_view_mode {
+                studynodes_graph::model::CalendarViewMode::Month => "Month",
+                studynodes_graph::model::CalendarViewMode::Week => "Week",
+            };
+            out.push_str(&format!("\n[Calendar View]: {}", mode_str));
+            if let (Some(cy), Some(cm)) = (n.meta.calendar_year, n.meta.calendar_month) {
+                out.push_str(&format!("\n[Calendar Cursor]: {:04}-{:02}", cy, cm));
+            }
+            if let Some(ws) = n.meta.calendar_week_start.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                out.push_str(&format!(" (week starting {})", ws));
+            }
+            if !n.meta.calendar_day_notes.is_empty() {
+                out.push_str("\n[Calendar Daily Notes]:");
+                for (date, note) in &n.meta.calendar_day_notes {
+                    let clean = note.trim().replace('\n', " / ");
+                    if !clean.is_empty() {
+                        out.push_str(&format!("\n- {}: {}", date, clean));
+                    }
+                }
+            }
+        }
+        if let Some(tr) = n
+            .meta
+            .transcript_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let clipped: String = tr.chars().take(1_200).collect();
+            out.push_str(&format!("\n[Transcript]: {}", clipped));
+        }
+        if !n.meta.calendar_events.is_empty() {
+            out.push_str("\n[Calendar Events]:");
+            for ev in &n.meta.calendar_events {
+                let mark = if ev.completed { "x" } else { " " };
+                let time_str = ev.time.as_deref().unwrap_or("");
+                let note_str = if ev.notes.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", ev.notes.trim())
+                };
+                if time_str.is_empty() {
+                    out.push_str(&format!(
+                        "\n- [{}] {} — {}{}",
+                        mark, ev.date, ev.title, note_str
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "\n- [{}] {} {} — {}{}",
+                        mark, ev.date, time_str, ev.title, note_str
+                    ));
+                }
+            }
+        }
+        out
+    }
+
     /// Build bounded neighborhood context around a set of selected focus nodes.
     pub fn build(graph: &StudyGraph, focus_ids: &[NodeId], task: impl Into<String>) -> Self {
         let mut focus_nodes = Vec::new();
@@ -50,11 +154,24 @@ impl LlmContext {
         // 1. Pack focus nodes
         for id in focus_ids {
             if let Some(n) = graph.get_node(id) {
+                let extracted = n
+                    .meta
+                    .extracted_text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let mut packed_content = match (n.content.trim().is_empty(), extracted) {
+                    (true, Some(ocr)) => ocr.to_string(),
+                    (false, Some(ocr)) => format!("{}\n\n[Extracted OCR Text]\n{}", n.content, ocr),
+                    (_, None) => n.content.clone(),
+                };
+                packed_content.push_str(&Self::format_node_metadata_suffix(n));
+
                 focus_nodes.push(FocusedNodeContext {
                     node_id: n.id.as_str().to_string(),
                     title: n.title.clone(),
                     kind: n.kind.display_name().to_string(),
-                    content: n.content.clone(),
+                    content: packed_content,
                     summary: n.summary.clone(),
                     tags: n.tags.clone(),
                 });
@@ -94,6 +211,127 @@ impl LlmContext {
             focus_nodes,
             neighbor_nodes,
             existing_edges,
+            preferred_language: None,
+            current_date: None,
+        }
+    }
+
+    /// Build a project-wide context for AI Q&A / chat, prioritizing `selected_ids` while
+    /// including the broader project nodes and edges so the AI can answer questions across the canvas.
+    pub fn build_project_context(
+        graph: &StudyGraph,
+        selected_ids: &[NodeId],
+        task: impl Into<String>,
+    ) -> Self {
+        let mut focus_nodes = Vec::new();
+        let mut neighbor_nodes = Vec::new();
+        let mut packed_ids = std::collections::HashSet::new();
+
+        let pack_node = |n: &studynodes_graph::model::Node, max_chars: usize| -> FocusedNodeContext {
+            let extracted = n
+                .meta
+                .extracted_text
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let answer = n
+                .meta
+                .answer
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let mut body = n.content.clone();
+            if let Some(ans) = answer {
+                if !body.is_empty() {
+                    body.push_str("\n");
+                }
+                body.push_str(&format!("[Answer]: {}", ans));
+            }
+            if let Some(ocr) = extracted {
+                if !body.is_empty() {
+                    body.push_str("\n");
+                }
+                body.push_str(&format!("[Extracted OCR]: {}", ocr));
+            }
+            let extra = Self::format_node_metadata_suffix(n);
+            if !extra.is_empty() {
+                body.push_str(&extra);
+            }
+            let truncated: String = body.chars().take(max_chars).collect();
+            FocusedNodeContext {
+                node_id: n.id.as_str().to_string(),
+                title: n.title.clone(),
+                kind: n.kind.display_name().to_string(),
+                content: truncated,
+                summary: n.summary.clone(),
+                tags: n.tags.clone(),
+            }
+        };
+
+        for id in selected_ids {
+            if let Some(n) = graph.get_node(id) {
+                packed_ids.insert(n.id.clone());
+                focus_nodes.push(pack_node(n, 6_000));
+            }
+        }
+
+        // Always prioritize Calendar nodes in focus_nodes so AI sees schedules & daily notes
+        let mut calendars: Vec<_> = graph
+            .nodes
+            .values()
+            .filter(|n| {
+                n.kind == studynodes_graph::model::NodeKind::Calendar
+                    && !packed_ids.contains(&n.id)
+            })
+            .collect();
+        calendars.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+        for cal in calendars {
+            packed_ids.insert(cal.id.clone());
+            focus_nodes.push(pack_node(cal, 4_000));
+        }
+
+        let mut remaining: Vec<_> = graph
+            .nodes
+            .values()
+            .filter(|n| !packed_ids.contains(&n.id))
+            .collect();
+        remaining.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.id.as_str().cmp(b.id.as_str())));
+
+        for n in remaining {
+            if focus_nodes.len() < 12 {
+                focus_nodes.push(pack_node(n, 2_400));
+            } else {
+                neighbor_nodes.push(NeighborNodeContext {
+                    node_id: n.id.as_str().to_string(),
+                    title: n.title.clone(),
+                    kind: n.kind.display_name().to_string(),
+                    summary: n.summary.clone(),
+                });
+            }
+        }
+
+        let mut existing_edges: Vec<ExistingEdgeContext> = graph
+            .edges
+            .values()
+            .take(30)
+            .map(|edge| ExistingEdgeContext {
+                edge_id: edge.id.as_str().to_string(),
+                from: edge.from.node.as_str().to_string(),
+                to: edge.to.node.as_str().to_string(),
+                relation: edge.relation.display_label().to_string(),
+                label: edge.label.clone(),
+                note: edge.note.clone(),
+            })
+            .collect();
+        existing_edges.sort_by(|a, b| a.edge_id.cmp(&b.edge_id));
+
+        Self {
+            task: task.into(),
+            focus_nodes,
+            neighbor_nodes,
+            existing_edges,
+            preferred_language: None,
+            current_date: None,
         }
     }
 }

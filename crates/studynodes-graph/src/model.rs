@@ -90,6 +90,14 @@ pub enum NodeKind {
     Checklist,
     /// Numbered procedural or causal step card with chained spawning
     Sequence,
+    /// Video player / web embed card with timestamp bookmarks
+    Video,
+    /// Interactive audio/music player card with timestamp bookmarks
+    Audio,
+    /// Interactive study calendar & schedule card accessible to both user and AI
+    Calendar,
+    /// Freehand canvas drawing / sketch card for handwritten notes, schemes & formulas
+    Drawing,
 }
 
 impl NodeKind {
@@ -106,6 +114,10 @@ impl NodeKind {
             Self::Formula => "Formula",
             Self::Checklist => "Checklist",
             Self::Sequence => "Sequence",
+            Self::Video => "Video",
+            Self::Audio => "Audio",
+            Self::Calendar => "Calendar",
+            Self::Drawing => "Drawing",
         }
     }
 
@@ -122,11 +134,79 @@ impl NodeKind {
             Self::Formula => "#b8b7b0",      // Technical mono slate
             Self::Checklist => "#9a9993",    // Muted task checklist
             Self::Sequence => "#ecebe6",     // Bright ordinal step
+            Self::Video => "#c97b74",        // Muted rosewood video embed
+            Self::Audio => "#7fa99b",        // Muted sage audio/music
+            Self::Calendar => "#c8a46d",     // Muted warm ochre schedule
+            Self::Drawing => "#8fa8c8",      // Cool steel-blue freehand sketch
         }
     }
 }
 
-/// Optional metadata extending specialized Phase 2 study nodes (`Flashcard`, `Excerpt`, `Formula`, `Sequence`, `Section`).
+/// Timestamp bookmark attached to a `Video` or `Audio` node.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MediaTimestamp {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub seconds: f64,
+    #[serde(default)]
+    pub label: String,
+}
+
+/// Scheduled study event stored on a `Calendar` node (`YYYY-MM-DD`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalendarEvent {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub date: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
+    #[serde(default)]
+    pub completed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_node: Option<NodeId>,
+}
+
+/// View mode for a `Calendar` node (`Month` grid or `Week` 7-column planner).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalendarViewMode {
+    #[default]
+    Month,
+    Week,
+}
+
+/// Timed subtitle or transcription cue attached to an `Audio` (or `Video`) node.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SubtitleCue {
+    #[serde(default)]
+    pub start: f64,
+    #[serde(default)]
+    pub end: f64,
+    #[serde(default)]
+    pub text: String,
+}
+
+/// Freehand vector stroke stored on a `Drawing` node.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DrawingStroke {
+    /// Normalized coordinates in `0.0..=1.0` relative to the drawing pad bounds.
+    #[serde(default)]
+    pub points: Vec<[f32; 2]>,
+    /// Hex stroke color (e.g. `"#F4F3EE"`).
+    #[serde(default)]
+    pub color_hex: String,
+    /// Stroke width in logical points.
+    #[serde(default)]
+    pub width: f32,
+}
+
+/// Optional metadata extending specialized study nodes (`Flashcard`, `Excerpt`, `Formula`, `Sequence`, `Section`, `Video`, `Audio`, `Calendar`, `Drawing`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct NodeMeta {
     /// Answer / back face for `Flashcard` cards.
@@ -150,7 +230,7 @@ pub struct NodeMeta {
     /// Whether a `Section` renders as a framed group backdrop (`true`) or title banner only (`false`).
     #[serde(default)]
     pub section_framed: bool,
-    /// Cached OCR-extracted text for `Image` nodes.
+    /// Cached OCR-extracted text for `Image` or `Drawing` nodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extracted_text: Option<String>,
     /// Label describing which OCR engine produced `extracted_text`.
@@ -162,6 +242,42 @@ pub struct NodeMeta {
     /// Target language code used for `translated_text` (e.g. `"es"`, `"en"`, `"ja"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_language: Option<String>,
+    /// External URL (YouTube, Spotify, Vimeo, or direct media URL) for `Video` / `Audio` nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_url: Option<String>,
+    /// Time-indexed bookmarks for `Video` / `Audio` nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timestamps: Vec<MediaTimestamp>,
+    /// Events tracked on a `Calendar` node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calendar_events: Vec<CalendarEvent>,
+    /// Visible calendar year on a `Calendar` node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar_year: Option<i32>,
+    /// Visible 1-based calendar month (`1..=12`) on a `Calendar` node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar_month: Option<u32>,
+    /// Display mode (`Month` or `Week`) for a `Calendar` node.
+    #[serde(default)]
+    pub calendar_view_mode: CalendarViewMode,
+    /// Per-date notes keyed by `"YYYY-MM-DD"` for `Calendar` day cells and Week planner columns.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub calendar_day_notes: std::collections::BTreeMap<String, String>,
+    /// Monday `"YYYY-MM-DD"` anchor when viewing `CalendarViewMode::Week`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar_week_start: Option<String>,
+    /// Timed subtitle segments for `Audio` (or `Video`) nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subtitles: Vec<SubtitleCue>,
+    /// Plain-text transcript / subtitles for `Audio` (or `Video`) nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_text: Option<String>,
+    /// Whether subtitles are displayed directly inside the `Audio` canvas card.
+    #[serde(default)]
+    pub show_subtitles_on_card: bool,
+    /// Freehand vector strokes for `Drawing` nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drawing_strokes: Vec<DrawingStroke>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

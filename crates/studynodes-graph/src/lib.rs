@@ -12,7 +12,7 @@ pub use command::{CommandHistory, GraphCommand};
 pub use coords::{Camera, ScreenPos, WorldPos};
 pub use graph::StudyGraph;
 pub use model::{
-    Edge, EdgeEndpoint, EdgeId, EdgeProvenance, EdgeRelation, EdgeStatus, Node, NodeId, NodeKind,
-    Port, PortDirection, PortId, PortType,
+    DrawingStroke, Edge, EdgeEndpoint, EdgeId, EdgeProvenance, EdgeRelation, EdgeStatus, Node,
+    NodeId, NodeKind, Port, PortDirection, PortId, PortType,
 };
 pub use patch::{GraphPatch, PatchOp, SemanticRelation, StagedPatchResult};

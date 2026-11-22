@@ -95,6 +95,27 @@ impl ProjectBundle {
         Ok(())
     }
 
+    /// Ingest raw asset bytes into the `assets/` directory using SHA-256 content addressing.
+    /// Returns the SHA-256 hash string and the destination path within `assets/`.
+    pub fn ingest_bytes(&self, buffer: &[u8], ext: &str) -> Result<(String, PathBuf), BundleError> {
+        let mut hasher = Sha256::new();
+        hasher.update(buffer);
+        let hash = format!("{:x}", hasher.finalize());
+
+        let clean_ext = ext.trim().trim_start_matches('.');
+        let ext = if clean_ext.is_empty() { "bin" } else { clean_ext };
+        let asset_filename = format!("{}.{}", hash, ext);
+        let dest_path = self.root_dir.join(Self::ASSETS_DIR).join(&asset_filename);
+
+        if !dest_path.exists() {
+            let mut dest_file = File::create(&dest_path)?;
+            dest_file.write_all(buffer)?;
+            dest_file.flush()?;
+        }
+
+        Ok((hash, dest_path))
+    }
+
     /// Ingest an external file into the `assets/` directory using SHA-256 content addressing.
     /// Returns the SHA-256 hash string and the destination path within `assets/`.
     pub fn ingest_asset(&self, source_path: &Path) -> Result<(String, PathBuf), BundleError> {
@@ -102,25 +123,12 @@ impl ProjectBundle {
         let mut buffer = Vec::new();
         source_file.read_to_end(&mut buffer)?;
 
-        let mut hasher = Sha256::new();
-        hasher.update(&buffer);
-        let hash = format!("{:x}", hasher.finalize());
-
         let ext = source_path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("bin");
 
-        let asset_filename = format!("{}.{}", hash, ext);
-        let dest_path = self.root_dir.join(Self::ASSETS_DIR).join(&asset_filename);
-
-        if !dest_path.exists() {
-            let mut dest_file = File::create(&dest_path)?;
-            dest_file.write_all(&buffer)?;
-            dest_file.flush()?;
-        }
-
-        Ok((hash, dest_path))
+        self.ingest_bytes(&buffer, ext)
     }
 
     /// Resolve an ingested asset file in `assets/` by its SHA-256 hash stem.

@@ -1,18 +1,54 @@
 use rune::{
     Color, Cursor, Cx, El, FileDialogOptions, LineCap, Phase, PointerButton, ScrollSpec, Shape,
-    SurfaceFit, TextStyle, Tx, canvas, col, el, row, text, text_input,
+    Spring, SurfaceFit, TextStyle, Tx, canvas, col, el, row, text, text_input,
 };
 
 use studynodes_graph::bezier::CubicBezier;
-use studynodes_graph::coords::{ScreenPos, WorldPos};
-use studynodes_graph::model::{Edge, EdgeStatus, Node, NodeKind, PortDirection, PortId};
+use studynodes_graph::coords::{Camera, ScreenPos, WorldPos};
+use studynodes_graph::model::{
+    CalendarViewMode, DrawingStroke, Edge, EdgeStatus, Node, NodeKind, PortDirection, PortId,
+};
 
-use crate::doc_reader::{self, DocFormat};
+use crate::doc_reader::{self, DocFormat, DockPosition};
 use crate::formula_math;
+use crate::i18n::{self, TextKey};
+use crate::media_helper;
 use crate::state::{AppState, CanvasMode, node_world_size};
 use crate::theme;
 
 const LOW_ZOOM_TITLE_ONLY: f32 = 0.48;
+const CULL_MARGIN: f32 = 560.0;
+
+#[inline]
+fn is_rect_in_viewport(x: f32, y: f32, w: f32, h: f32, canvas_size: [f32; 2]) -> bool {
+    let cw = canvas_size[0].max(240.0);
+    let ch = canvas_size[1].max(200.0);
+    x + w >= -CULL_MARGIN
+        && x <= cw + CULL_MARGIN
+        && y + h >= -CULL_MARGIN
+        && y <= ch + CULL_MARGIN
+}
+
+fn is_node_active_in_interaction(
+    s: &AppState,
+    node_id: &studynodes_graph::model::NodeId,
+) -> bool {
+    if s.editing_node_id.as_ref() == Some(node_id) {
+        return true;
+    }
+    match &s.canvas_mode {
+        CanvasMode::DraggingNode { node_id: id, .. }
+        | CanvasMode::ResizingSection { node_id: id, .. }
+        | CanvasMode::ResizingNode { node_id: id, .. }
+        | CanvasMode::DraggingWire { from_node: id, .. } => id == node_id,
+        CanvasMode::DraggingSection {
+            node_id: id,
+            children,
+            ..
+        } => id == node_id || children.iter().any(|(cid, _)| cid == node_id),
+        _ => false,
+    }
+}
 
 fn port_world_pos_for(node: &Node, port_id: &PortId) -> WorldPos {
     let (w, h) = node_world_size(node);
@@ -29,37 +65,48 @@ fn port_world_pos_for(node: &Node, port_id: &PortId) -> WorldPos {
     }
 }
 
-fn build_grid_shape(s: &AppState) -> Shape {
-    let cam = s.graph.viewport;
+fn build_grid_shape(s: &AppState, cam: &Camera) -> Shape {
     let zoom = cam.zoom;
     let mut grid_shape = Shape::new();
 
     let base_spacing = 48.0 * zoom;
-    if base_spacing >= 10.0 {
-        let minor_color = Color::WHITE.alpha(0.025);
-        let major_color = Color::WHITE.alpha(0.052);
+    let major_spacing = base_spacing * 4.0;
+    let draw_grid = if base_spacing >= 20.0 {
+        Some((base_spacing, 48.0, true))
+    } else if major_spacing >= 12.0 {
+        Some((major_spacing, 192.0, false))
+    } else {
+        None
+    };
 
-        let world_left_idx = (cam.offset.x / 48.0).floor() as i32;
-        let offset_x = (cam.offset.x * zoom).rem_euclid(base_spacing);
-        let mut x = if offset_x == 0.0 { 0.0 } else { base_spacing - offset_x };
-        let mut ix = world_left_idx + if offset_x == 0.0 { 0 } else { 1 };
-        while x < 3840.0 {
-            let is_major = ix.rem_euclid(4) == 0;
+    if let Some((step, world_step, with_minor)) = draw_grid {
+        let minor_color = theme::grid_minor();
+        let major_color = theme::grid_major();
+        let pad = (step * 12.0).clamp(560.0, 960.0);
+        let min_x = -pad;
+        let min_y = -pad;
+        let max_x = s.canvas_size[0].max(400.0) + pad;
+        let max_y = s.canvas_size[1].max(300.0) + pad;
+
+        let world_left_idx = ((cam.offset.x - pad / zoom) / world_step).floor() as i32;
+        let mut x = (world_left_idx as f32 * world_step - cam.offset.x) * zoom;
+        let mut ix = world_left_idx;
+        while x < max_x {
+            let is_major = !with_minor || ix.rem_euclid(4) == 0;
             let (col, w) = if is_major { (major_color, 0.75) } else { (minor_color, 0.5) };
-            grid_shape = grid_shape.line([x, 0.0], [x, 2160.0], w, LineCap::Butt, col);
-            x += base_spacing;
+            grid_shape = grid_shape.line([x, min_y], [x, max_y], w, LineCap::Butt, col);
+            x += step;
             ix += 1;
         }
 
-        let world_top_idx = (cam.offset.y / 48.0).floor() as i32;
-        let offset_y = (cam.offset.y * zoom).rem_euclid(base_spacing);
-        let mut y = if offset_y == 0.0 { 0.0 } else { base_spacing - offset_y };
-        let mut iy = world_top_idx + if offset_y == 0.0 { 0 } else { 1 };
-        while y < 2160.0 {
-            let is_major = iy.rem_euclid(4) == 0;
+        let world_top_idx = ((cam.offset.y - pad / zoom) / world_step).floor() as i32;
+        let mut y = (world_top_idx as f32 * world_step - cam.offset.y) * zoom;
+        let mut iy = world_top_idx;
+        while y < max_y {
+            let is_major = !with_minor || iy.rem_euclid(4) == 0;
             let (col, w) = if is_major { (major_color, 0.75) } else { (minor_color, 0.5) };
-            grid_shape = grid_shape.line([0.0, y], [3840.0, y], w, LineCap::Butt, col);
-            y += base_spacing;
+            grid_shape = grid_shape.line([min_x, y], [max_x, y], w, LineCap::Butt, col);
+            y += step;
             iy += 1;
         }
     }
@@ -90,13 +137,44 @@ pub(crate) fn draw_arrow_triangle(
     )
 }
 
-fn build_wire_shape(s: &AppState) -> Shape {
-    let cam = s.graph.viewport;
+pub fn build_drawing_shape(strokes: &[DrawingStroke], w: f32, h: f32, scale: f32) -> Shape {
+    let mut shape = Shape::new();
+    for stroke in strokes {
+        if stroke.points.is_empty() {
+            continue;
+        }
+        let color = if !theme::active_theme().is_dark() && stroke.color_hex.eq_ignore_ascii_case("#F4F3EE") {
+            theme::text_primary()
+        } else if stroke.color_hex.trim().starts_with('#') {
+            theme::hex(stroke.color_hex.trim())
+        } else {
+            theme::text_primary()
+        };
+        let width = (stroke.width * scale).clamp(1.0, 14.0);
+        if stroke.points.len() == 1 {
+            let x = stroke.points[0][0] * w;
+            let y = stroke.points[0][1] * h;
+            shape = shape.stroke(vec![[x - 0.6, y], [x + 0.6, y]], width, color);
+        } else {
+            let pts: Vec<[f32; 2]> = stroke
+                .points
+                .iter()
+                .map(|p| [p[0] * w, p[1] * h])
+                .collect();
+            shape = shape.stroke(pts, width, color);
+        }
+    }
+    shape
+}
+
+fn build_wire_shape(s: &AppState, cam: &Camera) -> Shape {
     let zoom = cam.zoom;
     let mut wire_shape = Shape::new();
     let socket_r = (4.5 * zoom).clamp(2.2, 8.0);
     let arrow_len = (8.5 * zoom).clamp(4.0, 13.0);
     let arrow_hw = (4.0 * zoom).clamp(2.0, 6.2);
+    let animate_wires = s.reader_prefs.animate_wires && zoom >= 0.35;
+    let curve_pad = 140.0 * zoom;
 
     for edge in s.graph.edges.values() {
         if let (Some(from_node), Some(to_node)) = (
@@ -105,10 +183,22 @@ fn build_wire_shape(s: &AppState) -> Shape {
         ) {
             let from_world = port_world_pos_for(from_node, &edge.from.port);
             let to_world = port_world_pos_for(to_node, &edge.to.port);
+            let from_sp = cam.world_to_screen(from_world);
+            let to_sp = cam.world_to_screen(to_world);
 
+            let min_x = from_sp.x.min(to_sp.x) - curve_pad;
+            let min_y = from_sp.y.min(to_sp.y) - curve_pad;
+            let max_x = from_sp.x.max(to_sp.x) + curve_pad;
+            let max_y = from_sp.y.max(to_sp.y) + curve_pad;
+            if !is_rect_in_viewport(min_x, min_y, max_x - min_x, max_y - min_y, s.canvas_size) {
+                continue;
+            }
+
+            let chord = (to_sp.x - from_sp.x).hypot(to_sp.y - from_sp.y);
+            let seg_count = if zoom < 0.55 || chord < 160.0 { 12 } else { 24 };
             let curve = CubicBezier::wire(from_world, to_world);
             let segments: Vec<[f32; 2]> = curve
-                .sample_segments(24)
+                .sample_segments(seg_count)
                 .into_iter()
                 .map(|wp| {
                     let sp = cam.world_to_screen(wp);
@@ -130,7 +220,6 @@ fn build_wire_shape(s: &AppState) -> Shape {
             wire_shape = wire_shape.stroke(segments, wire_w, wire_color);
 
             // Terminal directional arrowhead just outside destination input socket
-            let to_sp = cam.world_to_screen(to_world);
             let end_dir = curve.tangent(0.98);
             let end_tip = [
                 to_sp.x - end_dir.0 * (socket_r + 2.0),
@@ -145,36 +234,39 @@ fn build_wire_shape(s: &AppState) -> Shape {
                 wire_color,
             );
 
-            // Traveling directional pulse + chevron along the Bézier flow
-            let t_anim = 0.08 + s.wire_anim_phase.clamp(0.0, 1.0) * 0.84;
-            let alpha_env = (t_anim * 6.0).min((1.0 - t_anim) * 6.0).clamp(0.0, 1.0);
-            let pulse_color = if is_selected || is_ghost {
-                theme::accent_claude().alpha(0.92 * alpha_env)
-            } else {
-                theme::text_primary().alpha(0.82 * alpha_env)
-            };
+            if animate_wires {
+                // Traveling directional pulse + chevron along the Bézier flow
+                let t_anim = 0.08 + s.wire_anim_phase.clamp(0.0, 1.0) * 0.84;
+                let alpha_env = (t_anim * 6.0).min((1.0 - t_anim) * 6.0).clamp(0.0, 1.0);
+                let pulse_color = if is_selected || is_ghost {
+                    theme::accent_claude().alpha(0.92 * alpha_env)
+                } else {
+                    theme::text_primary().alpha(0.82 * alpha_env)
+                };
 
-            let t_tail = (t_anim - 0.07).max(0.02);
-            let trail: Vec<[f32; 2]> = (0..=4)
-                .map(|step| {
-                    let frac = step as f32 / 4.0;
-                    let t = t_tail + (t_anim - t_tail) * frac;
-                    let sp = cam.world_to_screen(curve.eval(t));
-                    [sp.x, sp.y]
-                })
-                .collect();
-            wire_shape = wire_shape.stroke(trail, wire_w * 1.45, pulse_color.alpha(0.55 * alpha_env));
+                let t_tail = (t_anim - 0.07).max(0.02);
+                let trail: Vec<[f32; 2]> = (0..=4)
+                    .map(|step| {
+                        let frac = step as f32 / 4.0;
+                        let t = t_tail + (t_anim - t_tail) * frac;
+                        let sp = cam.world_to_screen(curve.eval(t));
+                        [sp.x, sp.y]
+                    })
+                    .collect();
+                wire_shape =
+                    wire_shape.stroke(trail, wire_w * 1.45, pulse_color.alpha(0.55 * alpha_env));
 
-            let pulse_sp = cam.world_to_screen(curve.eval(t_anim));
-            let pulse_dir = curve.tangent(t_anim);
-            wire_shape = draw_arrow_triangle(
-                wire_shape,
-                [pulse_sp.x, pulse_sp.y],
-                pulse_dir,
-                (8.0 * zoom).clamp(5.0, 12.0),
-                (3.6 * zoom).clamp(2.4, 5.5),
-                pulse_color,
-            );
+                let pulse_sp = cam.world_to_screen(curve.eval(t_anim));
+                let pulse_dir = curve.tangent(t_anim);
+                wire_shape = draw_arrow_triangle(
+                    wire_shape,
+                    [pulse_sp.x, pulse_sp.y],
+                    pulse_dir,
+                    (8.0 * zoom).clamp(5.0, 12.0),
+                    (3.6 * zoom).clamp(2.4, 5.5),
+                    pulse_color,
+                );
+            }
         }
     }
 
@@ -217,11 +309,33 @@ fn build_wire_shape(s: &AppState) -> Shape {
     wire_shape
 }
 
+fn apply_pan_drag_step(s: &mut AppState, start_offset: WorldPos, dx: f32, dy: f32, tx: &mut Tx) {
+    let z = s.graph.viewport.zoom.max(0.01);
+    s.graph.viewport.offset.x = start_offset.x - (dx / z);
+    s.graph.viewport.offset.y = start_offset.y - (dy / z);
+    if s.smooth_zoom_enabled {
+        s.sync_live_camera();
+        if !s.should_commit_live_camera() {
+            tx.live_only();
+        } else {
+            s.flush_live_camera();
+            tx.instant();
+        }
+    } else {
+        s.committed_viewport = s.graph.viewport;
+        tx.instant();
+    }
+}
+
 pub fn render_canvas_view(s: &AppState) -> El {
-    let cam = s.graph.viewport;
+    let cam = if s.smooth_zoom_enabled {
+        s.committed_viewport
+    } else {
+        s.graph.viewport
+    };
     let zoom = cam.zoom;
-    let grid_shape = build_grid_shape(s);
-    let wire_shape = build_wire_shape(s);
+    let grid_shape = build_grid_shape(s, &cam);
+    let wire_shape = build_wire_shape(s, &cam);
 
     // 2. Interactive Canvas Container (grow(1.0).min_w(0.0) so right-side Reader fits on screen!)
     let mut canvas_container = el()
@@ -231,6 +345,7 @@ pub fn render_canvas_view(s: &AppState) -> El {
         .h_full()
         .clip_soft(0.0)
         .fill(theme::bg_canvas())
+        .motion(Spring::NONE)
         .cursor(if s.space_held { Cursor::Grab } else { Cursor::Default })
         .pointer_buttons([PointerButton::Primary, PointerButton::Middle])
         .on_layout_tx(|s: &mut AppState, r, tx| {
@@ -248,34 +363,45 @@ pub fn render_canvas_view(s: &AppState) -> El {
             } else {
                 tx.live_only();
             }
-        })
+        });
+
+    let mut world_stage = el()
+        .key("world_stage")
+        .absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .live_offset(&s.cam_live_pan)
+        .live_scale(&s.cam_live_zoom)
         .child(
             canvas(grid_shape)
                 .key("canvas_grid_layer")
                 .absolute(0.0, 0.0)
                 .w_full()
                 .h_full(),
-        )
-        .on_wheel(|s: &mut AppState, e, _| {
+        );
+
+    canvas_container = canvas_container
+        .on_wheel(|s: &mut AppState, e, tx| {
             if e.mods.ctrl || e.mods.cmd {
-                let factor = if e.dy > 0.0 { 1.10 } else { 0.90 };
-                s.graph.viewport.zoom_at(ScreenPos::new(e.x, e.y), factor);
+                let factor = (e.dy * 0.0014).clamp(-0.28, 0.28).exp();
+                s.queue_zoom_at(ScreenPos::new(e.x, e.y), factor, 22.0, Some(tx));
+                return true;
             } else if e.mods.shift && e.dx == 0.0 {
-                s.graph.viewport.pan_by_screen_delta(-e.dy, 0.0);
+                s.pan_live_by(-e.dy, 0.0, Some(tx));
             } else {
-                s.graph.viewport.pan_by_screen_delta(-e.dx, -e.dy);
+                s.pan_live_by(-e.dx, -e.dy, Some(tx));
             }
             true
         })
-        .on_magnify(|s: &mut AppState, e, _| {
+        .on_magnify(|s: &mut AppState, e, tx| {
             // Windows Ctrl+wheel pinch sends dy>0 for expand, which Rune's pinch_wheel negates.
-            let delta = if cfg!(target_os = "windows") {
-                -e.delta
+            let scaled = if cfg!(target_os = "windows") {
+                (-e.delta * 0.45).clamp(-0.32, 0.32)
             } else {
-                e.delta
+                e.delta.clamp(-0.32, 0.32)
             };
-            let factor = (1.0 + delta).clamp(0.5, 2.0);
-            s.graph.viewport.zoom_at(ScreenPos::new(e.x, e.y), factor);
+            let factor = scaled.exp();
+            s.queue_zoom_at(ScreenPos::new(e.x, e.y), factor, 28.0, Some(tx));
             true
         })
         .on_drop_files(|s: &mut AppState, files, _| {
@@ -283,6 +409,9 @@ pub fn render_canvas_view(s: &AppState) -> El {
         })
         .on_drag(|s: &mut AppState, d, tx| match d.phase {
             Phase::Down => {
+                if s.smooth_zoom_enabled {
+                    s.flush_live_camera();
+                }
                 s.canvas_mode = CanvasMode::Panning {
                     start_screen: ScreenPos::new(d.x, d.y),
                     start_offset: s.graph.viewport.offset,
@@ -290,9 +419,7 @@ pub fn render_canvas_view(s: &AppState) -> El {
             }
             Phase::Move => {
                 if let CanvasMode::Panning { start_offset, .. } = s.canvas_mode {
-                    let z = s.graph.viewport.zoom.max(0.01);
-                    s.graph.viewport.offset.x = start_offset.x - (d.dx / z);
-                    s.graph.viewport.offset.y = start_offset.y - (d.dy / z);
+                    apply_pan_drag_step(s, start_offset, d.dx, d.dy, tx);
                 }
             }
             Phase::Up => {
@@ -325,6 +452,7 @@ pub fn render_canvas_view(s: &AppState) -> El {
                         tx.blur();
                     }
                 }
+                s.flush_live_camera();
                 s.canvas_mode = CanvasMode::Idle;
             }
         });
@@ -338,16 +466,18 @@ pub fn render_canvas_view(s: &AppState) -> El {
         .collect();
     section_nodes.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
     for sec in section_nodes {
-        canvas_container = canvas_container.child(render_section_node(
-            s,
-            sec,
-            cam.world_to_screen(sec.pos),
-            zoom,
-        ));
+        let sp = cam.world_to_screen(sec.pos);
+        let (bw, bh) = node_world_size(sec);
+        if !is_rect_in_viewport(sp.x, sp.y, bw * zoom, bh * zoom, s.canvas_size)
+            && !is_node_active_in_interaction(s, &sec.id)
+        {
+            continue;
+        }
+        world_stage = world_stage.child(render_section_node(s, sec, sp, zoom));
     }
 
     // 2b. Bezier Wires Layer (above Section backdrops, behind regular Study cards)
-    canvas_container = canvas_container.child(
+    world_stage = world_stage.child(
         canvas(wire_shape)
             .key("canvas_wire_layer")
             .absolute(0.0, 0.0)
@@ -370,8 +500,15 @@ pub fn render_canvas_view(s: &AppState) -> El {
     });
 
     for node in ordered_nodes {
-        let card = render_node_card(s, node, cam.world_to_screen(node.pos), zoom);
-        canvas_container = canvas_container.child(card);
+        let sp = cam.world_to_screen(node.pos);
+        let (bw, bh) = node_world_size(node);
+        if !is_rect_in_viewport(sp.x, sp.y, bw * zoom, bh * zoom, s.canvas_size)
+            && !is_node_active_in_interaction(s, &node.id)
+        {
+            continue;
+        }
+        let card = render_node_card(s, node, sp, zoom);
+        world_stage = world_stage.child(card);
     }
 
     // 4. Edge Annotation Pills (or compact midpoint click dot when label is hidden)
@@ -391,12 +528,21 @@ pub fn render_canvas_view(s: &AppState) -> El {
                 let to_world = port_world_pos_for(to_node, &edge.to.port);
                 let curve = CubicBezier::wire(from_world, to_world);
                 let mid_screen = cam.world_to_screen(curve.midpoint());
+                if !is_rect_in_viewport(
+                    mid_screen.x - 80.0,
+                    mid_screen.y - 24.0,
+                    160.0,
+                    48.0,
+                    s.canvas_size,
+                ) {
+                    continue;
+                }
                 let is_sel = s.selected_edge.as_ref() == Some(&edge.id);
                 let label_hidden =
                     (edge.hide_label || s.hide_all_edge_labels) && edge.status != EdgeStatus::Proposed;
                 if label_hidden {
                     let dot_edge_id = edge.id.clone();
-                    canvas_container = canvas_container.child(
+                    world_stage = world_stage.child(
                         el()
                             .key(format!("edge_pill_{}", edge.id.as_str()))
                             .absolute(mid_screen.x - 6.0, mid_screen.y - 6.0)
@@ -420,7 +566,7 @@ pub fn render_canvas_view(s: &AppState) -> El {
                             ),
                     );
                 } else {
-                    canvas_container = canvas_container.child(render_edge_pill(
+                    world_stage = world_stage.child(render_edge_pill(
                         edge,
                         is_sel,
                         mid_screen,
@@ -431,47 +577,96 @@ pub fn render_canvas_view(s: &AppState) -> El {
         }
     }
 
-    let (dock_x, dock_y, hud_x, hud_y) = floating_overlay_coords(s.canvas_size);
+    canvas_container = canvas_container.child(world_stage);
+
+    let dock_pos = s.reader_prefs.dock_position;
+    let (dock_x, dock_y, dock_w, dock_h, hud_x, hud_y) =
+        floating_overlay_coords(s.canvas_size, dock_pos, s.dock_measured_size);
 
     if s.show_block_menu {
-        canvas_container = canvas_container.child(render_block_menu_popover(s, dock_x, dock_y));
+        canvas_container = canvas_container.child(render_block_menu_popover(
+            s, dock_pos, dock_x, dock_y, dock_w, dock_h,
+        ));
     }
     if s.show_ai_menu {
-        canvas_container = canvas_container.child(render_ai_menu_popover(s, dock_x, dock_y));
+        canvas_container = canvas_container.child(render_ai_menu_popover(
+            s, dock_pos, dock_x, dock_y, dock_w, dock_h,
+        ));
     }
     if let Some(msg) = &s.toast_text {
-        canvas_container = canvas_container.child(render_canvas_toast(s.canvas_size[0], dock_y, msg));
+        canvas_container = canvas_container.child(render_canvas_toast(
+            s.canvas_size,
+            dock_pos,
+            dock_y,
+            dock_h,
+            msg,
+        ));
     }
 
     canvas_container = canvas_container
         .child(render_canvas_floating_dock(s, dock_x, dock_y))
-        .child(render_canvas_viewport_hud(s, hud_x, hud_y));
+        .child(render_canvas_viewport_hud(hud_x, hud_y, zoom));
 
     canvas_container
 }
 
-fn floating_overlay_coords(canvas_size: [f32; 2]) -> (f32, f32, f32, f32) {
+pub(crate) fn floating_overlay_coords(
+    canvas_size: [f32; 2],
+    dock_pos: DockPosition,
+    measured_dock: Option<[f32; 2]>,
+) -> (f32, f32, f32, f32, f32, f32) {
     let cw = canvas_size[0].max(240.0);
     let ch = canvas_size[1].max(200.0);
-    let dock_w = 396.0;
-    let dock_h = 40.0;
     let hud_w = 136.0;
     let hud_h = 34.0;
     let margin = 16.0;
 
-    let hud_x = (cw - hud_w - margin).max(margin);
+    let mut hud_x = (cw - hud_w - margin).max(margin);
     let hud_y = (ch - hud_h - (margin + 3.0)).max(12.0);
-    let max_dock_x = (hud_x - 12.0 - dock_w).max(margin);
-    let dock_x = ((cw - dock_w) * 0.5).clamp(margin, max_dock_x);
-    let dock_y = (ch - dock_h - margin).max(12.0);
-    (dock_x, dock_y, hud_x, hud_y)
+
+    let (default_w, default_h) = match dock_pos {
+        DockPosition::Bottom | DockPosition::Top => (388.0, 40.0),
+        DockPosition::Left | DockPosition::Right => (92.0, 240.0),
+    };
+    let (dock_w, dock_h) = measured_dock
+        .filter(|m| m[0] >= 40.0 && m[1] >= 30.0)
+        .map(|m| (m[0], m[1]))
+        .unwrap_or((default_w, default_h));
+
+    let (dock_x, dock_y) = match dock_pos {
+        DockPosition::Bottom => {
+            let max_dock_x = (hud_x - 12.0 - dock_w).max(margin);
+            let x = ((cw - dock_w) * 0.5).clamp(margin, max_dock_x);
+            let y = (ch - dock_h - margin).max(12.0);
+            (x, y)
+        }
+        DockPosition::Top => {
+            let x = ((cw - dock_w) * 0.5).clamp(margin, (cw - dock_w - margin).max(margin));
+            (x, margin)
+        }
+        DockPosition::Left => {
+            let y = ((ch - dock_h) * 0.5).clamp(margin, (ch - dock_h - margin).max(margin));
+            (margin, y)
+        }
+        DockPosition::Right => {
+            let x = (cw - dock_w - margin).max(margin);
+            let y = ((ch - dock_h) * 0.5).clamp(margin, (ch - dock_h - margin).max(margin));
+            if y + dock_h + 12.0 >= hud_y {
+                hud_x = (x - hud_w - 12.0).max(margin);
+            }
+            (x, y)
+        }
+    };
+
+    (dock_x, dock_y, dock_w, dock_h, hud_x, hud_y)
 }
 
-fn dock_ghost_btn(
+fn dock_ghost_btn_dir(
     key: &'static str,
     glyph: Option<(&'static str, Color)>,
     label: &str,
     active: bool,
+    full_w: bool,
 ) -> El {
     let mut content = row().center_y().gap(5.0);
     if let Some((g, c)) = glyph {
@@ -487,7 +682,7 @@ fn dock_ghost_btn(
             }),
     );
 
-    el()
+    let mut btn = el()
         .key(key)
         .h(28.0)
         .px(10.0)
@@ -499,10 +694,14 @@ fn dock_ghost_btn(
         })
         .hover(theme::hover_subtle())
         .press(theme::press_subtle())
-        .center()
         .cursor(Cursor::Pointer)
-        .no_window_drag()
-        .child(content)
+        .no_window_drag();
+    btn = if full_w {
+        btn.w_full().center_y().child(content)
+    } else {
+        btn.center().child(content)
+    };
+    btn
 }
 
 pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
@@ -679,16 +878,102 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
                     }
                 })
                 .child(
-                    text("⧉ Reader")
+                    text(i18n::t(TextKey::TopbarReaderChip))
                         .font(theme::STATUS_TEXT)
                         .color(theme::accent_claude()),
                 ),
         );
     }
 
-    topbar.child(
-        el()
-            .key("btn_toggle_panel")
+    topbar
+        .child(
+            el()
+                .key("btn_workspace_export")
+                .size(26.0, 26.0)
+                .radius(6.0)
+                .hover(theme::hover_subtle())
+                .press(theme::press_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .no_window_drag()
+                .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+                    let Some(bundle) = &s.bundle else {
+                        return;
+                    };
+                    let project_path = bundle.root_dir.clone();
+                    let folder_name = project_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("project")
+                        .to_string();
+                    let opts = FileDialogOptions {
+                        title: i18n::t(TextKey::DashExportBtn).to_string(),
+                        file_name: Some(format!("{}.studynodes", folder_name)),
+                        ..Default::default()
+                    }
+                    .filter("StudyNodes Archive", &["studynodes"]);
+                    tx.save_file(opts, move |s: &mut AppState, res, _| {
+                        if let Ok(Some(dest)) = res {
+                            s.export_project_to_archive(&project_path, &dest);
+                        }
+                    });
+                })
+                .child(
+                    text("↑")
+                        .font(theme::CONTROL_TEXT)
+                        .color(theme::text_muted()),
+                ),
+        )
+        .child(
+            el()
+                .key("btn_toggle_fullscreen")
+                .size(26.0, 26.0)
+                .radius(6.0)
+                .hover(theme::hover_subtle())
+                .press(theme::press_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .no_window_drag()
+                .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+                    s.is_fullscreen = !s.is_fullscreen;
+                    tx.toggle_full_screen();
+                })
+                .child(
+                    text("⛶")
+                        .font(theme::CONTROL_TEXT)
+                        .color(if s.is_fullscreen {
+                            theme::accent_claude()
+                        } else {
+                            theme::text_muted()
+                        }),
+                ),
+        )
+        .child(
+            el()
+                .key("btn_open_settings")
+                .size(26.0, 26.0)
+                .radius(6.0)
+                .hover(theme::hover_subtle())
+                .press(theme::press_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .no_window_drag()
+                .on_press(|s: &mut AppState| {
+                    s.open_settings();
+                })
+                .child(
+                    text("⚙")
+                        .font(theme::CONTROL_TEXT)
+                        .color(if s.ai_api_configured() {
+                            theme::accent_claude()
+                        } else {
+                            theme::text_muted()
+                        }),
+                ),
+        )
+        .child(
+            el()
+                .key("btn_toggle_panel")
             .size(26.0, 26.0)
             .radius(6.0)
             .hover(theme::hover_subtle())
@@ -716,54 +1001,105 @@ pub fn render_workspace_topbar(s: &AppState, cx: &mut Cx<AppState>) -> El {
 }
 
 fn render_canvas_floating_dock(s: &AppState, dock_x: f32, dock_y: f32) -> El {
-    row()
-        .key("canvas_floating_dock")
-        .absolute(dock_x, dock_y)
-        .w(396.0)
-        .h(40.0)
-        .px(8.0)
-        .gap(3.0)
-        .center_y()
+    let dock_pos = s.reader_prefs.dock_position;
+    let vertical = matches!(dock_pos, DockPosition::Left | DockPosition::Right);
+    let container = if vertical {
+        col()
+            .key("canvas_floating_dock")
+            .absolute(dock_x, dock_y)
+            .padding(8.0)
+            .gap(4.0)
+    } else {
+        row()
+            .key("canvas_floating_dock")
+            .absolute(dock_x, dock_y)
+            .h(40.0)
+            .px(8.0)
+            .gap(3.0)
+            .center_y()
+    }
+    .on_layout_tx(|s: &mut AppState, r, tx| {
+        let measured = [r[2].max(40.0), r[3].max(36.0)];
+        let changed = s.dock_measured_size.map_or(true, |prev| {
+            (prev[0] - measured[0]).abs() > 0.5 || (prev[1] - measured[1]).abs() > 0.5
+        });
+        if changed {
+            s.dock_measured_size = Some(measured);
+            tx.instant();
+        } else {
+            tx.live_only();
+        }
+    });
+
+    let sep = || {
+        if vertical {
+            el().w_full().h(1.0).my(2.0).fill(theme::border_subtle())
+        } else {
+            el().w(1.0).h(18.0).fill(theme::border_subtle())
+        }
+    };
+
+    let pos_glyph = match dock_pos {
+        DockPosition::Bottom => "↓",
+        DockPosition::Top => "↑",
+        DockPosition::Left => "←",
+        DockPosition::Right => "→",
+    };
+
+    container
         .radius(12.0)
         .continuous_corners()
         .fill(theme::bg_chrome().alpha(0.96))
         .border(1.0, theme::border_default())
         .shadow(10.0, 26.0, Color::BLACK.alpha(0.55))
         .child(
-            dock_ghost_btn("btn_add_note", Some(("▪", theme::text_secondary())), "Note", false)
-                .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
-                    s.show_block_menu = false;
-                    s.show_ai_menu = false;
-                    let offset_x = (s.graph.nodes.len() as f32 * 32.0) % 160.0;
-                    let offset_y = (s.graph.nodes.len() as f32 * 24.0) % 120.0;
-                    let pos = s
-                        .graph
-                        .viewport
-                        .screen_to_world(ScreenPos::new(200.0 + offset_x, 120.0 + offset_y));
-                    let id = s.add_note_node(Some(pos));
-                    tx.focus_when_shown(format!("note_body_{}", id.as_str()), false);
-                }),
+            dock_ghost_btn_dir(
+                "btn_add_note",
+                Some(("▪", theme::text_secondary())),
+                i18n::t(TextKey::DockNote),
+                false,
+                vertical,
+            )
+            .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+                s.show_block_menu = false;
+                s.show_ai_menu = false;
+                let offset_x = (s.graph.nodes.len() as f32 * 32.0) % 160.0;
+                let offset_y = (s.graph.nodes.len() as f32 * 24.0) % 120.0;
+                let pos = s
+                    .graph
+                    .viewport
+                    .screen_to_world(ScreenPos::new(200.0 + offset_x, 120.0 + offset_y));
+                let id = s.add_note_node(Some(pos));
+                tx.focus_when_shown(format!("note_body_{}", id.as_str()), false);
+            }),
         )
         .child(
-            dock_ghost_btn("btn_add_doc", Some(("▤", theme::text_secondary())), "Doc", false)
-                .on_press(|s: &mut AppState| {
-                    s.show_block_menu = false;
-                    s.show_ai_menu = false;
-                    let offset_x = (s.graph.nodes.len() as f32 * 32.0) % 160.0;
-                    let offset_y = (s.graph.nodes.len() as f32 * 24.0) % 120.0;
-                    let pos = s
-                        .graph
-                        .viewport
-                        .screen_to_world(ScreenPos::new(240.0 + offset_x, 150.0 + offset_y));
-                    s.add_document_node(Some(pos));
-                }),
+            dock_ghost_btn_dir(
+                "btn_add_doc",
+                Some(("▤", theme::text_secondary())),
+                i18n::t(TextKey::DockDoc),
+                false,
+                vertical,
+            )
+            .on_press(|s: &mut AppState| {
+                s.show_block_menu = false;
+                s.show_ai_menu = false;
+                let offset_x = (s.graph.nodes.len() as f32 * 32.0) % 160.0;
+                let offset_y = (s.graph.nodes.len() as f32 * 24.0) % 120.0;
+                let pos = s
+                    .graph
+                    .viewport
+                    .screen_to_world(ScreenPos::new(240.0 + offset_x, 150.0 + offset_y));
+                s.add_document_node(Some(pos));
+            }),
         )
         .child(
-            dock_ghost_btn(
+            dock_ghost_btn_dir(
                 "btn_dock_add_image",
                 Some(("▣", theme::text_secondary())),
-                "Image",
+                i18n::t(TextKey::DockImage),
                 false,
+                vertical,
             )
             .on_press(|s: &mut AppState| {
                 s.show_block_menu = false;
@@ -772,33 +1108,76 @@ fn render_canvas_floating_dock(s: &AppState, dock_x: f32, dock_y: f32) -> El {
             }),
         )
         .child(
-            dock_ghost_btn(
+            dock_ghost_btn_dir(
                 "btn_toggle_block_menu",
                 None,
-                "+ More ▾",
+                i18n::t(TextKey::DockMore),
                 s.show_block_menu,
+                vertical,
             )
             .on_press(|s: &mut AppState| {
                 s.show_block_menu = !s.show_block_menu;
                 s.show_ai_menu = false;
             }),
         )
-        .child(el().w(1.0).h(18.0).fill(theme::border_subtle()))
+        .child(sep())
         .child(
-            dock_ghost_btn(
+            dock_ghost_btn_dir(
                 "btn_ai",
                 Some(("✦", theme::accent_claude())),
-                "AI",
+                i18n::t(TextKey::DockAi),
                 s.show_ai_menu,
+                vertical,
             )
             .on_press(|s: &mut AppState| {
                 s.show_ai_menu = !s.show_ai_menu;
                 s.show_block_menu = false;
             }),
         )
+        .child(
+            dock_ghost_btn_dir(
+                "btn_ai_open_chat",
+                Some(("✦", theme::accent_claude())),
+                i18n::t(TextKey::DockChat),
+                s.inspector_open && s.ai_panel_open,
+                vertical,
+            )
+            .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+                if s.inspector_open && s.ai_panel_open {
+                    s.ai_panel_open = false;
+                    s.inspector_open = false;
+                } else {
+                    s.open_ai_chat_panel();
+                    tx.focus_when_shown("ai_chat_input", false);
+                }
+            }),
+        )
+        .child(sep())
+        .child({
+            let mut pos_btn = el()
+                .key("btn_dock_position")
+                .h(28.0)
+                .px(8.0)
+                .radius(8.0)
+                .hover(theme::hover_subtle())
+                .press(theme::press_subtle())
+                .cursor(Cursor::Pointer)
+                .no_window_drag()
+                .on_press(|s: &mut AppState| {
+                    s.cycle_dock_position();
+                });
+            if vertical {
+                pos_btn = pos_btn.w_full();
+            }
+            pos_btn.center().child(
+                text(format!("◫{}", pos_glyph))
+                    .font(theme::BADGE_TEXT)
+                    .color(theme::text_secondary()),
+            )
+        })
 }
 
-fn render_canvas_viewport_hud(s: &AppState, hud_x: f32, hud_y: f32) -> El {
+fn render_canvas_viewport_hud(hud_x: f32, hud_y: f32, zoom: f32) -> El {
     row()
         .key("canvas_viewport_hud")
         .absolute(hud_x, hud_y)
@@ -840,8 +1219,9 @@ fn render_canvas_viewport_hud(s: &AppState, hud_x: f32, hud_y: f32) -> El {
                 .center()
                 .cursor(Cursor::Pointer)
                 .no_window_drag()
-                .on_press(|s: &mut AppState| {
-                    s.graph.viewport.zoom = (s.graph.viewport.zoom * 0.85).max(0.2);
+                .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+                    let center = ScreenPos::new(s.canvas_size[0] * 0.5, s.canvas_size[1] * 0.5);
+                    s.queue_zoom_at(center, 0.85, 18.0, Some(tx));
                 })
                 .child(
                     text("−")
@@ -860,13 +1240,15 @@ fn render_canvas_viewport_hud(s: &AppState, hud_x: f32, hud_y: f32) -> El {
                 .cursor(Cursor::Pointer)
                 .no_window_drag()
                 .on_press(|s: &mut AppState| {
+                    s.cancel_smooth_zoom();
                     s.graph.viewport.zoom = 1.0;
                     s.graph.viewport.offset = WorldPos::ZERO;
+                    s.flush_live_camera();
                 })
                 .child(
                     text(format!(
                         "{}%",
-                        (s.graph.viewport.zoom * 100.0).round() as u32
+                        (zoom * 100.0).round() as u32
                     ))
                     .font(theme::BADGE_TEXT)
                     .color(theme::text_secondary()),
@@ -881,8 +1263,9 @@ fn render_canvas_viewport_hud(s: &AppState, hud_x: f32, hud_y: f32) -> El {
                 .center()
                 .cursor(Cursor::Pointer)
                 .no_window_drag()
-                .on_press(|s: &mut AppState| {
-                    s.graph.viewport.zoom = (s.graph.viewport.zoom * 1.15).min(3.0);
+                .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+                    let center = ScreenPos::new(s.canvas_size[0] * 0.5, s.canvas_size[1] * 0.5);
+                    s.queue_zoom_at(center, 1.15, 18.0, Some(tx));
                 })
                 .child(
                     text("+")
@@ -892,10 +1275,20 @@ fn render_canvas_viewport_hud(s: &AppState, hud_x: f32, hud_y: f32) -> El {
         )
 }
 
-fn render_canvas_toast(canvas_w: f32, dock_y: f32, msg: &str) -> El {
+fn render_canvas_toast(
+    canvas_size: [f32; 2],
+    dock_pos: DockPosition,
+    dock_y: f32,
+    dock_h: f32,
+    msg: &str,
+) -> El {
     let est_w = (msg.chars().count() as f32 * 6.8 + 42.0).clamp(140.0, 360.0);
-    let tx = ((canvas_w - est_w) * 0.5).max(16.0);
-    let ty = (dock_y - 38.0).max(12.0);
+    let tx = ((canvas_size[0] - est_w) * 0.5).max(16.0);
+    let ty = match dock_pos {
+        DockPosition::Bottom => (dock_y - 38.0).max(12.0),
+        DockPosition::Top => (dock_y + dock_h + 10.0).min((canvas_size[1] - 44.0).max(12.0)),
+        DockPosition::Left | DockPosition::Right => (canvas_size[1] - 54.0).max(12.0),
+    };
     row()
         .key("canvas_toast")
         .absolute(tx, ty)
@@ -1133,6 +1526,9 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                     .on_drag(move |s: &mut AppState, d, tx| match d.phase {
                         Phase::Down => {
                             if tx.button() == PointerButton::Middle || s.space_held {
+                                if s.smooth_zoom_enabled {
+                                    s.flush_live_camera();
+                                }
                                 s.canvas_mode = CanvasMode::Panning {
                                     start_screen: ScreenPos::new(d.x, d.y),
                                     start_offset: s.graph.viewport.offset,
@@ -1162,8 +1558,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                                 }
                                 CanvasMode::Panning { start_offset, .. } => {
                                     let start_offset = *start_offset;
-                                    s.graph.viewport.offset.x = start_offset.x - (d.dx / z);
-                                    s.graph.viewport.offset.y = start_offset.y - (d.dy / z);
+                                    apply_pan_drag_step(s, start_offset, d.dx, d.dy, tx);
                                 }
                                 _ => {}
                             }
@@ -1176,6 +1571,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                                     let _ = bundle.save_graph_atomic(&s.graph);
                                 }
                             }
+                            s.flush_live_camera();
                             s.canvas_mode = CanvasMode::Idle;
                         }
                     })
@@ -1195,7 +1591,8 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                     ),
             )
             .child(in_socket)
-            .child(out_socket);
+            .child(out_socket)
+            .cache();
     }
 
     // Drag Handle = Header ONLY (leaves card body clicks/inputs completely unblocked!)
@@ -1213,6 +1610,9 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
         .on_drag(move |s: &mut AppState, d, tx| match d.phase {
             Phase::Down => {
                 if tx.button() == PointerButton::Middle || s.space_held {
+                    if s.smooth_zoom_enabled {
+                        s.flush_live_camera();
+                    }
                     s.canvas_mode = CanvasMode::Panning {
                         start_screen: ScreenPos::new(d.x, d.y),
                         start_offset: s.graph.viewport.offset,
@@ -1242,8 +1642,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                     }
                     CanvasMode::Panning { start_offset, .. } => {
                         let start_offset = *start_offset;
-                        s.graph.viewport.offset.x = start_offset.x - (d.dx / z);
-                        s.graph.viewport.offset.y = start_offset.y - (d.dy / z);
+                        apply_pan_drag_step(s, start_offset, d.dx, d.dy, tx);
                     }
                     _ => {}
                 }
@@ -1254,6 +1653,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                         let _ = bundle.save_graph_atomic(&s.graph);
                     }
                 }
+                s.flush_live_camera();
                 s.canvas_mode = CanvasMode::Idle;
             }
         })
@@ -1357,7 +1757,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
             } else {
                 let is_empty = node.content.trim().is_empty();
                 let preview = if is_empty {
-                    "Click to write notes..."
+                    i18n::t(TextKey::NodeEmptyNote)
                 } else {
                     node.content.trim()
                 };
@@ -1408,7 +1808,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                 None
             };
             let text_pages = if pdf_preview.is_none() && img_preview.is_none() {
-                Some(doc_reader::split_document_preview_pages(&node.content, 5))
+                Some(s.doc_preview_pages_for(node, 5))
             } else {
                 None
             };
@@ -1570,7 +1970,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                             s.status_message = "Opened Document Reader".into();
                         })
                         .child(
-                            text("Open →")
+                            text(i18n::t(TextKey::CardOpen))
                                 .font(TextStyle::new(badge_size, 500.0).mono())
                                 .color(theme::text_primary()),
                         ),
@@ -1683,7 +2083,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                                         s.ai_panel_open = false;
                                     })
                                     .child(
-                                        text("Open →")
+                                        text(i18n::t(TextKey::CardOpen))
                                             .font(TextStyle::new(badge_size, 500.0).mono())
                                             .color(theme::text_primary()),
                                     ),
@@ -1720,7 +2120,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                             .cursor(Cursor::Pointer)
                             .on_press_tx(make_picker(pick_id_b))
                             .child(
-                                text("+ Choose Image")
+                                text(format!("+ {}", i18n::t(TextKey::ReaderIngestImage)))
                                     .font(TextStyle::new(badge_size.max(9.5), 600.0))
                                     .color(theme::text_primary()),
                             ),
@@ -1739,12 +2139,16 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
             render_formula_body(s, node, is_selected, body_size, badge_size, zoom)
         }
         NodeKind::Sequence => render_sequence_body(node, body_size, badge_size, zoom),
+        NodeKind::Video => render_video_card_body(s, node, body_size, badge_size, zoom),
+        NodeKind::Audio => render_audio_card_body(s, node, body_size, badge_size, zoom),
+        NodeKind::Calendar => render_calendar_card_body(s, node, body_size, badge_size, zoom),
+        NodeKind::Drawing => render_drawing_card_body(s, node, body_size, badge_size, zoom),
         _ => {
             let preview_text = if node.content.trim().is_empty() {
                 match node.kind {
-                    NodeKind::Image => "Visual image asset.",
-                    NodeKind::LlmSynthesis => "AI synthesis insight node.",
-                    NodeKind::Concept => "High-level concept anchor.",
+                    NodeKind::Image => i18n::t(TextKey::NodeFallbackImage),
+                    NodeKind::LlmSynthesis => i18n::t(TextKey::NodeFallbackSynthesis),
+                    NodeKind::Concept => i18n::t(TextKey::NodeFallbackConcept),
                     _ => "",
                 }
             } else {
@@ -1777,8 +2181,14 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
         }
     };
 
+    let resize_id = node.id.clone();
+    let is_resizable_media = matches!(
+        node.kind,
+        NodeKind::Video | NodeKind::Audio | NodeKind::Drawing
+    );
+
     // Assemble card shell (no outer drag/press handlers!)
-    col()
+    let mut shell = col()
         .key(node.id.as_str())
         .size(w, h)
         .absolute(screen_pos.x, screen_pos.y)
@@ -1797,11 +2207,92 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                 .child(card_body),
         )
         .child(in_socket)
-        .child(out_socket)
+        .child(out_socket);
+
+    if is_resizable_media {
+        let grip = (14.0 * zoom).clamp(11.0, 18.0);
+        let min_size = match node.kind {
+            NodeKind::Video => (240.0, 176.0),
+            NodeKind::Drawing => (240.0, 180.0),
+            _ => (230.0, 112.0),
+        };
+        let max_size = match node.kind {
+            NodeKind::Video => (1280.0, 860.0),
+            NodeKind::Drawing => (960.0, 720.0),
+            _ => (900.0, 520.0),
+        };
+        shell = shell.child(
+            el()
+                .key(format!("node_resize_{}", node.id.as_str()))
+                .absolute((w - grip - 2.0).max(0.0), (h - grip - 2.0).max(0.0))
+                .size(grip, grip)
+                .radius(3.0)
+                .fill(Color::TRANSPARENT)
+                .hover(theme::hover_subtle())
+                .center()
+                .cursor(Cursor::ResizeColumn)
+                .on_drag(move |s: &mut AppState, d, tx| match d.phase {
+                    Phase::Down => {
+                        if let Some(n) = s.graph.get_node(&resize_id) {
+                            let sz = node_world_size(n);
+                            s.canvas_mode = CanvasMode::ResizingNode {
+                                node_id: resize_id.clone(),
+                                start_size: sz,
+                                min_size,
+                                max_size,
+                            };
+                        }
+                    }
+                    Phase::Move => {
+                        let z = s.graph.viewport.zoom.max(0.01);
+                        if let CanvasMode::ResizingNode {
+                            node_id,
+                            start_size,
+                            min_size,
+                            max_size,
+                        } = &s.canvas_mode
+                        {
+                            let node_id = node_id.clone();
+                            let start_size = *start_size;
+                            let min_sz = *min_size;
+                            let max_sz = *max_size;
+                            if let Some(n) = s.graph.get_node_mut(&node_id) {
+                                n.size = (
+                                    (start_size.0 + d.dx / z).clamp(min_sz.0, max_sz.0),
+                                    (start_size.1 + d.dy / z).clamp(min_sz.1, max_sz.1),
+                                );
+                            }
+                            tx.instant();
+                        }
+                    }
+                    Phase::Up => {
+                        if !d.cancelled()
+                            && matches!(s.canvas_mode, CanvasMode::ResizingNode { .. })
+                        {
+                            if let Some(bundle) = &s.bundle {
+                                let _ = bundle.save_graph_atomic(&s.graph);
+                            }
+                        }
+                        s.canvas_mode = CanvasMode::Idle;
+                    }
+                })
+                .child(
+                    text("⋱")
+                        .font(TextStyle::new((badge_size * 0.95).clamp(8.0, 12.0), 600.0))
+                        .color(theme::text_muted()),
+                ),
+        );
+    }
+
+    if node.kind == NodeKind::Drawing {
+        shell
+    } else {
+        shell.cache()
+    }
 }
 
 fn card_header_meta_pill(node: &Node, badge_size: f32, zoom: f32) -> El {
-    let (label, accent) = match node.kind {
+    let badge: Option<(String, Color)> = match node.kind {
         NodeKind::Flashcard => {
             let m = node.meta.mastery.as_deref().unwrap_or("new");
             let col = if m == "again" {
@@ -1811,73 +2302,120 @@ fn card_header_meta_pill(node: &Node, badge_size: f32, zoom: f32) -> El {
             } else {
                 theme::text_muted()
             };
-            (m.to_uppercase(), col)
+            Some((m.to_uppercase(), col))
         }
         NodeKind::Checklist => {
             let tasks = doc_reader::parse_markdown_tasks(&node.content);
             let done = tasks.iter().filter(|(c, _)| *c).count();
-            (
+            Some((
                 format!("{}/{}", done, tasks.len()),
                 if !tasks.is_empty() && done == tasks.len() {
                     theme::accent_claude()
                 } else {
                     theme::text_secondary()
                 },
-            )
+            ))
         }
-        NodeKind::Formula => (
+        NodeKind::Formula => Some((
             node.meta
                 .language
                 .as_deref()
                 .unwrap_or("MATH")
                 .to_uppercase(),
             theme::text_secondary(),
-        ),
-        NodeKind::Sequence => (
+        )),
+        NodeKind::Sequence => Some((
             format!("#{:02}", node.meta.step_index.unwrap_or(1)),
             theme::text_primary(),
-        ),
+        )),
+        NodeKind::Video | NodeKind::Audio => {
+            let label = if let Some(url) = node
+                .meta
+                .media_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+            {
+                let plat = media_helper::classify_media_url(url).label();
+                if node.meta.timestamps.is_empty() {
+                    plat.to_string()
+                } else {
+                    format!("{} · {} TS", plat, node.meta.timestamps.len())
+                }
+            } else if !node.meta.timestamps.is_empty() {
+                format!("{} TS", node.meta.timestamps.len())
+            } else {
+                "MEDIA".into()
+            };
+            Some((label, theme::text_secondary()))
+        }
+        NodeKind::Calendar => {
+            let done = node.meta.calendar_events.iter().filter(|e| e.completed).count();
+            let total = node.meta.calendar_events.len();
+            if total == 0 {
+                None
+            } else {
+                Some((
+                    format!("{}/{}", done, total),
+                    if done == total {
+                        theme::accent_claude()
+                    } else {
+                        theme::text_secondary()
+                    },
+                ))
+            }
+        }
+        NodeKind::Drawing => {
+            if node.meta.drawing_strokes.is_empty() {
+                None
+            } else {
+                Some((
+                    format!("{} ✎", node.meta.drawing_strokes.len()),
+                    theme::text_secondary(),
+                ))
+            }
+        }
         _ => return el(),
     };
 
     let inspect_id = node.id.clone();
-    row()
-        .center_y()
-        .gap(3.0 * zoom)
-        .child(
+    let mut r = row().center_y().gap(3.0 * zoom);
+    if let Some((label, accent)) = badge {
+        r = r.child(
             el()
                 .px((5.0 * zoom).clamp(3.0, 7.0))
                 .py((1.5 * zoom).clamp(1.0, 3.0))
                 .radius(3.0 * zoom)
-                .fill(Color::WHITE.alpha(0.05))
+                .fill(theme::bg_control())
                 .border(1.0, theme::border_subtle())
                 .child(
                     text(label)
                         .font(TextStyle::new(badge_size, 600.0).mono())
                         .color(accent),
                 ),
-        )
-        .child(
-            el()
-                .key(format!("node_inspect_{}", node.id.as_str()))
-                .px((4.0 * zoom).clamp(2.5, 6.0))
-                .py((1.5 * zoom).clamp(1.0, 3.0))
-                .radius(3.0 * zoom)
-                .hover(theme::hover_subtle())
-                .cursor(Cursor::Pointer)
-                .on_press(move |s: &mut AppState| {
-                    s.select_node(inspect_id.clone(), false);
-                    if !s.inspector_popped_out {
-                        s.inspector_open = true;
-                    }
-                    s.ai_panel_open = false;
-                })
-                .child(
-                    text("✎")
-                        .font(TextStyle::new(badge_size, 600.0))
-                        .color(theme::text_muted()),
-                ),
-        )
+        );
+    }
+    r.child(
+        el()
+            .key(format!("node_inspect_{}", node.id.as_str()))
+            .px((4.0 * zoom).clamp(2.5, 6.0))
+            .py((1.5 * zoom).clamp(1.0, 3.0))
+            .radius(3.0 * zoom)
+            .hover(theme::hover_subtle())
+            .cursor(Cursor::Pointer)
+            .on_press(move |s: &mut AppState| {
+                s.select_node(inspect_id.clone(), false);
+                if !s.inspector_popped_out {
+                    s.inspector_open = true;
+                }
+                s.ai_panel_open = false;
+            })
+            .child(
+                text("✎")
+                    .font(TextStyle::new(badge_size, 600.0))
+                    .color(theme::text_muted()),
+            ),
+    )
 }
 
 fn render_flashcard_body(
@@ -1933,13 +2471,17 @@ fn render_flashcard_body(
                 s.toggle_flashcard_flip(&flip_id);
             })
             .child(
-                text(if flipped { "↺ Prompt" } else { "Reveal" })
-                    .font(TextStyle::new(badge_size, 600.0))
-                    .color(if flipped {
-                        theme::accent_claude()
-                    } else {
-                        theme::text_primary()
-                    }),
+                text(if flipped {
+                    "↺"
+                } else {
+                    i18n::t(TextKey::CardReveal)
+                })
+                .font(TextStyle::new(badge_size, 600.0))
+                .color(if flipped {
+                    theme::accent_claude()
+                } else {
+                    theme::text_primary()
+                }),
             ),
     );
 
@@ -1948,7 +2490,7 @@ fn render_flashcard_body(
         for (key_prefix, label, rating, active, target_id, accent) in [
             (
                 "flash_rate_again_",
-                "Again",
+                i18n::t(TextKey::ReaderMasteryAgain),
                 "again",
                 cur_mastery == "again",
                 again_id,
@@ -1956,7 +2498,7 @@ fn render_flashcard_body(
             ),
             (
                 "flash_rate_good_",
-                "Good",
+                i18n::t(TextKey::ReaderMasteryGood),
                 "good",
                 cur_mastery == "good",
                 good_id,
@@ -1964,7 +2506,7 @@ fn render_flashcard_body(
             ),
             (
                 "flash_rate_easy_",
-                "Easy",
+                i18n::t(TextKey::ReaderMasteryEasy),
                 "easy",
                 cur_mastery == "easy",
                 easy_id,
@@ -2071,7 +2613,7 @@ fn render_excerpt_body(
             let page = page_opt.unwrap_or(0) + 1;
             format!("▤ {} · p.{} ↗", doc_title, page)
         }
-        _ => "Unlinked excerpt".into(),
+        _ => i18n::t(TextKey::ExcerptNoSource).into(),
     };
 
     col()
@@ -2446,7 +2988,7 @@ fn render_sequence_body(node: &Node, body_size: f32, badge_size: f32, zoom: f32)
                             s.add_next_sequence_step(&seq_id);
                         })
                         .child(
-                            text("+ Next →")
+                            text(i18n::t(TextKey::CardNextStep))
                                 .font(TextStyle::new(badge_size, 600.0))
                                 .color(theme::text_primary()),
                         ),
@@ -2499,6 +3041,9 @@ fn render_section_node(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f
         .on_drag(move |s: &mut AppState, d, tx| match d.phase {
             Phase::Down => {
                 if tx.button() == PointerButton::Middle || s.space_held {
+                    if s.smooth_zoom_enabled {
+                        s.flush_live_camera();
+                    }
                     s.canvas_mode = CanvasMode::Panning {
                         start_screen: ScreenPos::new(d.x, d.y),
                         start_offset: s.graph.viewport.offset,
@@ -2539,8 +3084,7 @@ fn render_section_node(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f
                     }
                     CanvasMode::Panning { start_offset, .. } => {
                         let start_offset = *start_offset;
-                        s.graph.viewport.offset.x = start_offset.x - (d.dx / z);
-                        s.graph.viewport.offset.y = start_offset.y - (d.dy / z);
+                        apply_pan_drag_step(s, start_offset, d.dx, d.dy, tx);
                     }
                     _ => {}
                 }
@@ -2551,6 +3095,7 @@ fn render_section_node(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f
                         let _ = bundle.save_graph_atomic(&s.graph);
                     }
                 }
+                s.flush_live_camera();
                 s.canvas_mode = CanvasMode::Idle;
             }
         })
@@ -2569,6 +3114,24 @@ fn render_section_node(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f
         );
 
     if !low_zoom_lod {
+        let sec_shot_id = node.id.clone();
+        let sec_shot_slug: String = node
+            .title
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .take(40)
+            .collect();
+        let sec_shot_name = if sec_shot_slug.trim_matches('_').is_empty() {
+            "section_scheme.png".to_string()
+        } else {
+            format!("{}_scheme.png", sec_shot_slug.trim_matches('_'))
+        };
         header_bar = header_bar
             .child(
                 el()
@@ -2584,9 +3147,43 @@ fn render_section_node(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f
                         s.toggle_section_framed(&sec_toggle_id);
                     })
                     .child(
-                        text(if framed { "▭ Frame" } else { "— Banner" })
+                        text(if framed {
+                            i18n::t(TextKey::CardFrame)
+                        } else {
+                            i18n::t(TextKey::CardBanner)
+                        })
+                        .font(TextStyle::new(badge_size, 600.0))
+                        .color(theme::text_secondary()),
+                    ),
+            )
+            .child(
+                el()
+                    .key(format!("sec_screenshot_{}", node.id.as_str()))
+                    .px(5.0 * zoom)
+                    .py(2.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_control())
+                    .hover(theme::hover_subtle())
+                    .border(1.0, theme::border_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press_tx(move |_s: &mut AppState, tx: &mut Tx| {
+                        let nid = sec_shot_id.clone();
+                        let opts = FileDialogOptions {
+                            title: i18n::t(TextKey::SectionScreenshotBtn).to_string(),
+                            file_name: Some(sec_shot_name.clone()),
+                            ..Default::default()
+                        }
+                        .filter("PNG Image", &["png"]);
+                        tx.save_file(opts, move |s: &mut AppState, res, _| {
+                            if let Ok(Some(dest)) = res {
+                                let _ = s.export_scheme_screenshot(Some(&nid), Some(dest));
+                            }
+                        });
+                    })
+                    .child(
+                        text("📷")
                             .font(TextStyle::new(badge_size, 600.0))
-                            .color(theme::text_secondary()),
+                            .color(theme::accent_claude()),
                     ),
             )
             .child(
@@ -2706,23 +3303,125 @@ fn render_section_node(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f
     container
 }
 
-fn render_block_menu_popover(s: &AppState, dock_x: f32, dock_y: f32) -> El {
-    let menu_x = (dock_x + 96.0).clamp(12.0, (s.canvas_size[0] - 244.0).max(12.0));
-    let menu_y = (dock_y - 318.0).max(12.0);
+fn render_block_menu_popover(
+    s: &AppState,
+    dock_pos: DockPosition,
+    dock_x: f32,
+    dock_y: f32,
+    dock_w: f32,
+    dock_h: f32,
+) -> El {
+    let menu_w = 232.0;
+    let cw = s.canvas_size[0].max(240.0);
+    let ch = s.canvas_size[1].max(200.0);
+    let (menu_x, menu_y, max_menu_h) = match dock_pos {
+        DockPosition::Bottom => (
+            (dock_x + 96.0).clamp(12.0, (cw - menu_w - 12.0).max(12.0)),
+            (dock_y - 468.0).max(12.0),
+            (dock_y - 24.0).max(200.0),
+        ),
+        DockPosition::Top => (
+            (dock_x + 96.0).clamp(12.0, (cw - menu_w - 12.0).max(12.0)),
+            (dock_y + dock_h + 8.0).min((ch - 220.0).max(12.0)),
+            (ch - (dock_y + dock_h + 24.0)).max(200.0),
+        ),
+        DockPosition::Left => (
+            (dock_x + dock_w + 8.0).min((cw - menu_w - 12.0).max(12.0)),
+            dock_y.clamp(12.0, (ch - 320.0).max(12.0)),
+            (ch - 24.0).max(200.0),
+        ),
+        DockPosition::Right => (
+            (dock_x - menu_w - 8.0).max(12.0),
+            dock_y.clamp(12.0, (ch - 320.0).max(12.0)),
+            (ch - 24.0).max(200.0),
+        ),
+    };
     let items = [
-        ("btn_add_section", "▭", "Section", "Group frame & title", NodeKind::Section),
-        ("btn_add_image", "▣", "Image", "Visual figure or diagram", NodeKind::Image),
-        ("btn_add_flashcard", "◇", "Flashcard", "Prompt & flip answer", NodeKind::Flashcard),
-        ("btn_add_excerpt", "❝", "Excerpt", "Linked doc page quote", NodeKind::Excerpt),
-        ("btn_add_checklist", "☑", "Checklist", "Interactive study tasks", NodeKind::Checklist),
-        ("btn_add_formula", "∑", "Formula", "Equation & code box", NodeKind::Formula),
-        ("btn_add_sequence", "→", "Sequence", "Numbered causal step", NodeKind::Sequence),
+        (
+            "btn_add_section",
+            "▭",
+            i18n::t(TextKey::BlockSectionTitle),
+            i18n::t(TextKey::BlockSectionDesc),
+            NodeKind::Section,
+        ),
+        (
+            "btn_add_image",
+            "▣",
+            i18n::t(TextKey::BlockImageTitle),
+            i18n::t(TextKey::BlockImageDesc),
+            NodeKind::Image,
+        ),
+        (
+            "btn_add_drawing",
+            "✎",
+            i18n::t(TextKey::BlockDrawingTitle),
+            i18n::t(TextKey::BlockDrawingDesc),
+            NodeKind::Drawing,
+        ),
+        (
+            "btn_add_flashcard",
+            "◇",
+            i18n::t(TextKey::BlockFlashcardTitle),
+            i18n::t(TextKey::BlockFlashcardDesc),
+            NodeKind::Flashcard,
+        ),
+        (
+            "btn_add_excerpt",
+            "❝",
+            i18n::t(TextKey::BlockExcerptTitle),
+            i18n::t(TextKey::BlockExcerptDesc),
+            NodeKind::Excerpt,
+        ),
+        (
+            "btn_add_checklist",
+            "☑",
+            i18n::t(TextKey::BlockChecklistTitle),
+            i18n::t(TextKey::BlockChecklistDesc),
+            NodeKind::Checklist,
+        ),
+        (
+            "btn_add_formula",
+            "∑",
+            i18n::t(TextKey::BlockFormulaTitle),
+            i18n::t(TextKey::BlockFormulaDesc),
+            NodeKind::Formula,
+        ),
+        (
+            "btn_add_sequence",
+            "→",
+            i18n::t(TextKey::BlockSequenceTitle),
+            i18n::t(TextKey::BlockSequenceDesc),
+            NodeKind::Sequence,
+        ),
+        (
+            "btn_add_video",
+            "▶",
+            i18n::t(TextKey::BlockVideoTitle),
+            i18n::t(TextKey::BlockVideoDesc),
+            NodeKind::Video,
+        ),
+        (
+            "btn_add_audio",
+            "♫",
+            i18n::t(TextKey::BlockAudioTitle),
+            i18n::t(TextKey::BlockAudioDesc),
+            NodeKind::Audio,
+        ),
+        (
+            "btn_add_calendar",
+            "▦",
+            i18n::t(TextKey::BlockCalendarTitle),
+            i18n::t(TextKey::BlockCalendarDesc),
+            NodeKind::Calendar,
+        ),
     ];
 
     let mut menu = col()
         .key("block_create_menu")
         .absolute(menu_x, menu_y)
         .w(232.0)
+        .max_h(max_menu_h)
+        .scroll(ScrollSpec { stick_bottom: false })
         .padding(6.0)
         .gap(2.0)
         .radius(10.0)
@@ -2774,9 +3473,41 @@ fn render_block_menu_popover(s: &AppState, dock_x: f32, dock_y: f32) -> El {
     menu
 }
 
-fn render_ai_menu_popover(s: &AppState, dock_x: f32, dock_y: f32) -> El {
-    let menu_x = (dock_x + 178.0).clamp(12.0, (s.canvas_size[0] - 236.0).max(12.0));
-    let menu_y = (dock_y - 102.0).max(12.0);
+fn render_ai_menu_popover(
+    s: &AppState,
+    dock_pos: DockPosition,
+    dock_x: f32,
+    dock_y: f32,
+    dock_w: f32,
+    dock_h: f32,
+) -> El {
+    let menu_w = 224.0;
+    let cw = s.canvas_size[0].max(240.0);
+    let ch = s.canvas_size[1].max(200.0);
+    let (menu_x, menu_y) = match dock_pos {
+        DockPosition::Bottom => (
+            (dock_x + 178.0).clamp(12.0, (cw - menu_w - 12.0).max(12.0)),
+            (dock_y - 138.0).max(12.0),
+        ),
+        DockPosition::Top => (
+            (dock_x + 178.0).clamp(12.0, (cw - menu_w - 12.0).max(12.0)),
+            (dock_y + dock_h + 8.0).min((ch - 140.0).max(12.0)),
+        ),
+        DockPosition::Left => (
+            (dock_x + dock_w + 8.0).min((cw - menu_w - 12.0).max(12.0)),
+            (dock_y + 120.0).clamp(12.0, (ch - 140.0).max(12.0)),
+        ),
+        DockPosition::Right => (
+            (dock_x - menu_w - 8.0).max(12.0),
+            (dock_y + 120.0).clamp(12.0, (ch - 140.0).max(12.0)),
+        ),
+    };
+    let can_explain_selection = s.selected_nodes.is_empty()
+        || s.selected_nodes.iter().any(|id| {
+            s.graph
+                .get_node(id)
+                .is_some_and(|n| !matches!(n.kind, NodeKind::Video | NodeKind::Audio))
+        });
     col()
         .key("ai_quick_menu")
         .absolute(menu_x, menu_y)
@@ -2788,6 +3519,40 @@ fn render_ai_menu_popover(s: &AppState, dock_x: f32, dock_y: f32) -> El {
         .fill(theme::bg_chrome().alpha(0.98))
         .border(1.0, theme::border_default())
         .shadow(10.0, 24.0, Color::BLACK.alpha(0.55))
+        .child(
+            row()
+                .key("btn_ai_summarize_selected")
+                .w_full()
+                .px(8.0)
+                .py(7.0)
+                .gap(8.0)
+                .center_y()
+                .radius(6.0)
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut AppState| {
+                    s.show_ai_menu = false;
+                    s.summarize_selected_nodes_ai();
+                })
+                .child(
+                    text("✦")
+                        .font(theme::CONTROL_TEXT)
+                        .color(if can_explain_selection {
+                            theme::accent_claude()
+                        } else {
+                            theme::text_muted()
+                        }),
+                )
+                .child(
+                    text(i18n::t(TextKey::AiSummarizeSelected))
+                        .font(theme::STATUS_TEXT)
+                        .color(if can_explain_selection {
+                            theme::text_primary()
+                        } else {
+                            theme::text_muted()
+                        }),
+                ),
+        )
         .child(
             row()
                 .key("btn_run_ai_synth")
@@ -2809,7 +3574,7 @@ fn render_ai_menu_popover(s: &AppState, dock_x: f32, dock_y: f32) -> El {
                         .color(theme::accent_claude()),
                 )
                 .child(
-                    text("Synthesize Connections")
+                    text(i18n::t(TextKey::AiSynthesizeConnections))
                         .font(theme::STATUS_TEXT)
                         .color(theme::text_primary()),
                 ),
@@ -2835,7 +3600,7 @@ fn render_ai_menu_popover(s: &AppState, dock_x: f32, dock_y: f32) -> El {
                         .color(theme::text_secondary()),
                 )
                 .child(
-                    text("Generate Study Cards")
+                    text(i18n::t(TextKey::AiGenerateStudyCards))
                         .font(theme::STATUS_TEXT)
                         .color(theme::text_primary()),
                 ),
@@ -2866,10 +3631,11 @@ fn render_edge_pill(edge: &Edge, is_selected: bool, screen_pos: ScreenPos, zoom:
     };
 
     let font_size = (10.0 * zoom).clamp(7.5, 12.0);
+    let rel_lbl = i18n::edge_relation_label(&edge.relation);
     let label_str = if edge.label.is_empty() {
-        format!("[{}]", edge.relation.display_label())
+        format!("[{}]", rel_lbl)
     } else {
-        format!("[{}] {}", edge.relation.display_label(), edge.label)
+        format!("[{}] {}", rel_lbl, edge.label)
     };
 
     let char_w = font_size * 0.60;
@@ -2953,4 +3719,1703 @@ fn render_edge_pill(edge: &Edge, is_selected: bool, screen_pos: ScreenPos, zoom:
             s.select_edge(edge_id_clone.clone());
         })
         .child(content)
+        .cache()
+}
+
+fn render_card_timestamps_strip(node: &Node, badge_size: f32, zoom: f32) -> Option<El> {
+    if node.meta.timestamps.is_empty() {
+        return None;
+    }
+    let mut strip = col().w_full().gap(3.0 * zoom);
+    for (idx, ts) in node.meta.timestamps.iter().take(3).enumerate() {
+        let nid = node.id.clone();
+        let secs = ts.seconds;
+        let label = format!("{} · {}", media_helper::format_timestamp(secs), ts.label);
+        strip = strip.child(
+            el()
+                .key(format!("media_ts_{}_{}", node.id.as_str(), idx))
+                .w_full()
+                .px(6.0 * zoom)
+                .py(2.5 * zoom)
+                .radius(4.0 * zoom)
+                .fill(theme::bg_control())
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                    s.jump_to_media_timestamp(&nid, secs, tx);
+                })
+                .child(
+                    text(label)
+                        .font(TextStyle::new(badge_size, 500.0).mono())
+                        .color(theme::kind_accent(node.kind))
+                        .truncate(),
+                ),
+        );
+    }
+    Some(strip)
+}
+
+fn render_iframe_embed_slot(
+    s: &AppState,
+    node: &Node,
+    url: &str,
+    frame_h: f32,
+    badge_size: f32,
+    zoom: f32,
+    accent: Color,
+) -> El {
+    let plat = media_helper::classify_media_url(url);
+    let collapsed = s.embed_collapsed.contains(&node.id);
+    let nid_rect = node.id.clone();
+    let nid_reload = node.id.clone();
+    let nid_toggle = node.id.clone();
+    let nid_open = node.id.clone();
+
+    let mut container = col().w_full().grow(1.0).min_h(0.0).gap(5.0 * zoom);
+    if !collapsed {
+        container = container.child(
+            col()
+                .key(format!("embed_frame_{}", node.id.as_str()))
+                .w_full()
+                .grow(1.0)
+                .min_h((64.0 * zoom).min(frame_h * zoom))
+                .padding(8.0 * zoom)
+                .radius(5.0 * zoom)
+                .fill(Color::BLACK.alpha(0.92))
+                .border(1.0, theme::border_subtle())
+                .on_drawn_layout_tx(move |s: &mut AppState, r, tx| {
+                    s.embed_rects.insert(nid_rect.clone(), r);
+                    tx.live_only();
+                })
+                .child(
+                    row()
+                        .w_full()
+                        .center_y()
+                        .gap(6.0 * zoom)
+                        .child(
+                            text(plat.label())
+                                .font(TextStyle::new(badge_size, 600.0).mono())
+                                .color(accent),
+                        )
+                        .child(
+                            text(i18n::t(TextKey::MediaIframeActive))
+                                .font(TextStyle::new(badge_size, 500.0))
+                                .color(theme::text_muted()),
+                        ),
+                )
+                .child(el().grow(1.0).center().child(
+                    text(url)
+                        .font(TextStyle::new((badge_size * 0.92).max(7.5), 400.0))
+                        .color(theme::text_muted().alpha(0.65))
+                        .truncate(),
+                )),
+        );
+    }
+
+    container.child(
+        row()
+            .w_full()
+            .center_y()
+            .gap(4.0 * zoom)
+            .pr(16.0 * zoom)
+            .child(
+                el()
+                    .key(format!("media_reload_embed_{}", node.id.as_str()))
+                    .px(5.0 * zoom)
+                    .py(2.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_control())
+                    .border(1.0, theme::border_subtle())
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.reload_embed_iframe(&nid_reload);
+                    })
+                    .child(
+                        text("↻")
+                            .font(TextStyle::new(badge_size, 600.0))
+                            .color(theme::text_secondary()),
+                    ),
+            )
+            .child(
+                el()
+                    .key(format!("media_toggle_embed_{}", node.id.as_str()))
+                    .px(6.0 * zoom)
+                    .py(2.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_control())
+                    .border(1.0, theme::border_subtle())
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.toggle_embed_collapsed(&nid_toggle);
+                    })
+                    .child(
+                        text(if collapsed {
+                            i18n::t(TextKey::MediaShowEmbed)
+                        } else {
+                            i18n::t(TextKey::MediaHideEmbed)
+                        })
+                        .font(TextStyle::new((badge_size * 0.92).max(7.5), 500.0))
+                        .color(theme::text_secondary()),
+                    ),
+            )
+            .child(el().grow(1.0))
+            .child(
+                el()
+                    .key(format!("media_open_url_{}", node.id.as_str()))
+                    .px(6.0 * zoom)
+                    .py(2.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_control())
+                    .border(1.0, theme::border_subtle())
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                        s.open_media_external_url(&nid_open, 0.0, tx);
+                    })
+                    .child(
+                        text(i18n::t(TextKey::MediaOpenLink))
+                            .font(TextStyle::new((badge_size * 0.94).max(7.5), 500.0))
+                            .color(theme::text_secondary()),
+                    ),
+            ),
+    )
+}
+
+fn render_audio_card_subtitle_box(
+    s: &AppState,
+    node: &Node,
+    current_secs: Option<f64>,
+    badge_size: f32,
+    zoom: f32,
+    accent: Color,
+) -> Option<El> {
+    if !node.meta.show_subtitles_on_card {
+        return None;
+    }
+    let is_pending = s.audio_subtitle_pending.contains(&node.id);
+    let err_opt = s.audio_subtitle_errors.get(&node.id).cloned();
+    let plain_text = node
+        .meta
+        .transcript_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| media_helper::cues_to_plain_text(&node.meta.subtitles));
+    if !is_pending && err_opt.is_none() && plain_text.is_empty() && node.meta.subtitles.is_empty() {
+        return None;
+    }
+
+    let copy_key: &'static str = "audio_sub_card";
+    let was_copied = s.is_recently_copied(copy_key);
+    let copy_payload = if !plain_text.is_empty() {
+        plain_text.clone()
+    } else {
+        media_helper::cues_to_plain_text(&node.meta.subtitles)
+    };
+
+    let (cue_time_lbl, active_line) = if is_pending {
+        (None, i18n::t(TextKey::AudioGeneratingSubtitles).to_string())
+    } else if let Some(ref e) = err_opt {
+        (None, e.clone())
+    } else if let Some((_, cue)) =
+        media_helper::active_subtitle_cue(&node.meta.subtitles, current_secs.unwrap_or(0.0))
+    {
+        (
+            Some(media_helper::format_timestamp(cue.start)),
+            cue.text.clone(),
+        )
+    } else {
+        (None, plain_text.clone())
+    };
+
+    let mut hdr = row()
+        .w_full()
+        .center_y()
+        .gap(5.0 * zoom)
+        .child(
+            text(match cue_time_lbl {
+                Some(ref ts) => format!("CC · {}", ts),
+                None => "CC".to_string(),
+            })
+            .font(TextStyle::new((badge_size * 0.88).max(7.0), 700.0).mono())
+            .color(accent),
+        )
+        .child(el().grow(1.0));
+
+    if !copy_payload.is_empty() {
+        hdr = hdr.child(
+            el()
+                .key(format!("media_sub_copy_{}", node.id.as_str()))
+                .px(5.0 * zoom)
+                .py(1.5 * zoom)
+                .radius(3.0 * zoom)
+                .fill(theme::bg_control())
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                    tx.copy(copy_payload.clone());
+                    s.mark_copied(copy_key, "Copied audio subtitles");
+                })
+                .child(
+                    text(if was_copied {
+                        i18n::t(TextKey::ReaderCopied)
+                    } else {
+                        i18n::t(TextKey::ReaderCopy)
+                    })
+                    .font(TextStyle::new((badge_size * 0.88).max(7.0), 600.0))
+                    .color(if was_copied {
+                        accent
+                    } else {
+                        theme::text_secondary()
+                    }),
+                ),
+        );
+    }
+
+    Some(
+        col()
+            .key(format!("media_sub_box_{}", node.id.as_str()))
+            .w_full()
+            .px(7.0 * zoom)
+            .py(5.0 * zoom)
+            .gap(3.0 * zoom)
+            .radius(4.0 * zoom)
+            .fill(theme::bg_input())
+            .border(1.0, theme::border_subtle())
+            .child(hdr)
+            .child(
+                text(active_line)
+                    .font(TextStyle::new((badge_size * 0.96).max(8.0), 400.0))
+                    .color(if err_opt.is_some() {
+                        theme::accent_danger()
+                    } else {
+                        theme::text_primary()
+                    })
+                    .w_full()
+                    .wrap(),
+            ),
+    )
+}
+
+fn render_video_card_body(
+    s: &AppState,
+    node: &Node,
+    body_size: f32,
+    badge_size: f32,
+    zoom: f32,
+) -> El {
+    let click_id = node.id.clone();
+    let pick_id = node.id.clone();
+    let play_id = node.id.clone();
+    let video_tap_id = node.id.clone();
+    let back_id = node.id.clone();
+    let fwd_id = node.id.clone();
+    let mute_id = node.id.clone();
+    let rate_id = node.id.clone();
+    let mark_id = node.id.clone();
+    let scrub_id = node.id.clone();
+    let accent = theme::kind_accent(NodeKind::Video);
+    let (node_w, _) = crate::state::node_world_size(node);
+    let track_w = (node_w * zoom - 20.0 * zoom).max(60.0);
+
+    let mut body = col()
+        .key(format!("node_body_{}", node.id.as_str()))
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .clip_soft(0.0)
+        .px(8.0 * zoom)
+        .py(6.0 * zoom)
+        .gap(4.0 * zoom)
+        .on_press(move |s: &mut AppState| {
+            s.select_node(click_id.clone(), false);
+            if !s.inspector_popped_out {
+                s.inspector_open = true;
+            }
+            s.ai_panel_open = false;
+        });
+
+    if let Some(player) = s.media_player_for(&node.id) {
+        let playing = player.is_playing();
+        let muted = player.muted();
+        let rate = player.rate();
+        let dur = player.duration().unwrap_or(0.0);
+        let cur = player.time();
+        let frac = if dur > 0.0 {
+            (cur / dur).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
+        let time_label = if dur > 0.0 {
+            format!(
+                "{} / {}",
+                media_helper::format_timestamp(cur),
+                media_helper::format_timestamp(dur)
+            )
+        } else {
+            media_helper::format_timestamp(cur)
+        };
+        let player_err = match player.state() {
+            rune::PlayerState::Failed(msg) => Some(msg),
+            _ => None,
+        };
+
+        body = body.child(
+            el()
+                .w_full()
+                .grow(1.0)
+                .min_h(76.0 * zoom)
+                .radius(5.0 * zoom)
+                .fill(Color::BLACK)
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.toggle_media_play(&video_tap_id);
+                })
+                .video(player, SurfaceFit::Fit),
+        );
+
+        if let Some(err) = player_err {
+            let jump_fail = node.id.clone();
+            let retry_fail = node.id.clone();
+            body = body.child(
+                row()
+                    .w_full()
+                    .center_y()
+                    .gap(4.0 * zoom)
+                    .child(
+                        text(err)
+                            .font(TextStyle::new((badge_size * 0.9).max(7.5), 400.0))
+                            .color(theme::accent_danger())
+                            .grow(1.0)
+                            .truncate(),
+                    )
+                    .child(
+                        el()
+                            .key(format!("media_retry_{}", node.id.as_str()))
+                            .px(5.0 * zoom)
+                            .py(2.0 * zoom)
+                            .radius(4.0 * zoom)
+                            .fill(theme::bg_control())
+                            .cursor(Cursor::Pointer)
+                            .on_press(move |s: &mut AppState| {
+                                s.media_players.remove(&retry_fail);
+                                let _ = s.ensure_media_player(&retry_fail);
+                            })
+                            .child(
+                                text("↻")
+                                    .font(TextStyle::new(badge_size, 600.0))
+                                    .color(theme::text_primary()),
+                            ),
+                    )
+                    .child(
+                        el()
+                            .key(format!("media_open_url_{}", node.id.as_str()))
+                            .px(5.0 * zoom)
+                            .py(2.0 * zoom)
+                            .radius(4.0 * zoom)
+                            .fill(theme::bg_control())
+                            .border(1.0, theme::border_subtle())
+                            .cursor(Cursor::Pointer)
+                            .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                                s.open_media_external_url(&jump_fail, 0.0, tx);
+                            })
+                            .child(
+                                text("↗")
+                                    .font(TextStyle::new(badge_size, 600.0))
+                                    .color(theme::text_secondary()),
+                            ),
+                    ),
+            );
+        }
+
+        // Scrub timeline bar
+        body = body.child(
+            el()
+                .key(format!("media_scrub_{}", node.id.as_str()))
+                .w(track_w)
+                .h((5.0 * zoom).clamp(3.5, 7.5))
+                .radius(3.0)
+                .fill(theme::border_subtle())
+                .cursor(Cursor::Pointer)
+                .on_drag(move |s: &mut AppState, d, tx| match d.phase {
+                    Phase::Down | Phase::Move => {
+                        let ratio = (d.x / d.w.max(1.0)).clamp(0.0, 1.0) as f64;
+                        if let Some(dur_val) = s.media_player_for(&scrub_id).and_then(|p| p.duration()) {
+                            if dur_val > 0.0 {
+                                s.seek_media(&scrub_id, ratio * dur_val);
+                                tx.instant();
+                            }
+                        }
+                    }
+                    Phase::Up => {}
+                })
+                .child(
+                    el()
+                        .w((track_w * frac).clamp(0.0, track_w))
+                        .h_full()
+                        .radius(3.0)
+                        .fill(accent),
+                ),
+        );
+
+        let mut controls = row()
+            .w_full()
+            .center_y()
+            .gap(4.0 * zoom)
+            .pr(16.0 * zoom)
+            .child(
+                el()
+                    .key(format!("media_play_{}", node.id.as_str()))
+                    .px(6.0 * zoom)
+                    .py(2.5 * zoom)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_control())
+                    .border(1.0, theme::border_default())
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.toggle_media_play(&play_id);
+                    })
+                    .child(
+                        text(if playing { "⏸" } else { "▶" })
+                            .font(TextStyle::new(badge_size, 600.0))
+                            .color(accent),
+                    ),
+            )
+            .child(
+                el()
+                    .key(format!("media_back_{}", node.id.as_str()))
+                    .px(4.0 * zoom)
+                    .py(2.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_control())
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        let t = s
+                            .media_player_for(&back_id)
+                            .map(|p| (p.time() - 10.0).max(0.0))
+                            .unwrap_or(0.0);
+                        s.seek_media(&back_id, t);
+                    })
+                    .child(
+                        text("-10")
+                            .font(TextStyle::new((badge_size * 0.9).max(7.5), 500.0).mono())
+                            .color(theme::text_secondary()),
+                    ),
+            )
+            .child(
+                el()
+                    .key(format!("media_fwd_{}", node.id.as_str()))
+                    .px(4.0 * zoom)
+                    .py(2.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_control())
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        let t = s
+                            .media_player_for(&fwd_id)
+                            .map(|p| p.time() + 10.0)
+                            .unwrap_or(10.0);
+                        s.seek_media(&fwd_id, t);
+                    })
+                    .child(
+                        text("+10")
+                            .font(TextStyle::new((badge_size * 0.9).max(7.5), 500.0).mono())
+                            .color(theme::text_secondary()),
+                    ),
+            )
+            .child(
+                text(time_label)
+                    .font(TextStyle::new((badge_size * 0.92).max(7.5), 500.0).mono())
+                    .color(theme::text_secondary()),
+            )
+            .child(el().grow(1.0))
+            .child(
+                el()
+                    .key(format!("media_mute_{}", node.id.as_str()))
+                    .px(4.0 * zoom)
+                    .py(2.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_control())
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.toggle_media_mute(&mute_id);
+                    })
+                    .child(
+                        text(if muted { "🔇" } else { "🔊" })
+                            .font(TextStyle::new(badge_size, 500.0))
+                            .color(theme::text_secondary()),
+                    ),
+            )
+            .child(
+                el()
+                    .key(format!("media_rate_{}", node.id.as_str()))
+                    .px(4.0 * zoom)
+                    .py(2.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_control())
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.cycle_media_rate(&rate_id);
+                    })
+                    .child(
+                        text(format!("{:.2}x", rate))
+                            .font(TextStyle::new((badge_size * 0.9).max(7.5), 500.0).mono())
+                            .color(theme::text_secondary()),
+                    ),
+            )
+            .child(
+                el()
+                    .key(format!("media_mark_{}", node.id.as_str()))
+                    .px(5.0 * zoom)
+                    .py(2.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_control())
+                    .border(1.0, theme::border_subtle())
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.mark_current_media_timestamp(&mark_id);
+                    })
+                    .child(
+                        text("+ TS")
+                            .font(TextStyle::new(badge_size, 600.0).mono())
+                            .color(theme::text_primary()),
+                    ),
+            );
+
+        if node
+            .meta
+            .media_url
+            .as_deref()
+            .is_some_and(|u| !u.trim().is_empty())
+        {
+            let ext_id = node.id.clone();
+            controls = controls.child(
+                el()
+                    .key(format!("media_open_url_{}", node.id.as_str()))
+                    .px(4.0 * zoom)
+                    .py(2.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_control())
+                    .border(1.0, theme::border_subtle())
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                        s.jump_to_media_timestamp(&ext_id, 0.0, tx);
+                    })
+                    .child(
+                        text("↗")
+                            .font(TextStyle::new(badge_size, 600.0))
+                            .color(theme::text_secondary()),
+                    ),
+            );
+        }
+        body = body.child(controls);
+    } else if let Some(url) = node
+        .meta
+        .media_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
+        if AppState::media_uses_iframe(url) {
+            body = body.child(render_iframe_embed_slot(
+                s,
+                node,
+                url,
+                148.0,
+                badge_size,
+                zoom,
+                accent,
+            ));
+        } else {
+            let plat = media_helper::classify_media_url(url);
+            let jump_id = node.id.clone();
+            let frame = col()
+                .w_full()
+                .grow(1.0)
+                .min_h(80.0 * zoom)
+                .padding(8.0 * zoom)
+                .gap(5.0 * zoom)
+                .radius(5.0 * zoom)
+                .fill(theme::bg_input())
+                .border(1.0, theme::border_subtle())
+                .child(
+                    row()
+                        .w_full()
+                        .center_y()
+                        .gap(6.0 * zoom)
+                        .child(
+                            text(plat.label())
+                                .font(TextStyle::new(badge_size, 600.0).mono())
+                                .color(accent),
+                        )
+                        .child(el().grow(1.0))
+                        .child(
+                            text(url)
+                                .font(TextStyle::new(badge_size, 400.0))
+                                .color(theme::text_muted())
+                                .truncate(),
+                        ),
+                )
+                .child(el().grow(1.0))
+                .child(
+                    row()
+                        .w_full()
+                        .center_y()
+                        .pr(12.0 * zoom)
+                        .child(el().grow(1.0))
+                        .child(
+                            el()
+                                .key(format!("media_open_url_{}", node.id.as_str()))
+                                .px(7.0 * zoom)
+                                .py(3.0 * zoom)
+                                .radius(4.0 * zoom)
+                                .fill(theme::bg_control())
+                                .border(1.0, theme::border_subtle())
+                                .hover(theme::hover_subtle())
+                                .cursor(Cursor::Pointer)
+                                .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                                    s.open_media_external_url(&jump_id, 0.0, tx);
+                                })
+                                .child(
+                                    text(i18n::t(TextKey::MediaOpenLink))
+                                        .font(TextStyle::new(badge_size, 500.0))
+                                        .color(theme::text_primary()),
+                                ),
+                        ),
+                );
+            body = body.child(frame);
+        }
+    } else {
+        body = body.child(
+            col()
+                .w_full()
+                .grow(1.0)
+                .center()
+                .gap(6.0 * zoom)
+                .child(
+                    el()
+                        .key(format!("btn_card_ingest_media_{}", node.id.as_str()))
+                        .px(9.0 * zoom)
+                        .py(5.0 * zoom)
+                        .radius(5.0 * zoom)
+                        .fill(theme::bg_control())
+                        .border(1.0, theme::border_default())
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press_tx(move |s_ref: &mut AppState, tx: &mut Tx| {
+                            s_ref.select_node(pick_id.clone(), false);
+                            let opts = FileDialogOptions {
+                                title: i18n::t(TextKey::MediaIngestFile).to_string(),
+                                ..Default::default()
+                            }
+                            .filter(
+                                "Media",
+                                &["mp4", "mov", "m4v", "webm", "mkv", "mp3", "wav", "m4a", "flac", "ogg"],
+                            );
+                            let nid = pick_id.clone();
+                            tx.open_file(opts, move |s: &mut AppState, res, _| {
+                                if let Ok(Some(path)) = res {
+                                    s.ingest_media_into_node(&nid, &path);
+                                }
+                            });
+                        })
+                        .child(
+                            text(format!("+ {}", i18n::t(TextKey::MediaIngestFile)))
+                                .font(TextStyle::new(body_size.clamp(9.0, 13.0), 600.0))
+                                .color(theme::text_primary()),
+                        ),
+                ),
+        );
+    }
+
+    if let Some(strip) = render_card_timestamps_strip(node, badge_size, zoom) {
+        body = body.child(strip);
+    }
+    body
+}
+
+fn render_audio_card_body(
+    s: &AppState,
+    node: &Node,
+    body_size: f32,
+    badge_size: f32,
+    zoom: f32,
+) -> El {
+    let click_id = node.id.clone();
+    let pick_id = node.id.clone();
+    let play_id = node.id.clone();
+    let mark_id = node.id.clone();
+    let scrub_id = node.id.clone();
+    let cc_toggle_id = node.id.clone();
+    let cc_auto_id = node.id.clone();
+    let accent = theme::kind_accent(NodeKind::Audio);
+    let (node_w, _) = crate::state::node_world_size(node);
+    let track_w = (node_w * zoom - 28.0 * zoom).max(60.0);
+    let has_subtitles = !node.meta.subtitles.is_empty()
+        || node
+            .meta
+            .transcript_text
+            .as_deref()
+            .is_some_and(|t| !t.trim().is_empty());
+    let mut current_secs: Option<f64> = None;
+
+    let mut body = col()
+        .key(format!("node_body_{}", node.id.as_str()))
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .clip_soft(0.0)
+        .px(9.0 * zoom)
+        .py(7.0 * zoom)
+        .gap(6.0 * zoom)
+        .on_press(move |s: &mut AppState| {
+            s.select_node(click_id.clone(), false);
+            if !s.inspector_popped_out {
+                s.inspector_open = true;
+            }
+            s.ai_panel_open = false;
+        });
+
+    if let Some(player) = s.media_player_for(&node.id) {
+        let playing = player.is_playing();
+        let dur = player.duration().unwrap_or(0.0);
+        let cur = player.time();
+        current_secs = Some(cur);
+        let frac = if dur > 0.0 {
+            (cur / dur).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
+        let time_label = if dur > 0.0 {
+            format!(
+                "{} / {}",
+                media_helper::format_timestamp(cur),
+                media_helper::format_timestamp(dur)
+            )
+        } else {
+            media_helper::format_timestamp(cur)
+        };
+        let mut ctrl_row = row()
+            .w_full()
+            .center_y()
+            .gap(6.0 * zoom)
+            .pr(14.0 * zoom)
+            .child(
+                el()
+                    .key(format!("media_play_{}", node.id.as_str()))
+                    .px(7.0 * zoom)
+                    .py(3.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_control())
+                    .border(1.0, theme::border_default())
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.toggle_media_play(&play_id);
+                    })
+                    .child(
+                        text(if playing { "⏸" } else { "▶" })
+                            .font(TextStyle::new(badge_size, 600.0))
+                            .color(accent),
+                    ),
+            )
+            .child(
+                text(time_label)
+                    .font(TextStyle::new((badge_size * 0.94).max(7.5), 500.0).mono())
+                    .color(theme::text_secondary()),
+            )
+            .child(el().grow(1.0));
+        if has_subtitles {
+            ctrl_row = ctrl_row.child(
+                el()
+                    .key(format!("media_cc_toggle_{}", node.id.as_str()))
+                    .px(5.0 * zoom)
+                    .py(2.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .fill(if node.meta.show_subtitles_on_card {
+                        accent.alpha(0.18)
+                    } else {
+                        theme::bg_control()
+                    })
+                    .border(
+                        1.0,
+                        if node.meta.show_subtitles_on_card {
+                            accent.alpha(0.55)
+                        } else {
+                            theme::border_subtle()
+                        },
+                    )
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.toggle_audio_subtitles_on_card(&cc_toggle_id);
+                    })
+                    .child(
+                        text("CC")
+                            .font(TextStyle::new((badge_size * 0.9).max(7.5), 600.0).mono())
+                            .color(if node.meta.show_subtitles_on_card {
+                                accent
+                            } else {
+                                theme::text_muted()
+                            }),
+                    ),
+            );
+        } else {
+            let sub_pending = s.audio_subtitle_pending.contains(&node.id);
+            ctrl_row = ctrl_row.child(
+                el()
+                    .key(format!("media_auto_sub_{}", node.id.as_str()))
+                    .px(5.0 * zoom)
+                    .py(2.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_control())
+                    .border(1.0, theme::border_subtle())
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.generate_audio_subtitles(&cc_auto_id);
+                    })
+                    .child(
+                        text(if sub_pending { "…" } else { "✦ CC" })
+                            .font(TextStyle::new((badge_size * 0.88).max(7.0), 500.0).mono())
+                            .color(theme::text_secondary()),
+                    ),
+            );
+        }
+        ctrl_row = ctrl_row.child(
+            el()
+                .key(format!("media_mark_{}", node.id.as_str()))
+                .px(5.0 * zoom)
+                .py(2.0 * zoom)
+                .radius(4.0 * zoom)
+                .fill(theme::bg_control())
+                .border(1.0, theme::border_subtle())
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.mark_current_media_timestamp(&mark_id);
+                })
+                .child(
+                    text("+ TS")
+                        .font(TextStyle::new(badge_size, 600.0).mono())
+                        .color(theme::text_primary()),
+                ),
+        );
+        body = body.child(ctrl_row).child(
+            el()
+                .key(format!("media_scrub_{}", node.id.as_str()))
+                .w(track_w)
+                .h((4.5 * zoom).clamp(3.0, 6.5))
+                .radius(3.0)
+                .fill(theme::border_subtle())
+                .cursor(Cursor::Pointer)
+                .on_drag(move |s: &mut AppState, d, tx| match d.phase {
+                    Phase::Down | Phase::Move => {
+                        let ratio = (d.x / d.w.max(1.0)).clamp(0.0, 1.0) as f64;
+                        if let Some(dur_val) = s.media_player_for(&scrub_id).and_then(|p| p.duration()) {
+                            if dur_val > 0.0 {
+                                s.seek_media(&scrub_id, ratio * dur_val);
+                                tx.instant();
+                            }
+                        }
+                    }
+                    Phase::Up => {}
+                })
+                .child(
+                    el()
+                        .w((track_w * frac).clamp(0.0, track_w))
+                        .h_full()
+                        .radius(3.0)
+                        .fill(accent),
+                ),
+        );
+    } else if let Some(url) = node
+        .meta
+        .media_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
+        if AppState::media_uses_iframe(url) {
+            body = body.child(render_iframe_embed_slot(
+                s,
+                node,
+                url,
+                84.0,
+                badge_size,
+                zoom,
+                accent,
+            ));
+        } else {
+            let plat = media_helper::classify_media_url(url);
+            let jump_id = node.id.clone();
+            body = body.child(
+                row()
+                    .w_full()
+                    .center_y()
+                    .gap(6.0 * zoom)
+                    .padding(6.0 * zoom)
+                    .pr(16.0 * zoom)
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_input())
+                    .border(1.0, theme::border_subtle())
+                    .child(
+                        text(plat.label())
+                            .font(TextStyle::new(badge_size, 600.0).mono())
+                            .color(accent),
+                    )
+                    .child(el().grow(1.0))
+                    .child(
+                        el()
+                            .key(format!("media_open_url_{}", node.id.as_str()))
+                            .px(7.0 * zoom)
+                            .py(2.5 * zoom)
+                            .radius(4.0 * zoom)
+                            .fill(theme::bg_control())
+                            .border(1.0, theme::border_subtle())
+                            .hover(theme::hover_subtle())
+                            .cursor(Cursor::Pointer)
+                            .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                                s.open_media_external_url(&jump_id, 0.0, tx);
+                            })
+                            .child(
+                                text(i18n::t(TextKey::MediaOpenLink))
+                                    .font(TextStyle::new(badge_size, 500.0))
+                                    .color(theme::text_primary()),
+                            ),
+                    ),
+            );
+        }
+    } else {
+        body = body.child(
+            col()
+                .w_full()
+                .grow(1.0)
+                .center()
+                .child(
+                    el()
+                        .key(format!("btn_card_ingest_media_{}", node.id.as_str()))
+                        .px(9.0 * zoom)
+                        .py(4.5 * zoom)
+                        .radius(5.0 * zoom)
+                        .fill(theme::bg_control())
+                        .border(1.0, theme::border_default())
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press_tx(move |s_ref: &mut AppState, tx: &mut Tx| {
+                            s_ref.select_node(pick_id.clone(), false);
+                            let opts = FileDialogOptions {
+                                title: i18n::t(TextKey::MediaIngestFile).to_string(),
+                                ..Default::default()
+                            }
+                            .filter("Audio", &["mp3", "wav", "m4a", "flac", "ogg", "aac", "opus"]);
+                            let nid = pick_id.clone();
+                            tx.open_file(opts, move |s: &mut AppState, res, _| {
+                                if let Ok(Some(path)) = res {
+                                    s.ingest_media_into_node(&nid, &path);
+                                }
+                            });
+                        })
+                        .child(
+                            text(format!("+ {}", i18n::t(TextKey::MediaIngestFile)))
+                                .font(TextStyle::new(body_size.clamp(9.0, 12.5), 600.0))
+                                .color(theme::text_primary()),
+                        ),
+                ),
+        );
+    }
+
+    if let Some(sub_box) =
+        render_audio_card_subtitle_box(s, node, current_secs, badge_size, zoom, accent)
+    {
+        body = body.child(sub_box);
+    }
+
+    if let Some(strip) = render_card_timestamps_strip(node, badge_size, zoom) {
+        body = body.child(strip);
+    }
+    body
+}
+
+fn render_drawing_card_body(
+    _s: &AppState,
+    node: &Node,
+    _body_size: f32,
+    badge_size: f32,
+    zoom: f32,
+) -> El {
+    let (node_w, node_h) = crate::state::node_world_size(node);
+    let has_ocr = node
+        .meta
+        .extracted_text
+        .as_deref()
+        .is_some_and(|t| !t.trim().is_empty());
+    let ocr_reserve = if has_ocr { 24.0 } else { 0.0 };
+    let pad_w = ((node_w - 16.0) * zoom).max(96.0 * zoom);
+    let pad_h = ((node_h - 48.0 - ocr_reserve) * zoom).max(96.0 * zoom);
+
+    let shape = build_drawing_shape(&node.meta.drawing_strokes, pad_w, pad_h, zoom);
+    let select_id = node.id.clone();
+
+    let mut pad = el()
+        .key(format!("drawing_pad_{}", node.id.as_str()))
+        .w(pad_w)
+        .h(pad_h)
+        .radius(5.0 * zoom)
+        .fill(theme::bg_input())
+        .border(1.0, theme::border_subtle())
+        .child(canvas(shape).absolute(0.0, 0.0).w_full().h_full());
+
+    if node.meta.drawing_strokes.is_empty() {
+        pad = pad.child(
+            el().absolute(0.0, 0.0).w_full().h_full().center().child(
+                text(i18n::t(TextKey::DrawingEmptyHint))
+                    .font(TextStyle::new(badge_size, 400.0))
+                    .color(theme::text_muted()),
+            ),
+        );
+    }
+
+    let mut body = col()
+        .key(format!("node_body_{}", node.id.as_str()))
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .clip_soft(0.0)
+        .px(8.0 * zoom)
+        .py(6.0 * zoom)
+        .gap(4.0 * zoom)
+        .on_press(move |s: &mut AppState| {
+            s.select_node(select_id.clone(), false);
+            if !s.inspector_popped_out {
+                s.inspector_open = true;
+            }
+            s.ai_panel_open = false;
+        })
+        .child(pad);
+
+    if let Some(txt) = node
+        .meta
+        .extracted_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        body = body.child(
+            el().w_full()
+                .px(6.0 * zoom)
+                .py(2.0 * zoom)
+                .radius(4.0 * zoom)
+                .fill(theme::bg_input())
+                .border(1.0, theme::border_subtle())
+                .child(
+                    text(txt)
+                        .font(TextStyle::new((badge_size * 0.92).max(7.5), 500.0))
+                        .color(theme::text_primary())
+                        .truncate(),
+                ),
+        );
+    }
+
+    body
+}
+
+fn render_calendar_card_body(
+    s: &AppState,
+    node: &Node,
+    body_size: f32,
+    badge_size: f32,
+    zoom: f32,
+) -> El {
+    let click_id = node.id.clone();
+    let prev_id = node.id.clone();
+    let next_id = node.id.clone();
+    let wk_prev_id = node.id.clone();
+    let wk_next_id = node.id.clone();
+    let mode_m_id = node.id.clone();
+    let mode_w_id = node.id.clone();
+    let accent = theme::kind_accent(NodeKind::Calendar);
+    let (today_y, today_m, today_d) = media_helper::today_ymd();
+    let today_str = media_helper::format_ymd(today_y, today_m, today_d);
+    let cy = node.meta.calendar_year.unwrap_or(today_y);
+    let cm = node.meta.calendar_month.unwrap_or(today_m);
+    let selected_date = s
+        .selected_calendar_date
+        .get(&node.id)
+        .cloned()
+        .unwrap_or_else(|| today_str.clone());
+    let mode = node.meta.calendar_view_mode;
+
+    let mut body = col()
+        .key(format!("node_body_{}", node.id.as_str()))
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .clip_soft(0.0)
+        .px(8.0 * zoom)
+        .py(6.0 * zoom)
+        .gap(5.0 * zoom)
+        .on_press(move |s: &mut AppState| {
+            s.select_node(click_id.clone(), false);
+            if !s.inspector_popped_out {
+                s.inspector_open = true;
+            }
+            s.ai_panel_open = false;
+        });
+
+    let mode_segmented = row()
+        .center_y()
+        .padding(1.5 * zoom)
+        .gap(2.0 * zoom)
+        .radius(4.0 * zoom)
+        .fill(theme::bg_input())
+        .border(1.0, theme::border_subtle())
+        .child(
+            el()
+                .key(format!("cal_mode_month_{}", node.id.as_str()))
+                .px(6.0 * zoom)
+                .py(1.5 * zoom)
+                .radius(3.0 * zoom)
+                .fill(if mode == CalendarViewMode::Month {
+                    theme::bg_control()
+                } else {
+                    Color::TRANSPARENT
+                })
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.set_calendar_view_mode(&mode_m_id, CalendarViewMode::Month);
+                })
+                .child(
+                    text(i18n::t(TextKey::CalModeMonth))
+                        .font(TextStyle::new((badge_size * 0.9).max(7.5), 600.0))
+                        .color(if mode == CalendarViewMode::Month {
+                            theme::text_primary()
+                        } else {
+                            theme::text_muted()
+                        }),
+                ),
+        )
+        .child(
+            el()
+                .key(format!("cal_mode_week_{}", node.id.as_str()))
+                .px(6.0 * zoom)
+                .py(1.5 * zoom)
+                .radius(3.0 * zoom)
+                .fill(if mode == CalendarViewMode::Week {
+                    theme::bg_control()
+                } else {
+                    Color::TRANSPARENT
+                })
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.set_calendar_view_mode(&mode_w_id, CalendarViewMode::Week);
+                })
+                .child(
+                    text(i18n::t(TextKey::CalModeWeek))
+                        .font(TextStyle::new((badge_size * 0.9).max(7.5), 600.0))
+                        .color(if mode == CalendarViewMode::Week {
+                            theme::text_primary()
+                        } else {
+                            theme::text_muted()
+                        }),
+                ),
+        );
+
+    if mode == CalendarViewMode::Week {
+        let anchor_mon = node
+            .meta
+            .calendar_week_start
+            .clone()
+            .unwrap_or_else(|| media_helper::monday_of_week(&selected_date));
+        let week = media_helper::week_dates(&anchor_mon);
+        let (sy, sm, sd) = media_helper::parse_ymd(&week[0].0).unwrap_or((cy, cm, 1));
+        let (ey, em, ed) = media_helper::parse_ymd(&week[6].0).unwrap_or((sy, sm, sd));
+        let range_label = if sy == ey && sm == em {
+            format!("{} {} – {}", i18n::month_short(sm), sd, ed)
+        } else {
+            format!(
+                "{} {} – {} {}",
+                i18n::month_short(sm),
+                sd,
+                i18n::month_short(em),
+                ed
+            )
+        };
+
+        // Combined single top bar: week range nav + segmented Month | Week switch
+        body = body.child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(4.0 * zoom)
+                .child(
+                    el()
+                        .key(format!("cal_week_prev_{}", node.id.as_str()))
+                        .px(5.0 * zoom)
+                        .py(1.5 * zoom)
+                        .radius(4.0)
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.calendar_step_week(&wk_prev_id, -1);
+                        })
+                        .child(
+                            text("‹")
+                                .font(TextStyle::new(body_size, 600.0))
+                                .color(theme::text_secondary()),
+                        ),
+                )
+                .child(
+                    text(range_label)
+                        .font(TextStyle::new(badge_size.max(8.5), 600.0))
+                        .color(theme::text_primary()),
+                )
+                .child(
+                    el()
+                        .key(format!("cal_week_next_{}", node.id.as_str()))
+                        .px(5.0 * zoom)
+                        .py(1.5 * zoom)
+                        .radius(4.0)
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.calendar_step_week(&wk_next_id, 1);
+                        })
+                        .child(
+                            text("›")
+                                .font(TextStyle::new(body_size, 600.0))
+                                .color(theme::text_secondary()),
+                        ),
+                )
+                .child(el().grow(1.0))
+                .child(mode_segmented),
+        );
+
+        let mut week_row = row().w_full().grow(1.0).min_h(0.0).gap(5.0 * zoom);
+        for (wd_idx, (date_str, _wd_name, day_num)) in week.into_iter().enumerate() {
+            let is_sel = selected_date == date_str;
+            let is_today = today_str == date_str;
+            let day_note = node
+                .meta
+                .calendar_day_notes
+                .get(&date_str)
+                .map(String::as_str)
+                .unwrap_or("")
+                .trim();
+            let day_events: Vec<(usize, &studynodes_graph::model::CalendarEvent)> = node
+                .meta
+                .calendar_events
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.date == date_str)
+                .collect();
+            let nid_pick = node.id.clone();
+            let date_pick = date_str.clone();
+            let focus_key = format!("cal_card_note_input_{}", node.id.as_str());
+
+            let mut day_col = col()
+                .key(format!("cal_week_day_{}_{}", node.id.as_str(), date_str))
+                .grow(1.0)
+                .h_full()
+                .min_h(0.0)
+                .clip_soft(0.0)
+                .padding(5.0 * zoom)
+                .gap(3.0 * zoom)
+                .radius(5.0 * zoom)
+                .fill(if is_sel {
+                    theme::bg_control()
+                } else {
+                    theme::bg_input()
+                })
+                .border(
+                    1.0,
+                    if is_sel {
+                        accent
+                    } else if is_today {
+                        theme::border_default()
+                    } else {
+                        theme::border_subtle()
+                    },
+                )
+                .cursor(Cursor::Pointer)
+                .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                    s.select_node(nid_pick.clone(), false);
+                    s.calendar_select_date(&nid_pick, date_pick.clone());
+                    tx.focus_when_shown(focus_key.clone(), false);
+                })
+                .child(
+                    row()
+                        .w_full()
+                        .center_y()
+                        .child(
+                            text(i18n::weekday_short(wd_idx))
+                                .font(TextStyle::new((badge_size * 0.88).max(7.0), 500.0).mono())
+                                .color(theme::text_muted()),
+                        )
+                        .child(el().grow(1.0))
+                        .child(
+                            text(format!("{}", day_num))
+                                .font(TextStyle::new((badge_size * 0.96).max(8.0), 600.0).mono())
+                                .color(if is_sel || is_today {
+                                    accent
+                                } else {
+                                    theme::text_primary()
+                                }),
+                        ),
+                );
+
+            for (idx, ev) in day_events.into_iter().take(2) {
+                let nid_ev = node.id.clone();
+                let ev_id = ev.id.clone();
+                day_col = day_col.child(
+                    el()
+                        .key(format!("cal_wk_evt_{}_{}", node.id.as_str(), idx))
+                        .w_full()
+                        .py(1.0 * zoom)
+                        .radius(3.0 * zoom)
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.toggle_calendar_event(&nid_ev, &ev_id);
+                        })
+                        .child(
+                            text(format!(
+                                "{} {}",
+                                if ev.completed { "✓" } else { "•" },
+                                ev.title
+                            ))
+                            .font(TextStyle::new((badge_size * 0.85).max(7.0), 500.0))
+                            .color(if ev.completed {
+                                theme::text_muted()
+                            } else {
+                                accent
+                            })
+                            .truncate(),
+                        ),
+                );
+            }
+
+            if !day_note.is_empty() {
+                day_col = day_col.child(
+                    text(day_note)
+                        .font(TextStyle::new((badge_size * 0.86).max(7.0), 400.0))
+                        .color(theme::text_secondary())
+                        .w_full()
+                        .wrap(),
+                );
+            }
+
+            week_row = week_row.child(day_col);
+        }
+        body = body.child(week_row);
+
+        // Constant-height compact quick-note bar so squared day cards stay uniform
+        let nid_edit = node.id.clone();
+        let nid_focus = node.id.clone();
+        let focus_note_key = format!("cal_card_note_input_{}", node.id.as_str());
+        let bar_h = (25.0 * zoom).clamp(18.0, 32.0);
+        if s.selected_nodes.contains(&node.id) {
+            body = body.child(
+                row()
+                    .w_full()
+                    .h(bar_h)
+                    .px(7.0 * zoom)
+                    .gap(6.0 * zoom)
+                    .center_y()
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_input())
+                    .border(1.0, theme::border_default())
+                    .child(
+                        text(selected_date.clone())
+                            .font(TextStyle::new((badge_size * 0.88).max(7.5), 600.0).mono())
+                            .color(theme::text_muted()),
+                    )
+                    .child(
+                        text_input(
+                            &s.cal_day_note_edit,
+                            TextStyle::new((badge_size * 0.96).max(8.5), 400.0),
+                        )
+                        .key(focus_note_key)
+                        .label("Day note")
+                        .single_line()
+                        .grow(1.0)
+                        .color(theme::text_primary())
+                        .caret(accent, accent.alpha(0.25))
+                        .placeholder(i18n::t(TextKey::CalDayNotePlaceholder), theme::text_muted())
+                        .on_edit(|s: &mut AppState| &mut s.cal_day_note_edit)
+                        .on_input_change(move |s: &mut AppState, _| {
+                            s.sync_calendar_day_note_edit(&nid_edit);
+                        }),
+                    ),
+            );
+        } else {
+            let preview_note = node
+                .meta
+                .calendar_day_notes
+                .get(&selected_date)
+                .map(|t| t.trim())
+                .filter(|t| !t.is_empty());
+            let sel_date_pick = selected_date.clone();
+            body = body.child(
+                row()
+                    .w_full()
+                    .h(bar_h)
+                    .px(7.0 * zoom)
+                    .gap(6.0 * zoom)
+                    .center_y()
+                    .radius(4.0 * zoom)
+                    .fill(theme::bg_input())
+                    .border(1.0, theme::border_subtle())
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                        s.select_node(nid_focus.clone(), false);
+                        s.calendar_select_date(&nid_focus, sel_date_pick.clone());
+                        tx.focus_when_shown(focus_note_key.clone(), false);
+                    })
+                    .child(
+                        text(selected_date)
+                            .font(TextStyle::new((badge_size * 0.88).max(7.5), 600.0).mono())
+                            .color(theme::text_muted()),
+                    )
+                    .child(
+                        text(preview_note.unwrap_or_else(|| i18n::t(TextKey::CalDayNotePlaceholder)))
+                            .font(TextStyle::new((badge_size * 0.92).max(8.0), 400.0))
+                            .color(if preview_note.is_some() {
+                                theme::text_secondary()
+                            } else {
+                                theme::text_muted()
+                            })
+                            .truncate(),
+                    ),
+            );
+        }
+        return body;
+    }
+
+    // Combined single Month header row: nav + segmented Month | Week toggle
+    body = body.child(
+        row()
+            .w_full()
+            .center_y()
+            .gap(4.0 * zoom)
+            .child(
+                el()
+                    .key(format!("cal_prev_{}", node.id.as_str()))
+                    .px(5.0 * zoom)
+                    .py(1.5 * zoom)
+                    .radius(4.0)
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.calendar_step_month(&prev_id, -1);
+                    })
+                    .child(
+                        text("‹")
+                            .font(TextStyle::new(body_size, 600.0))
+                            .color(theme::text_secondary()),
+                    ),
+            )
+            .child(
+                text(format!("{} {}", i18n::month_short(cm), cy))
+                    .font(TextStyle::new(badge_size.max(8.5), 600.0))
+                    .color(theme::text_primary()),
+            )
+            .child(
+                el()
+                    .key(format!("cal_next_{}", node.id.as_str()))
+                    .px(5.0 * zoom)
+                    .py(1.5 * zoom)
+                    .radius(4.0)
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.calendar_step_month(&next_id, 1);
+                    })
+                    .child(
+                        text("›")
+                            .font(TextStyle::new(body_size, 600.0))
+                            .color(theme::text_secondary()),
+                    ),
+            )
+            .child(el().grow(1.0))
+            .child(mode_segmented),
+    );
+
+    // Weekday row
+    let mut wk_row = row().w_full().gap(2.0 * zoom);
+    for wd_idx in 0..7 {
+        wk_row = wk_row.child(
+            el().grow(1.0).center().child(
+                text(i18n::weekday_narrow(wd_idx))
+                    .font(TextStyle::new((badge_size * 0.85).clamp(7.0, 10.5), 600.0).mono())
+                    .color(theme::text_muted()),
+            ),
+        );
+    }
+    body = body.child(wk_row);
+
+    // Day grid
+    let offset = media_helper::weekday_of_first(cy, cm);
+    let dim = media_helper::days_in_month(cy, cm);
+    let total_cells = offset + dim;
+    let num_rows = (total_cells + 6) / 7;
+    let mut grid = col().w_full().gap(2.0 * zoom);
+    for r in 0..num_rows {
+        let mut r_el = row().w_full().gap(2.0 * zoom);
+        for c in 0..7 {
+            let slot = r * 7 + c;
+            if slot < offset || slot >= offset + dim {
+                r_el = r_el.child(el().grow(1.0).h((19.0 * zoom).clamp(11.0, 26.0)));
+            } else {
+                let day = slot - offset + 1;
+                let date_str = media_helper::format_ymd(cy, cm, day);
+                let has_evt = node.meta.calendar_events.iter().any(|e| e.date == date_str);
+                let has_note = node
+                    .meta
+                    .calendar_day_notes
+                    .get(&date_str)
+                    .is_some_and(|t| !t.trim().is_empty());
+                let has_mark = has_evt || has_note;
+                let is_sel = selected_date == date_str;
+                let is_today = today_str == date_str;
+                let nid = node.id.clone();
+                let date_pick = date_str.clone();
+                r_el = r_el.child(
+                    el()
+                        .key(format!("cal_day_{}_{}", node.id.as_str(), date_str))
+                        .grow(1.0)
+                        .h((19.0 * zoom).clamp(11.0, 26.0))
+                        .radius(4.0 * zoom)
+                        .fill(if is_sel {
+                            theme::bg_control()
+                        } else if has_mark {
+                            accent.alpha(0.12)
+                        } else {
+                            Color::TRANSPARENT
+                        })
+                        .border(
+                            if is_sel || is_today { 1.0 } else { 0.0 },
+                            if is_sel {
+                                accent
+                            } else if is_today {
+                                theme::border_default()
+                            } else {
+                                Color::TRANSPARENT
+                            },
+                        )
+                        .hover(theme::hover_subtle())
+                        .center()
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.calendar_select_date(&nid, date_pick.clone());
+                        })
+                        .child(
+                            text(format!("{}", day))
+                                .font(TextStyle::new((badge_size * 0.9).clamp(7.5, 11.0), 500.0).mono())
+                                .color(if is_sel || has_mark {
+                                    accent
+                                } else {
+                                    theme::text_secondary()
+                                }),
+                        ),
+                );
+            }
+        }
+        grid = grid.child(r_el);
+    }
+    body = body.child(grid);
+
+    if let Some(note_txt) = node
+        .meta
+        .calendar_day_notes
+        .get(&selected_date)
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+    {
+        body = body.child(
+            el()
+                .w_full()
+                .px(6.0 * zoom)
+                .py(2.5 * zoom)
+                .radius(4.0 * zoom)
+                .fill(theme::bg_input())
+                .border(1.0, theme::border_subtle())
+                .child(
+                    text(note_txt)
+                        .font(TextStyle::new((badge_size * 0.9).max(7.5), 400.0))
+                        .color(theme::text_secondary())
+                        .truncate(),
+                ),
+        );
+    }
+
+    // Compact events preview (selected day first, else upcoming)
+    let mut matching: Vec<(usize, &studynodes_graph::model::CalendarEvent)> = node
+        .meta
+        .calendar_events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.date == selected_date)
+        .collect();
+    if matching.is_empty() {
+        matching = node.meta.calendar_events.iter().enumerate().collect();
+    }
+    for (idx, ev) in matching.into_iter().take(2) {
+        let nid = node.id.clone();
+        let ev_id = ev.id.clone();
+        let time_prefix = ev
+            .time
+            .as_deref()
+            .filter(|t| !t.is_empty())
+            .map(|t| format!("{} ", t))
+            .unwrap_or_default();
+        body = body.child(
+            row()
+                .key(format!("cal_evt_toggle_{}_{}", node.id.as_str(), idx))
+                .w_full()
+                .px(6.0 * zoom)
+                .py(2.0 * zoom)
+                .gap(5.0 * zoom)
+                .center_y()
+                .radius(4.0 * zoom)
+                .fill(theme::bg_control())
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.toggle_calendar_event(&nid, &ev_id);
+                })
+                .child(
+                    text(if ev.completed { "☑" } else { "☐" })
+                        .font(TextStyle::new(badge_size, 600.0))
+                        .color(if ev.completed {
+                            theme::text_muted()
+                        } else {
+                            accent
+                        }),
+                )
+                .child(
+                    text(format!("{}{} · {}", time_prefix, ev.date, ev.title))
+                        .font(TextStyle::new(badge_size, 400.0))
+                        .color(if ev.completed {
+                            theme::text_muted()
+                        } else {
+                            theme::text_primary()
+                        })
+                        .truncate(),
+                ),
+        );
+    }
+
+    body
 }

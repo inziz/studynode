@@ -1,17 +1,27 @@
+use std::hash::{Hash, Hasher};
+
 use rune::{
-    Color, Cursor, Cx, El, FileDialogOptions, Phase, ScrollSpec, SurfaceFit, TextStyle, Tx, col,
-    el, row, text, text_input,
+    Color, Cursor, Cx, El, FileDialogOptions, Phase, ScrollSpec, SurfaceFit, TextStyle, Tx,
+    canvas, col, el, memo, row, text, text_input,
 };
 use rune_kit::Markdown;
-use studynodes_graph::model::{EdgeRelation, Node, NodeKind};
+use studynodes_graph::model::{CalendarViewMode, EdgeRelation, Node, NodeId, NodeKind};
 use studynodes_vision::{OcrEnginePreference, OcrMode, SUPPORTED_LANGUAGES};
 
-use crate::doc_reader::{self, DocFormat, ReaderMode};
+use crate::doc_reader::{self, DocFormat, PdfLayoutMode, ReaderMode};
 use crate::formula_math;
-use crate::state::{AppState, DocViewTab};
+use crate::i18n::{self, TextKey};
+use crate::media_helper;
+use crate::state::{ActivePdfState, AppState, DocViewTab};
 use crate::theme;
 
 const SHEET_TITLE: TextStyle = TextStyle::new(19.0, 600.0).lh(24.0);
+
+fn hash_str(s: &str) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
 
 #[inline]
 fn hairline() -> El {
@@ -20,6 +30,825 @@ fn hairline() -> El {
 
 fn subtle_tag(label: &str, color: Color) -> El {
     text(label).font(theme::SECTION_LABEL).color(color)
+}
+
+/// Extract byte ranges of `**...**` spans (outside fenced code blocks) so `Markdown::highlights`
+/// paints a subtle accent highlight behind bolded terms in AI Chat messages.
+fn extract_bold_highlight_ranges(src: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = src.as_bytes();
+    let len = bytes.len();
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    let mut in_fence = false;
+
+    while i < len {
+        if i + 3 <= len && &bytes[i..i + 3] == b"```" {
+            in_fence = !in_fence;
+            i += 3;
+            continue;
+        }
+        if !in_fence && i + 4 <= len && bytes[i] == b'*' && bytes[i + 1] == b'*' {
+            let content_start = i + 2;
+            if content_start < len && !bytes[content_start].is_ascii_whitespace() {
+                let mut end = content_start;
+                let mut found = None;
+                while end + 1 < len {
+                    if bytes[end] == b'\n' {
+                        break;
+                    }
+                    if bytes[end] == b'*' && bytes[end + 1] == b'*' {
+                        if end > content_start && !bytes[end - 1].is_ascii_whitespace() {
+                            found = Some(end);
+                        }
+                        break;
+                    }
+                    end += 1;
+                }
+                if let Some(close_pos) = found {
+                    ranges.push(content_start..close_pos);
+                    i = close_pos + 2;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    ranges
+}
+
+fn render_chat_markdown(key_id: &str, md_text: &str) -> El {
+    let md_hash = hash_str(md_text);
+    let theme_id = theme::active_theme();
+    let md_owned = md_text.to_string();
+    let key_owned = key_id.to_string();
+    memo(key_id, (md_hash, theme_id), move || {
+        let bold_ranges = extract_bold_highlight_ranges(&md_owned);
+        Markdown::new(&md_owned)
+            .selectable(true)
+            .highlights(bold_ranges)
+            .render(&theme::chat_markdown_style())
+            .key(key_owned)
+    })
+}
+
+fn render_inline_chat_key_drawer(s: &AppState) -> El {
+    let has_custom = s.chat_has_custom_api_key();
+    col()
+        .key("ai_chat_key_drawer")
+        .w_full()
+        .px(16.0)
+        .py(12.0)
+        .gap(8.0)
+        .fill(theme::bg_card())
+        .border_sides([0.0, 0.0, 1.0, 0.0], theme::border_subtle())
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(6.0)
+                .child(subtle_tag(
+                    i18n::t(TextKey::SettingsChatAiSectionTitle),
+                    theme::accent_claude(),
+                ))
+                .child(el().grow(1.0))
+                .child(
+                    text(s.chat_provider_status_label())
+                        .font(theme::BADGE_TEXT)
+                        .color(if s.chat_api_configured() {
+                            theme::accent_claude()
+                        } else {
+                            theme::text_muted()
+                        }),
+                ),
+        )
+        .child(
+            el()
+                .w_full()
+                .px(8.0)
+                .py(6.0)
+                .radius(6.0)
+                .fill(theme::bg_input())
+                .border(1.0, theme::border_default())
+                .child(
+                    text_input(&s.chat_api_key_edit, theme::STATUS_TEXT)
+                        .key("input_inline_chat_api_key")
+                        .label("Custom Chat API Key")
+                        .single_line()
+                        .w_full()
+                        .color(theme::text_primary())
+                        .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                        .placeholder(
+                            "AIza... (Gemini) or sk-... (OpenAI / OpenRouter / DeepSeek)",
+                            theme::text_muted(),
+                        )
+                        .on_edit(|s: &mut AppState| &mut s.chat_api_key_edit)
+                        .on_submit(|s: &mut AppState, _| {
+                            s.save_chat_api_settings();
+                        }),
+                ),
+        )
+        .child(
+            row()
+                .w_full()
+                .gap(6.0)
+                .center_y()
+                .child(
+                    el()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .px(8.0)
+                        .py(5.0)
+                        .radius(6.0)
+                        .fill(theme::bg_input())
+                        .border(1.0, theme::border_subtle())
+                        .child(
+                            text_input(&s.chat_model_edit, theme::STATUS_TEXT)
+                                .key("input_inline_chat_model")
+                                .label("Custom Chat Model")
+                                .single_line()
+                                .w_full()
+                                .color(theme::text_primary())
+                                .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                                .placeholder(
+                                    "Model (optional, e.g. gemini-2.5-flash or gpt-4o-mini)",
+                                    theme::text_muted(),
+                                )
+                                .on_edit(|s: &mut AppState| &mut s.chat_model_edit)
+                                .on_submit(|s: &mut AppState, _| {
+                                    s.save_chat_api_settings();
+                                }),
+                        ),
+                )
+                .child(if has_custom || !s.chat_api_key_edit.text.trim().is_empty() {
+                    ghost_btn(
+                        "btn_inline_chat_key_clear",
+                        i18n::t(TextKey::ReaderClear),
+                        theme::text_muted(),
+                        |s| {
+                            s.chat_api_key_edit = rune::TextEdit::new("");
+                            s.chat_base_url_edit = rune::TextEdit::new("");
+                            s.chat_model_edit = rune::TextEdit::new("");
+                            s.save_chat_api_settings();
+                        },
+                    )
+                } else {
+                    el()
+                })
+                .child(ghost_btn(
+                    "btn_ai_chat_open_settings",
+                    i18n::t(TextKey::DashSettingsBtn),
+                    theme::text_secondary(),
+                    |s| {
+                        s.open_settings();
+                    },
+                ))
+                .child(
+                    el()
+                        .key("btn_inline_chat_key_save")
+                        .px(10.0)
+                        .py(5.0)
+                        .radius(6.0)
+                        .fill(theme::accent_claude())
+                        .hover(theme::accent_claude().alpha(0.86))
+                        .cursor(Cursor::Pointer)
+                        .on_press(|s: &mut AppState| {
+                            s.save_chat_api_settings();
+                        })
+                        .child(
+                            text(i18n::t(TextKey::ReaderSave))
+                                .font(theme::BADGE_TEXT)
+                                .color(Color::WHITE),
+                        ),
+                ),
+        )
+}
+
+fn render_dedicated_ai_chat_panel(s: &AppState, panel_width: f32) -> El {
+    let total_nodes = s
+        .graph
+        .nodes
+        .values()
+        .filter(|n| n.kind != NodeKind::Section)
+        .count();
+    let sel_count = s.selected_nodes.len();
+    let ctx_badge = if sel_count > 0 {
+        format!("{} selected · {}", sel_count, total_nodes)
+    } else {
+        format!("{} nodes", total_nodes)
+    };
+    let has_selection = !s.selected_nodes.is_empty() || s.selected_edge.is_some();
+    let has_custom_key = s.chat_has_custom_api_key();
+
+    // 1. Clean Top Header Bar
+    let mut topbar = row()
+        .key("ai_chat_topbar")
+        .w_full()
+        .h(44.0)
+        .px(16.0)
+        .gap(8.0)
+        .center_y()
+        .border_sides([0.0, 0.0, 1.0, 0.0], theme::border_subtle());
+
+    if has_selection {
+        topbar = topbar.child(
+            el()
+                .key("btn_back_from_ai")
+                .size(24.0, 24.0)
+                .radius(5.0)
+                .hover(theme::hover_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut AppState| {
+                    s.ai_panel_open = false;
+                })
+                .child(
+                    text("←")
+                        .font(theme::CONTROL_TEXT)
+                        .color(theme::text_secondary()),
+                ),
+        );
+    }
+
+    topbar = topbar
+        .child(
+            text("✦")
+                .font(theme::CONTROL_TEXT)
+                .color(theme::accent_claude()),
+        )
+        .child(
+            text(i18n::t(TextKey::AiChatPanelTitle))
+                .font(theme::PANEL_TITLE)
+                .color(theme::text_primary()),
+        )
+        .child(
+            el()
+                .px(6.0)
+                .py(2.0)
+                .radius(4.0)
+                .fill(theme::bg_card())
+                .border(1.0, theme::border_subtle())
+                .child(
+                    text(ctx_badge)
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_muted()),
+                ),
+        )
+        .child(el().grow(1.0))
+        .child(
+            el()
+                .key("btn_ai_chat_toggle_key_drawer")
+                .px(7.0)
+                .py(3.5)
+                .radius(5.0)
+                .fill(if s.ai_chat_key_drawer_open || has_custom_key {
+                    theme::accent_claude().alpha(0.14)
+                } else {
+                    Color::TRANSPARENT
+                })
+                .hover(theme::hover_subtle())
+                .border(
+                    1.0,
+                    if s.ai_chat_key_drawer_open || has_custom_key {
+                        theme::accent_claude().alpha(0.42)
+                    } else {
+                        theme::border_subtle()
+                    },
+                )
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut AppState| {
+                    s.ai_chat_key_drawer_open = !s.ai_chat_key_drawer_open;
+                    if s.ai_chat_key_drawer_open {
+                        s.chat_api_key_edit = rune::TextEdit::new(&s.reader_prefs.chat_api_key);
+                        s.chat_base_url_edit = rune::TextEdit::new(&s.reader_prefs.chat_base_url);
+                        s.chat_model_edit = rune::TextEdit::new(&s.reader_prefs.chat_model);
+                    }
+                })
+                .child(
+                    text(i18n::t(TextKey::AiChatCustomKeyBtn))
+                        .font(theme::BADGE_TEXT)
+                        .color(if s.ai_chat_key_drawer_open || has_custom_key {
+                            theme::accent_claude()
+                        } else {
+                            theme::text_secondary()
+                        }),
+                ),
+        );
+
+    if !s.ai_chat_messages.is_empty() {
+        topbar = topbar.child(ghost_btn(
+            "btn_ai_chat_clear",
+            i18n::t(TextKey::ReaderClear),
+            theme::text_muted(),
+            |s| {
+                s.clear_ai_chat();
+            },
+        ));
+    }
+
+    topbar = topbar.child(
+        el()
+            .key("btn_close_inspector")
+            .size(24.0, 24.0)
+            .radius(5.0)
+            .hover(theme::hover_subtle())
+            .press(theme::press_subtle())
+            .center()
+            .cursor(Cursor::Pointer)
+            .on_press(|s: &mut AppState| {
+                s.inspector_open = false;
+                s.ai_panel_open = false;
+            })
+            .child(
+                text("×")
+                    .font(theme::CONTROL_TEXT)
+                    .color(theme::text_muted()),
+            ),
+    );
+
+    // 2. Scrollable Messages Feed
+    let mut msg_list = col()
+        .key("ai_chat_messages_list")
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .px(18.0)
+        .py(16.0)
+        .gap(16.0)
+        .scroll(ScrollSpec { stick_bottom: true });
+
+    if s.ai_chat_messages.is_empty() && !s.ai_chat_pending {
+        msg_list = msg_list.child(
+            col()
+                .key("ai_chat_empty_hint")
+                .w_full()
+                .grow(1.0)
+                .center()
+                .py(28.0)
+                .child(
+                    text(i18n::t(TextKey::AiChatEmptyHint))
+                        .font(theme::STATUS_TEXT)
+                        .color(theme::text_muted()),
+                ),
+        );
+    }
+
+    for (idx, msg) in s.ai_chat_messages.iter().enumerate() {
+        let md_key = format!("ai_chat_md_{}", idx);
+        if msg.role == "user" {
+            msg_list = msg_list.child(
+                row()
+                    .key(format!("ai_chat_msg_{}", idx))
+                    .w_full()
+                    .child(el().grow(1.0))
+                    .child(
+                        col()
+                            .max_w((panel_width - 76.0).max(180.0))
+                            .px(13.0)
+                            .py(9.0)
+                            .radius(14.0)
+                            .continuous_corners()
+                            .fill(theme::bg_control())
+                            .child(render_chat_markdown(&md_key, &msg.text)),
+                    ),
+            );
+        } else {
+            let reply_copy = msg.text.clone();
+            let copied = s.is_recently_copied("ai_chat_reply");
+            let mut action_footer = row()
+                .w_full()
+                .center_y()
+                .gap(6.0)
+                .child(
+                    el()
+                        .key(format!("btn_ai_chat_copy_{}", idx))
+                        .px(6.0)
+                        .py(2.5)
+                        .radius(4.0)
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                            tx.copy(reply_copy.clone());
+                            s.mark_copied("ai_chat_reply", "Copied AI response");
+                        })
+                        .child(
+                            text(if copied {
+                                i18n::t(TextKey::ReaderCopied)
+                            } else {
+                                i18n::t(TextKey::ReaderCopy)
+                            })
+                            .font(theme::BADGE_TEXT)
+                            .color(if copied {
+                                theme::accent_claude()
+                            } else {
+                                theme::text_muted()
+                            }),
+                        ),
+                )
+                .child(
+                    el()
+                        .key(format!("btn_ai_chat_spawn_note_{}", idx))
+                        .px(7.0)
+                        .py(2.5)
+                        .radius(4.0)
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.spawn_note_from_ai_chat(idx);
+                        })
+                        .child(
+                            text(format!("+ {}", i18n::t(TextKey::DockNote)))
+                                .font(theme::BADGE_TEXT)
+                                .color(theme::text_muted()),
+                        ),
+                );
+            if msg.can_undo {
+                action_footer = action_footer.child(
+                    el()
+                        .key(format!("btn_ai_chat_undo_{}", idx))
+                        .px(7.0)
+                        .py(2.5)
+                        .radius(4.0)
+                        .fill(theme::accent_claude().alpha(0.16))
+                        .border(1.0, theme::accent_claude().alpha(0.42))
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.undo_ai_chat_action(idx);
+                        })
+                        .child(
+                            text(format!("↶ {}", i18n::t(TextKey::AiChatUndoAction)))
+                                .font(theme::BADGE_TEXT)
+                                .color(theme::accent_claude()),
+                        ),
+                );
+            }
+            action_footer = action_footer.child(el().grow(1.0));
+
+            let mut msg_col = col()
+                .key(format!("ai_chat_msg_{}", idx))
+                .w_full()
+                .gap(6.0);
+            if let Some(summary) = msg.action_summary.as_deref() {
+                msg_col = msg_col.child(
+                    row()
+                        .key(format!("ai_chat_action_summary_{}", idx))
+                        .w_full()
+                        .px(8.0)
+                        .py(4.0)
+                        .radius(6.0)
+                        .fill(theme::accent_claude().alpha(0.12))
+                        .border(1.0, theme::accent_claude().alpha(0.35))
+                        .child(
+                            text(format!("✦ {}", summary))
+                                .font(theme::BADGE_TEXT)
+                                .color(theme::accent_claude())
+                                .wrap(),
+                        ),
+                );
+            }
+            msg_list = msg_list.child(
+                msg_col
+                    .child(render_chat_markdown(&md_key, &msg.text))
+                    .child(action_footer),
+            );
+        }
+    }
+
+    if s.ai_chat_pending {
+        msg_list = msg_list.child(
+            row()
+                .key("ai_chat_thinking")
+                .w_full()
+                .py(4.0)
+                .child(
+                    text(i18n::t(TextKey::AiChatThinking))
+                        .font(theme::STATUS_TEXT)
+                        .color(theme::accent_claude()),
+                ),
+        );
+    }
+
+    // 3. Pinned Bottom Rounded-Square Composer Box + Circular Send Button
+    let prompt_bar = col()
+        .key("ai_chat_prompt_bar")
+        .w_full()
+        .px(14.0)
+        .pb(14.0)
+        .pt(6.0)
+        .child(
+            col()
+                .w_full()
+                .min_h(92.0)
+                .padding(12.0)
+                .gap(8.0)
+                .radius(14.0)
+                .continuous_corners()
+                .fill(theme::bg_card())
+                .border(1.0, theme::border_default())
+                .child(
+                    el()
+                        .w_full()
+                        .grow(1.0)
+                        .min_h(36.0)
+                        .max_h(140.0)
+                        .scroll(ScrollSpec {
+                            stick_bottom: false,
+                        })
+                        .child(
+                            text_input(&s.ai_chat_input, theme::BODY_TEXT)
+                                .key("ai_chat_input")
+                                .label("Project AI question")
+                                .w_full()
+                                .color(theme::text_primary())
+                                .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                                .placeholder(i18n::t(TextKey::AiChatPlaceholder), theme::text_muted())
+                                .on_edit(|s: &mut AppState| &mut s.ai_chat_input)
+                                .on_submit(|s: &mut AppState, _| {
+                                    s.submit_ai_chat_question();
+                                }),
+                        ),
+                )
+                .child(
+                    row()
+                        .w_full()
+                        .center_y()
+                        .gap(6.0)
+                        .child(
+                            el()
+                                .key("btn_toggle_chat_canvas_actions")
+                                .px(8.0)
+                                .py(4.0)
+                                .radius(6.0)
+                                .fill(if s.ai_chat_canvas_actions {
+                                    theme::accent_claude().alpha(0.18)
+                                } else {
+                                    theme::bg_input()
+                                })
+                                .border(
+                                    1.0,
+                                    if s.ai_chat_canvas_actions {
+                                        theme::accent_claude().alpha(0.65)
+                                    } else {
+                                        theme::border_subtle()
+                                    },
+                                )
+                                .hover(theme::hover_subtle())
+                                .cursor(Cursor::Pointer)
+                                .on_press(|s: &mut AppState| {
+                                    s.ai_chat_canvas_actions = !s.ai_chat_canvas_actions;
+                                })
+                                .child(
+                                    text(format!(
+                                        "✦ {}",
+                                        i18n::t(TextKey::AiChatCanvasActionsToggle)
+                                    ))
+                                    .font(theme::BADGE_TEXT)
+                                    .color(if s.ai_chat_canvas_actions {
+                                        theme::accent_claude()
+                                    } else {
+                                        theme::text_muted()
+                                    }),
+                                ),
+                        )
+                        .child(el().grow(1.0))
+                        .child(
+                            el()
+                                .key("btn_ai_chat_send")
+                                .size(32.0, 32.0)
+                                .radius(16.0)
+                                .fill(theme::accent_claude())
+                                .hover(theme::accent_claude().alpha(0.86))
+                                .press(Color::BLACK.alpha(0.18))
+                                .center()
+                                .cursor(Cursor::Pointer)
+                                .on_press(|s: &mut AppState| {
+                                    s.submit_ai_chat_question();
+                                })
+                                .child(
+                                    text("↑")
+                                        .font(theme::CONTROL_TEXT)
+                                        .color(Color::WHITE),
+                                ),
+                        ),
+                ),
+        );
+
+    let mut panel = col()
+        .key("inspector_panel")
+        .w(panel_width)
+        .h_full()
+        .fill(theme::bg_chrome())
+        .child(topbar);
+
+    if s.ai_chat_key_drawer_open {
+        panel = panel.child(render_inline_chat_key_drawer(s));
+    }
+
+    if let Some(err) = s.llm_last_error.as_deref() {
+        panel = panel.child(
+            row()
+                .key("ai_panel_error_banner")
+                .w_full()
+                .pl(14.0)
+                .pr(10.0)
+                .py(8.0)
+                .gap(6.0)
+                .center_y()
+                .fill(theme::accent_danger().alpha(0.08))
+                .border_sides([0.0, 0.0, 1.0, 2.0], theme::accent_danger().alpha(0.75))
+                .child(
+                    text(err)
+                        .font(theme::STATUS_TEXT)
+                        .color(theme::accent_danger())
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .wrap(),
+                )
+                .child(ghost_btn(
+                    "btn_ai_panel_error_settings",
+                    i18n::t(TextKey::AiChatCustomKeyBtn),
+                    theme::text_secondary(),
+                    |s| {
+                        s.ai_chat_key_drawer_open = true;
+                        s.chat_api_key_edit = rune::TextEdit::new(&s.reader_prefs.chat_api_key);
+                        s.chat_base_url_edit = rune::TextEdit::new(&s.reader_prefs.chat_base_url);
+                        s.chat_model_edit = rune::TextEdit::new(&s.reader_prefs.chat_model);
+                    },
+                ))
+                .child(
+                    el()
+                        .key("btn_dismiss_ai_error")
+                        .size(22.0, 22.0)
+                        .radius(5.0)
+                        .hover(theme::hover_subtle())
+                        .center()
+                        .cursor(Cursor::Pointer)
+                        .on_press(|s: &mut AppState| {
+                            s.llm_last_error = None;
+                        })
+                        .child(
+                            text("×")
+                                .font(theme::CONTROL_TEXT)
+                                .color(theme::text_muted()),
+                        ),
+                ),
+        );
+    }
+
+    panel.child(msg_list).child(prompt_bar)
+}
+
+fn render_ai_summary_callout(s: &AppState, node: &Node) -> Option<El> {
+    let is_pending = s.llm_pending_nodes.contains(&node.id);
+    let err_opt = s.llm_last_error.as_deref();
+    let summary_opt = node.summary.as_deref().filter(|t| !t.trim().is_empty());
+
+    if !is_pending && err_opt.is_none() && summary_opt.is_none() {
+        return None;
+    }
+
+    let mut box_col = col().w_full().gap(6.0);
+
+    if is_pending {
+        box_col = box_col.child(
+            row()
+                .key("ai_summary_pending")
+                .w_full()
+                .pl(12.0)
+                .py(4.0)
+                .border_sides([0.0, 0.0, 0.0, 2.0], theme::accent_claude().alpha(0.65))
+                .child(
+                    text(i18n::t(TextKey::ReaderSummarizing))
+                        .font(theme::STATUS_TEXT)
+                        .color(theme::accent_claude()),
+                ),
+        );
+    }
+
+    if let Some(err) = err_opt {
+        box_col = box_col.child(
+            row()
+                .key("ai_summary_error")
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .pl(12.0)
+                .py(4.0)
+                .border_sides([0.0, 0.0, 0.0, 2.0], theme::accent_danger().alpha(0.7))
+                .child(
+                    text(err)
+                        .font(theme::STATUS_TEXT)
+                        .color(theme::accent_danger())
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .wrap(),
+                )
+                .child(ghost_btn(
+                    "btn_ai_error_settings",
+                    i18n::t(TextKey::DashSettingsBtn),
+                    theme::text_secondary(),
+                    |s| {
+                        s.open_settings();
+                    },
+                ))
+                .child(
+                    el()
+                        .key("btn_dismiss_summary_ai_error")
+                        .size(22.0, 22.0)
+                        .radius(5.0)
+                        .hover(theme::hover_subtle())
+                        .center()
+                        .cursor(Cursor::Pointer)
+                        .on_press(|s: &mut AppState| {
+                            s.llm_last_error = None;
+                        })
+                        .child(
+                            text("×")
+                                .font(theme::CONTROL_TEXT)
+                                .color(theme::text_muted()),
+                        ),
+                ),
+        );
+    }
+
+    if let Some(summary) = summary_opt {
+        let summary_owned = summary.to_string();
+        let summary_copied = s.is_recently_copied("summary");
+        let nid_clear = node.id.clone();
+
+        box_col = box_col.child(
+            col()
+                .key("ai_summary_callout")
+                .w_full()
+                .gap(4.0)
+                .pl(12.0)
+                .py(2.0)
+                .border_sides([0.0, 0.0, 0.0, 2.0], theme::accent_claude().alpha(0.65))
+                .child(
+                    row()
+                        .w_full()
+                        .center_y()
+                        .gap(4.0)
+                        .child(subtle_tag(
+                            i18n::t(TextKey::ReaderAiSummaryTag),
+                            theme::accent_claude(),
+                        ))
+                        .child(el().grow(1.0))
+                        .child(
+                            el()
+                                .key("btn_copy_ai_summary")
+                                .px(6.0)
+                                .py(2.5)
+                                .radius(5.0)
+                                .hover(theme::hover_subtle())
+                                .cursor(Cursor::Pointer)
+                                .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                                    tx.copy(summary_owned.clone());
+                                    s.mark_copied("summary", "Copied AI summary");
+                                })
+                                .child(
+                                    text(if summary_copied {
+                                        i18n::t(TextKey::ReaderCopied)
+                                    } else {
+                                        i18n::t(TextKey::ReaderCopy)
+                                    })
+                                    .font(theme::BADGE_TEXT)
+                                    .color(if summary_copied {
+                                        theme::accent_claude()
+                                    } else {
+                                        theme::text_secondary()
+                                    }),
+                                ),
+                        )
+                        .child(
+                            el()
+                                .key("btn_clear_ai_summary")
+                                .px(5.0)
+                                .py(2.5)
+                                .radius(5.0)
+                                .hover(theme::hover_subtle())
+                                .cursor(Cursor::Pointer)
+                                .on_press(move |s: &mut AppState| {
+                                    s.clear_node_summary(&nid_clear);
+                                })
+                                .child(
+                                    text("×")
+                                        .font(theme::BADGE_TEXT)
+                                        .color(theme::text_muted()),
+                                ),
+                        ),
+                )
+                .child(
+                    text(summary)
+                        .font(theme::BODY_TEXT)
+                        .color(theme::text_secondary())
+                        .w_full()
+                        .wrap(),
+                ),
+        );
+    }
+
+    Some(box_col)
 }
 
 fn ghost_btn(
@@ -156,8 +985,18 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
             }
         });
 
+    // Dedicated Full-Height Project AI Chat panel when active
+    if s.ai_panel_open {
+        let chat_panel = render_dedicated_ai_chat_panel(s, panel_width);
+        return row()
+            .key("inspector_container")
+            .h_full()
+            .child(resize_handle)
+            .child(chat_panel);
+    }
+
     // Distraction-Free Read-Only Reader layout (Document / Image) when active
-    if !s.ai_panel_open && s.reader_read_only {
+    if s.reader_read_only {
         if let Some(selected_node_id) = s.selected_nodes.iter().next() {
             if let Some(node) = s.graph.get_node(selected_node_id) {
                 if matches!(node.kind, NodeKind::Document | NodeKind::Image) {
@@ -174,81 +1013,7 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
 
     let mut content = col().w_full().gap(14.0);
 
-    if s.ai_panel_open {
-        content = content
-            .child(
-                row()
-                    .w_full()
-                    .center_y()
-                    .gap(8.0)
-                    .child(
-                        text("✦")
-                            .font(theme::CONTROL_TEXT)
-                            .color(theme::accent_claude()),
-                    )
-                    .child(
-                        text("AI Synthesis")
-                            .font(theme::PANEL_TITLE)
-                            .color(theme::text_primary()),
-                    )
-                    .child(el().grow(1.0))
-                    .child(close_panel_btn()),
-            )
-            .child(
-                text("Synthesize connections, surface contradictions, or generate study cards across selected nodes.")
-                    .font(theme::BODY_TEXT)
-                    .color(theme::text_secondary())
-                    .w_full()
-                    .wrap(),
-            )
-            .child(hairline())
-            .child(
-                el()
-                    .key("btn_run_ai_synth")
-                    .w_full()
-                    .px(12.0)
-                    .py(10.0)
-                    .radius(8.0)
-                    .fill(theme::accent_claude().alpha(0.14))
-                    .hover(theme::accent_claude().alpha(0.24))
-                    .border(1.0, theme::accent_claude().alpha(0.45))
-                    .center()
-                    .cursor(Cursor::Pointer)
-                    .on_press(|s: &mut AppState| {
-                        s.run_ai_synthesize_connections();
-                    })
-                    .child(
-                        text("✦ Synthesize Connections")
-                            .font(theme::CONTROL_TEXT)
-                            .color(theme::text_primary()),
-                    ),
-            )
-            .child(
-                el()
-                    .key("btn_ai_generate_cards")
-                    .w_full()
-                    .px(12.0)
-                    .py(9.0)
-                    .radius(8.0)
-                    .hover(theme::hover_subtle())
-                    .border(1.0, theme::border_subtle())
-                    .center()
-                    .cursor(Cursor::Pointer)
-                    .on_press(|s: &mut AppState| {
-                        s.generate_study_cards_ai();
-                    })
-                    .child(
-                        text("◇ Generate Flashcards & Checklist")
-                            .font(theme::CONTROL_TEXT)
-                            .color(theme::text_primary()),
-                    ),
-            )
-            .child(
-                ghost_btn("btn_back_from_ai", "← Back to Selection", theme::text_muted(), |s| {
-                    s.ai_panel_open = false;
-                }),
-            );
-    } else if let Some(selected_node_id) = s.selected_nodes.iter().next() {
+    if let Some(selected_node_id) = s.selected_nodes.iter().next() {
         if let Some(node) = s.graph.get_node(selected_node_id) {
             let node_kind = node.kind;
             if matches!(node_kind, NodeKind::Document | NodeKind::Image) {
@@ -281,6 +1046,34 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                     .color(theme::text_secondary())
                     .w_full()
                     .wrap(),
+            )
+            .child(
+                row()
+                    .key("btn_inspector_open_ai_chat")
+                    .w_full()
+                    .px(12.0)
+                    .py(9.0)
+                    .gap(8.0)
+                    .center_y()
+                    .radius(8.0)
+                    .fill(theme::accent_claude().alpha(0.14))
+                    .hover(theme::accent_claude().alpha(0.24))
+                    .border(1.0, theme::accent_claude().alpha(0.45))
+                    .cursor(Cursor::Pointer)
+                    .on_press_tx(|s: &mut AppState, tx| {
+                        s.open_ai_chat_panel();
+                        tx.focus_when_shown("ai_chat_input", false);
+                    })
+                    .child(
+                        text("✦")
+                            .font(theme::CONTROL_TEXT)
+                            .color(theme::accent_claude()),
+                    )
+                    .child(
+                        text(i18n::t(TextKey::AiAskProjectChat))
+                            .font(theme::STATUS_TEXT)
+                            .color(theme::text_primary()),
+                    ),
             )
             .child(hairline())
             .child(
@@ -319,10 +1112,342 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
         .child(panel)
 }
 
+fn render_memoized_markdown(
+    node_id: &NodeId,
+    md_src: String,
+    doc_fmt: DocFormat,
+    md_w: f32,
+    is_readonly: bool,
+) -> El {
+    let md_hash = hash_str(&md_src);
+    let version = (
+        node_id.clone(),
+        md_hash,
+        doc_fmt,
+        md_w.round() as i32,
+        theme::active_theme(),
+        i18n::active_locale(),
+        is_readonly,
+    );
+    memo("inspector_md_preview", version, move || {
+        let md_style = theme::markdown_style().text_width(md_w);
+        let mut md = Markdown::new(&md_src).selectable(true);
+        if !is_readonly {
+            md = md.on_task(|s: &mut AppState, _block_key, offset, checked| {
+                s.toggle_selected_doc_task(offset, checked);
+            });
+        }
+        md.render(&md_style)
+    })
+}
+
+fn inspector_pdf_aspect(pdf: &ActivePdfState, page_idx: usize) -> f32 {
+    if let Some(&(w, h)) = pdf.page_dimensions.get(page_idx) {
+        if w > 0.0 && h > 0.0 {
+            return (w / h).clamp(0.35, 2.5);
+        }
+    }
+    if let Some(&(w, h, _)) = pdf.pages.get(&page_idx) {
+        if w > 0 && h > 0 {
+            return (w as f32 / h as f32).clamp(0.35, 2.5);
+        }
+    }
+    8.5 / 11.0
+}
+
+fn render_inspector_pdf_page(
+    pdf: &ActivePdfState,
+    page_idx: usize,
+    target_w: f32,
+    show_caption: bool,
+) -> El {
+    let ar = inspector_pdf_aspect(pdf, page_idx);
+    let page_box = if let Some((_, _, px)) = pdf.pages.get(&page_idx) {
+        el()
+            .key(format!("pdf_page_canvas_{}", page_idx))
+            .w(target_w)
+            .aspect_ratio(ar)
+            .radius(4.0)
+            .border(1.0, theme::border_subtle())
+            .clip_soft(0.0)
+            .pixels_fit(px, SurfaceFit::Fit)
+    } else {
+        el()
+            .key(format!("pdf_page_canvas_{}", page_idx))
+            .w(target_w)
+            .aspect_ratio(ar)
+            .radius(4.0)
+            .fill(theme::bg_card())
+            .border(1.0, theme::border_subtle())
+            .center()
+            .child(
+                text(format!(
+                    "{} · p. {}",
+                    i18n::t(TextKey::PdfRenderingPage),
+                    page_idx + 1
+                ))
+                .font(theme::BADGE_TEXT)
+                .color(theme::text_muted()),
+            )
+    };
+
+    if show_caption {
+        col()
+            .gap(3.0)
+            .items_center()
+            .child(page_box)
+            .child(
+                text(format!("p. {}", page_idx + 1))
+                    .font(theme::BADGE_TEXT)
+                    .color(theme::text_muted()),
+            )
+    } else {
+        page_box
+    }
+}
+
+fn render_pdf_reader_panel(
+    s: &AppState,
+    pdf: &ActivePdfState,
+    panel_width: f32,
+    max_h: Option<f32>,
+) -> El {
+    let total_pages = pdf.page_count.max(1);
+    let cur_page = pdf.page_index.min(total_pages - 1);
+    let cur_zoom = pdf.zoom;
+    let mode = s.reader_prefs.pdf_layout_mode;
+    let step = if mode == PdfLayoutMode::TwoPage { 2 } else { 1 };
+
+    let controls_row = row()
+        .key("readonly_pdf_controls")
+        .w_full()
+        .center_y()
+        .gap(4.0)
+        .child(ghost_btn(
+            "btn_pdf_prev",
+            i18n::t(TextKey::PdfPrevPage),
+            theme::text_secondary(),
+            move |s| {
+                s.set_pdf_page(cur_page.saturating_sub(step));
+            },
+        ))
+        .child(
+            text(i18n::fmt_page_counter(cur_page, total_pages))
+                .font(theme::STATUS_TEXT)
+                .color(theme::text_muted()),
+        )
+        .child(ghost_btn(
+            "btn_pdf_next",
+            i18n::t(TextKey::PdfNextPage),
+            theme::text_secondary(),
+            move |s| {
+                let next = (cur_page + step).min(total_pages.saturating_sub(1));
+                s.set_pdf_page(next);
+            },
+        ))
+        .child(el().grow(1.0))
+        .child(ghost_btn("btn_pdf_zout", "−", theme::text_muted(), move |s| {
+            s.set_pdf_zoom(cur_zoom - 0.25);
+        }))
+        .child(ghost_btn(
+            "btn_pdf_zoom_reset",
+            &format!("{}%", (cur_zoom * 100.0).round() as u32),
+            theme::text_muted(),
+            |s| {
+                s.set_pdf_zoom(1.0);
+            },
+        ))
+        .child(ghost_btn("btn_pdf_zin", "+", theme::text_muted(), move |s| {
+            s.set_pdf_zoom(cur_zoom + 0.25);
+        }));
+
+    let mut mode_row = row()
+        .key("pdf_mode_controls")
+        .w_full()
+        .center_y()
+        .gap(10.0)
+        .child(
+            underline_tab(
+                "btn_pdf_mode_continuous",
+                i18n::t(TextKey::PdfModeContinuous),
+                mode == PdfLayoutMode::Continuous,
+            )
+            .on_press(|s: &mut AppState| {
+                s.set_pdf_layout_mode(PdfLayoutMode::Continuous);
+            }),
+        )
+        .child(
+            underline_tab(
+                "btn_pdf_mode_twopage",
+                i18n::t(TextKey::PdfModeTwoPage),
+                mode == PdfLayoutMode::TwoPage,
+            )
+            .on_press(|s: &mut AppState| {
+                s.set_pdf_layout_mode(PdfLayoutMode::TwoPage);
+            }),
+        )
+        .child(
+            underline_tab(
+                "btn_pdf_mode_single",
+                i18n::t(TextKey::PdfModeSingle),
+                mode == PdfLayoutMode::SinglePage,
+            )
+            .on_press(|s: &mut AppState| {
+                s.set_pdf_layout_mode(PdfLayoutMode::SinglePage);
+            }),
+        );
+
+    if total_pages > 1 {
+        let last = total_pages - 1;
+        let mut jump_pages: Vec<usize> = vec![0];
+        if cur_page > 1 {
+            jump_pages.push(cur_page - 1);
+        }
+        jump_pages.push(cur_page);
+        if cur_page + 1 < last {
+            jump_pages.push(cur_page + 1);
+        }
+        jump_pages.push(last);
+        jump_pages.sort_unstable();
+        jump_pages.dedup();
+
+        mode_row = mode_row.child(el().grow(1.0));
+        let mut prev_pg: Option<usize> = None;
+        for pg in jump_pages {
+            if prev_pg.is_some_and(|p| pg > p + 1) {
+                mode_row = mode_row.child(
+                    text("…")
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_muted()),
+                );
+            }
+            let is_cur = pg == cur_page;
+            mode_row = mode_row.child(
+                el()
+                    .key(format!("btn_pdf_jump_{}", pg))
+                    .px(5.0)
+                    .py(2.0)
+                    .radius(4.0)
+                    .fill(if is_cur {
+                        theme::accent_claude().alpha(0.20)
+                    } else {
+                        Color::TRANSPARENT
+                    })
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.set_pdf_page(pg);
+                    })
+                    .child(
+                        text(format!("{}", pg + 1))
+                            .font(theme::BADGE_TEXT)
+                            .color(if is_cur {
+                                theme::accent_claude()
+                            } else {
+                                theme::text_muted()
+                            }),
+                    ),
+            );
+            prev_pg = Some(pg);
+        }
+    }
+
+    let mut pdf_col = col()
+        .key("integrated_pdf_viewer")
+        .w_full()
+        .gap(8.0)
+        .child(controls_row)
+        .child(mode_row);
+    if max_h.is_none() {
+        pdf_col = pdf_col.grow(1.0).min_h(0.0);
+    }
+
+    if let Some(err) = &pdf.error {
+        return pdf_col.child(
+            text(format!("PDF render note: {}", err))
+                .font(theme::BODY_TEXT)
+                .color(theme::text_secondary())
+                .w_full()
+                .wrap(),
+        );
+    }
+
+    let avail_w = (panel_width - 52.0).max(200.0);
+    let page_w = (avail_w * cur_zoom).max(180.0);
+    let mut inner = col().w_full().gap(12.0).items_center().py(2.0);
+
+    match mode {
+        PdfLayoutMode::Continuous => {
+            let (start, end) = if total_pages <= 12 {
+                (0, total_pages - 1)
+            } else {
+                (cur_page.saturating_sub(2), (cur_page + 6).min(total_pages - 1))
+            };
+            if start > 0 {
+                inner = inner.child(ghost_btn(
+                    "btn_pdf_prev_window",
+                    i18n::t(TextKey::PdfPrevWindow),
+                    theme::text_secondary(),
+                    move |s| {
+                        s.set_pdf_page(start.saturating_sub(1));
+                    },
+                ));
+            }
+            for pg in start..=end {
+                inner = inner.child(render_inspector_pdf_page(pdf, pg, page_w, total_pages > 1));
+            }
+            if end + 1 < total_pages {
+                inner = inner.child(ghost_btn(
+                    "btn_pdf_next_window",
+                    i18n::t(TextKey::PdfNextWindow),
+                    theme::text_secondary(),
+                    move |s| {
+                        s.set_pdf_page(end + 1);
+                    },
+                ));
+            }
+        }
+        PdfLayoutMode::TwoPage => {
+            let left = (cur_page / 2) * 2;
+            let right = left + 1;
+            if right < total_pages && avail_w >= 420.0 {
+                let spread_w = ((avail_w - 10.0) * 0.48 * cur_zoom).max(140.0);
+                inner = inner.child(
+                    row()
+                        .gap(10.0)
+                        .center()
+                        .child(render_inspector_pdf_page(pdf, left, spread_w, true))
+                        .child(render_inspector_pdf_page(pdf, right, spread_w, true)),
+                );
+            } else {
+                inner = inner.child(render_inspector_pdf_page(pdf, left, page_w, total_pages > 1));
+                if right < total_pages {
+                    inner = inner.child(render_inspector_pdf_page(pdf, right, page_w, true));
+                }
+            }
+        }
+        PdfLayoutMode::SinglePage => {
+            inner = inner.child(render_inspector_pdf_page(pdf, cur_page, page_w, false));
+        }
+    }
+
+    let mut scroll_box = col().w_full().scroll(ScrollSpec { stick_bottom: false });
+    if let Some(h) = max_h {
+        scroll_box = scroll_box.max_h(h);
+    } else {
+        scroll_box = scroll_box.grow(1.0).min_h(0.0);
+    }
+    pdf_col.child(scroll_box.child(inner))
+}
+
 fn render_ingest_button(node_id: studynodes_graph::model::NodeId, is_img: bool) -> El {
     ghost_btn(
         "btn_doc_ingest",
-        if is_img { "Choose Image" } else { "Ingest File" },
+        if is_img {
+            i18n::t(TextKey::ReaderIngestImage)
+        } else {
+            i18n::t(TextKey::ReaderIngestFile)
+        },
         theme::text_secondary(),
         |_| {},
     )
@@ -503,6 +1628,7 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
     let fmt_badge = doc_reader::format_badge(doc_format);
     let has_pdf = s.active_pdf.as_ref().is_some_and(|p| p.node_id == node.id);
     let is_integrated = s.reader_prefs.mode == ReaderMode::Integrated;
+    let is_summarizing = s.llm_pending_nodes.contains(&node.id);
 
     // 4-Control Minimal Header: Kind tag | Edit/Done | Pop Out | overflow ⋯ | Close ×
     let header = row()
@@ -518,7 +1644,7 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
         .child(el().grow(1.0))
         .child(ghost_btn(
             "btn_toggle_readonly",
-            "Done",
+            i18n::t(TextKey::ReaderDone),
             theme::text_primary(),
             |s| {
                 s.set_reader_read_only(true);
@@ -549,7 +1675,7 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
             .border(1.0, theme::border_subtle())
             .child(more_menu_item(
                 "btn_open_external_reader",
-                "Open in External App ↗",
+                i18n::t(TextKey::ReaderOpenExternal),
                 theme::text_primary(),
                 move |s| {
                     s.inspector_more_menu_open = false;
@@ -567,7 +1693,11 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
             ))
             .child(more_menu_item(
                 "btn_menu_ai_summarize",
-                "✦ Summarize with AI",
+                if is_summarizing {
+                    i18n::t(TextKey::ReaderSummarizing)
+                } else {
+                    i18n::t(TextKey::ReaderSummarizeWithAi)
+                },
                 theme::accent_claude(),
                 move |s| {
                     s.inspector_more_menu_open = false;
@@ -577,7 +1707,7 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
             .child(hairline())
             .child(more_menu_item(
                 "btn_delete_doc",
-                "Delete Node",
+                i18n::t(TextKey::ReaderDeleteNode),
                 theme::accent_danger(),
                 move |s| {
                     s.inspector_more_menu_open = false;
@@ -588,7 +1718,7 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
         if is_img_kind {
             menu = menu.child(more_menu_item(
                 "btn_doc_excerpt",
-                "❝ Create Excerpt",
+                i18n::t(TextKey::ReaderCreateExcerpt),
                 theme::text_secondary(),
                 |s| {
                     s.inspector_more_menu_open = false;
@@ -614,7 +1744,7 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
     if !is_img_kind {
         actions_strip = actions_strip.child(ghost_btn(
             "btn_doc_sample",
-            "Sample",
+            i18n::t(TextKey::ReaderSample),
             theme::text_muted(),
             move |s| {
                 s.load_sample_document(&nid_sample);
@@ -625,7 +1755,11 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
     actions_strip = actions_strip
         .child(ghost_btn(
             "btn_doc_summarize",
-            "✦ Summarize",
+            if is_summarizing {
+                i18n::t(TextKey::ReaderSummarizing)
+            } else {
+                i18n::t(TextKey::ReaderSummarize)
+            },
             theme::accent_claude(),
             move |s| {
                 s.explain_node_ai(&nid_sum);
@@ -633,7 +1767,7 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
         ))
         .child(ghost_btn(
             "btn_doc_excerpt",
-            "❝ Excerpt",
+            i18n::t(TextKey::BlockExcerptTitle),
             theme::text_secondary(),
             |s| {
                 s.create_excerpt_from_selected_doc(None);
@@ -666,23 +1800,8 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
                 .child(hairline()),
         );
 
-    if let Some(summary) = &node.summary {
-        content = content.child(
-            col()
-                .w_full()
-                .gap(4.0)
-                .pl(12.0)
-                .py(2.0)
-                .border_sides([0.0, 0.0, 0.0, 2.0], theme::accent_claude().alpha(0.65))
-                .child(subtle_tag("✦ KEY INSIGHTS", theme::accent_claude()))
-                .child(
-                    text(summary)
-                        .font(theme::BODY_TEXT)
-                        .color(theme::text_secondary())
-                        .w_full()
-                        .wrap(),
-                ),
-        );
+    if let Some(callout) = render_ai_summary_callout(s, node) {
+        content = content.child(callout);
     }
 
     // Quiet underline view switcher (`Pages · Preview · Source`)
@@ -694,17 +1813,25 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
 
     if has_pdf {
         view_switcher = view_switcher.child(
-            underline_tab("tab_doc_pages", "Pages", s.doc_view_tab == DocViewTab::Pages)
-                .on_press(|s: &mut AppState| {
-                    s.doc_view_tab = DocViewTab::Pages;
-                }),
+            underline_tab(
+                "tab_doc_pages",
+                i18n::t(TextKey::ReaderTabPages),
+                s.doc_view_tab == DocViewTab::Pages,
+            )
+            .on_press(|s: &mut AppState| {
+                s.doc_view_tab = DocViewTab::Pages;
+            }),
         );
     }
     view_switcher = view_switcher
         .child(
             underline_tab(
                 "tab_doc_preview",
-                if is_img_kind { "Image" } else { "Preview" },
+                if is_img_kind {
+                    i18n::t(TextKey::DockImage)
+                } else {
+                    i18n::t(TextKey::ReaderTabPreview)
+                },
                 s.doc_view_tab == DocViewTab::Preview
                     || (!has_pdf && s.doc_view_tab == DocViewTab::Pages),
             )
@@ -713,86 +1840,23 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
             }),
         )
         .child(
-            underline_tab("tab_doc_source", "Source", s.doc_view_tab == DocViewTab::Source)
-                .on_press(|s: &mut AppState| {
-                    s.doc_view_tab = DocViewTab::Source;
-                }),
+            underline_tab(
+                "tab_doc_source",
+                i18n::t(TextKey::ReaderTabSource),
+                s.doc_view_tab == DocViewTab::Source,
+            )
+            .on_press(|s: &mut AppState| {
+                s.doc_view_tab = DocViewTab::Source;
+            }),
         );
 
     content = content.child(view_switcher);
 
     // Flush Reader / Source body (no inner box border)
+    let panel_width = s.inspector_width.clamp(300.0, 860.0);
     let reader_body = if has_pdf && s.doc_view_tab == DocViewTab::Pages {
         let pdf = s.active_pdf.as_ref().unwrap();
-        let cur_page = pdf.page_index;
-        let total_pages = pdf.page_count.max(1);
-        let cur_zoom = pdf.zoom;
-        let aspect = if pdf.page_size.0 > 0 && pdf.page_size.1 > 0 {
-            Some(pdf.page_size.0 as f32 / pdf.page_size.1 as f32)
-        } else {
-            None
-        };
-
-        let mut pdf_col = col().key("integrated_pdf_viewer").w_full().gap(10.0).child(
-            row()
-                .w_full()
-                .center_y()
-                .gap(4.0)
-                .child(ghost_btn("btn_pdf_prev", "‹ Prev", theme::text_secondary(), move |s| {
-                    s.set_pdf_page(cur_page.saturating_sub(1));
-                }))
-                .child(
-                    text(format!("{} / {}", cur_page + 1, total_pages))
-                        .font(theme::STATUS_TEXT)
-                        .color(theme::text_muted()),
-                )
-                .child(ghost_btn("btn_pdf_next", "Next ›", theme::text_secondary(), move |s| {
-                    s.set_pdf_page(cur_page + 1);
-                }))
-                .child(el().grow(1.0))
-                .child(ghost_btn("btn_pdf_zout", "−", theme::text_muted(), move |s| {
-                    s.set_pdf_zoom(cur_zoom - 0.25);
-                }))
-                .child(
-                    text(format!("{}%", (cur_zoom * 100.0).round() as u32))
-                        .font(theme::BADGE_TEXT)
-                        .color(theme::text_muted()),
-                )
-                .child(ghost_btn("btn_pdf_zin", "+", theme::text_muted(), move |s| {
-                    s.set_pdf_zoom(cur_zoom + 0.25);
-                })),
-        );
-
-        if let Some(err) = &pdf.error {
-            pdf_col = pdf_col.child(
-                text(format!("PDF render note: {} — switch to Preview or External ↗.", err))
-                    .font(theme::BODY_TEXT)
-                    .color(theme::text_secondary())
-                    .w_full()
-                    .wrap(),
-            );
-        } else {
-            let mut page_el = el()
-                .key(format!("pdf_page_canvas_{}", cur_page))
-                .w_full()
-                .radius(4.0)
-                .border(1.0, theme::border_subtle())
-                .clip_soft(0.0)
-                .pixels_fit(&pdf.pixels, SurfaceFit::Fit);
-            if let Some(ar) = aspect {
-                page_el = page_el.aspect_ratio(ar);
-            } else {
-                page_el = page_el.min_h(320.0);
-            }
-            pdf_col = pdf_col.child(
-                col()
-                    .w_full()
-                    .max_h(470.0)
-                    .scroll(ScrollSpec { stick_bottom: false })
-                    .child(page_el),
-            );
-        }
-        pdf_col
+        render_pdf_reader_panel(s, pdf, panel_width, Some(470.0))
     } else if s.doc_view_tab == DocViewTab::Source {
         col()
             .key("integrated_source_editor")
@@ -803,16 +1867,16 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
             .child(
                 text_input(&s.inspector_content_edit, theme::MONO_BODY)
                     .key("inspector_content")
-                    .label("Document source")
+                    .label(i18n::t(TextKey::ReaderTabSource))
                     .w_full()
                     .min_h(230.0)
                     .color(theme::text_primary())
                     .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
                     .placeholder(
                         if is_img_kind {
-                            "Optional image caption or notes..."
+                            i18n::t(TextKey::ReaderImageCaptionPlaceholder)
                         } else {
-                            "Markdown or raw document text..."
+                            i18n::t(TextKey::ReaderSourcePlaceholder)
                         },
                         theme::text_muted(),
                     )
@@ -834,7 +1898,6 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
             .max_h(470.0)
             .scroll(ScrollSpec { stick_bottom: false });
 
-        let panel_width = s.inspector_width.clamp(300.0, 860.0);
         let md_w = (panel_width - 52.0).max(220.0);
         let preview_img = s
             .active_image
@@ -856,13 +1919,7 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
         if node.kind == NodeKind::Image {
             if !node.content.trim().is_empty() {
                 let md_src = doc_reader::wrap_for_preview(&node.content, doc_format);
-                let md_style = theme::markdown_style().text_width(md_w);
-                let md_el = Markdown::new(&md_src)
-                    .selectable(true)
-                    .on_task(|s: &mut AppState, _block_key, offset, checked| {
-                        s.toggle_selected_doc_task(offset, checked);
-                    })
-                    .render(&md_style);
+                let md_el = render_memoized_markdown(&node.id, md_src, doc_format, md_w, false);
                 preview_col =
                     preview_col.child(el().key("image_caption_markdown").w_full().child(md_el));
             }
@@ -870,18 +1927,12 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
         } else {
             let is_empty = node.content.trim().is_empty();
             let md_src = if is_empty {
-                "*Empty document. Click **Ingest File** above or switch to **Source** to write Markdown.*".to_string()
+                i18n::t(TextKey::ReaderEmptyEditMd).to_string()
             } else {
                 doc_reader::wrap_for_preview(&node.content, doc_format)
             };
 
-            let md_style = theme::markdown_style().text_width(md_w);
-            let md_el = Markdown::new(&md_src)
-                .selectable(true)
-                .on_task(|s: &mut AppState, _block_key, offset, checked| {
-                    s.toggle_selected_doc_task(offset, checked);
-                })
-                .render(&md_style);
+            let md_el = render_memoized_markdown(&node.id, md_src, doc_format, md_w, false);
 
             if is_empty {
                 preview_col.child(el().key("empty_doc_placeholder").w_full().child(md_el))
@@ -909,12 +1960,12 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
                 el().grow(1.0).min_w(0.0).py(4.0).child(
                     text_input(&s.append_note_input, theme::STATUS_TEXT)
                         .key("append_note")
-                        .label("Append markdown note or excerpt")
+                        .label(i18n::t(TextKey::ReaderAppendPlaceholder))
                         .single_line()
                         .w_full()
                         .color(theme::text_primary())
                         .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
-                        .placeholder("Quick append note...", theme::text_muted())
+                        .placeholder(i18n::t(TextKey::ReaderAppendPlaceholder), theme::text_muted())
                         .on_edit(|s: &mut AppState| &mut s.append_note_input)
                         .on_submit(|s: &mut AppState, _| {
                             s.commit_append_input();
@@ -937,20 +1988,20 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
                 .center_y()
                 .child(ghost_btn(
                     "btn_save_doc",
-                    "Save",
+                    i18n::t(TextKey::ReaderSave),
                     theme::text_muted(),
                     |s| {
                         s.sync_node_edits();
                         if let Some(bundle) = &s.bundle {
                             let _ = bundle.save_graph_atomic(&s.graph);
                         }
-                        s.notify_toast("Saved");
+                        s.notify_toast(i18n::t(TextKey::SettingsSavedToast));
                     },
                 ))
                 .child(el().grow(1.0))
                 .child(ghost_btn(
                     "btn_delete_doc",
-                    "Delete",
+                    i18n::t(TextKey::DashConfirmDelete),
                     theme::accent_danger().alpha(0.85),
                     move |s| s.delete_node(&nid_save_footer_del),
                 )),
@@ -992,39 +2043,47 @@ fn render_generic_node_inspector(s: &AppState, node: &Node) -> El {
         ))
         .child(close_panel_btn());
 
+    let is_summarizing = s.llm_pending_nodes.contains(&node.id);
+    let is_embed_media = matches!(node_kind, NodeKind::Video | NodeKind::Audio);
     let mut content = col().w_full().gap(14.0).child(hdr);
 
     if s.inspector_more_menu_open {
         let nid_exp_m = nid_explain.clone();
-        content = content.child(
-            col()
-                .key("inspector_more_menu")
-                .w_full()
-                .padding(6.0)
-                .gap(2.0)
-                .radius(8.0)
-                .fill(theme::bg_card())
-                .border(1.0, theme::border_subtle())
+        let mut more_menu = col()
+            .key("inspector_more_menu")
+            .w_full()
+            .padding(6.0)
+            .gap(2.0)
+            .radius(8.0)
+            .fill(theme::bg_card())
+            .border(1.0, theme::border_subtle());
+        if !is_embed_media {
+            more_menu = more_menu
                 .child(more_menu_item(
                     "btn_menu_ai_explain",
-                    "✦ Explain with AI",
+                    if is_summarizing {
+                        i18n::t(TextKey::ReaderSummarizing)
+                    } else {
+                        i18n::t(TextKey::ReaderExplainWithAi)
+                    },
                     theme::accent_claude(),
                     move |s| {
                         s.inspector_more_menu_open = false;
                         s.explain_node_ai(&nid_exp_m);
                     },
                 ))
-                .child(hairline())
-                .child(more_menu_item(
-                    "btn_menu_del_node",
-                    "Delete Node",
-                    theme::accent_danger(),
-                    move |s| {
-                        s.inspector_more_menu_open = false;
-                        s.delete_node(&nid_del_menu);
-                    },
-                )),
-        );
+                .child(hairline());
+        }
+        more_menu = more_menu.child(more_menu_item(
+            "btn_menu_del_node",
+            i18n::t(TextKey::ReaderDeleteNode),
+            theme::accent_danger(),
+            move |s| {
+                s.inspector_more_menu_open = false;
+                s.delete_node(&nid_del_menu);
+            },
+        ));
+        content = content.child(more_menu);
     }
 
     content = content
@@ -1050,108 +2109,140 @@ fn render_generic_node_inspector(s: &AppState, node: &Node) -> El {
                         }),
                 )
                 .child(hairline()),
-        )
-        .child(
-            col()
-                .w_full()
-                .min_h(160.0)
-                .max_h(320.0)
-                .scroll(ScrollSpec { stick_bottom: false })
-                .child(
-                    text_input(&s.inspector_content_edit, theme::BODY_TEXT)
-                        .key("inspector_content")
-                        .label("Note body")
-                        .w_full()
-                        .min_h(140.0)
-                        .color(theme::text_primary())
-                        .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
-                        .placeholder(
-                            "Write notes, markdown, or observations...",
-                            theme::text_muted(),
-                        )
-                        .on_edit(|s: &mut AppState| &mut s.inspector_content_edit)
-                        .on_input_change(|s: &mut AppState, _| {
-                            s.sync_from_inspector_edits();
-                        })
-                        .on_submit(|s: &mut AppState, _| {
-                            s.inspector_content_edit.insert("\n");
-                            s.sync_from_inspector_edits();
-                        }),
-                ),
-        )
-        .child(
-            row()
-                .w_full()
-                .gap(4.0)
-                .child(ghost_btn("fmt_bullet", "• List", theme::text_muted(), |s| {
-                    s.append_to_selected_node("- ")
-                }))
-                .child(ghost_btn("fmt_heading", "Heading", theme::text_muted(), |s| {
-                    s.append_to_selected_node("### ")
-                }))
-                .child(ghost_btn("fmt_todo", "Todo", theme::text_muted(), |s| {
-                    s.append_to_selected_node("- [ ] ")
-                }))
-                .child(ghost_btn("fmt_quote", "Quote", theme::text_muted(), |s| {
-                    s.append_to_selected_node("> ")
-                })),
-        )
-        .child(render_specialized_node_inspector(s, node));
+        );
+
+    if matches!(node_kind, NodeKind::Video | NodeKind::Audio) {
+        content = content
+            .child(render_media_inspector(s, node))
+            .child(hairline());
+    } else if node_kind == NodeKind::Calendar {
+        content = content
+            .child(render_calendar_inspector(s, node))
+            .child(hairline());
+    } else if node_kind == NodeKind::Drawing {
+        content = content
+            .child(render_drawing_inspector(s, node))
+            .child(hairline());
+    }
+
+    if !matches!(node_kind, NodeKind::Video | NodeKind::Drawing) {
+        content = content
+            .child(
+                col()
+                    .w_full()
+                    .min_h(160.0)
+                    .max_h(320.0)
+                    .scroll(ScrollSpec { stick_bottom: false })
+                    .child(
+                        text_input(&s.inspector_content_edit, theme::BODY_TEXT)
+                            .key("inspector_content")
+                            .label("Note body")
+                            .w_full()
+                            .min_h(140.0)
+                            .color(theme::text_primary())
+                            .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                            .placeholder(
+                                i18n::t(TextKey::ReaderSourcePlaceholder),
+                                theme::text_muted(),
+                            )
+                            .on_edit(|s: &mut AppState| &mut s.inspector_content_edit)
+                            .on_input_change(|s: &mut AppState, _| {
+                                s.sync_from_inspector_edits();
+                            })
+                            .on_submit(|s: &mut AppState, _| {
+                                s.inspector_content_edit.insert("\n");
+                                s.sync_from_inspector_edits();
+                            }),
+                    ),
+            )
+            .child(
+                row()
+                    .w_full()
+                    .gap(4.0)
+                    .child(ghost_btn(
+                        "fmt_bullet",
+                        i18n::t(TextKey::FmtList),
+                        theme::text_muted(),
+                        |s| s.append_to_selected_node("- "),
+                    ))
+                    .child(ghost_btn(
+                        "fmt_heading",
+                        i18n::t(TextKey::FmtHeading),
+                        theme::text_muted(),
+                        |s| s.append_to_selected_node("### "),
+                    ))
+                    .child(ghost_btn(
+                        "fmt_todo",
+                        i18n::t(TextKey::FmtTodo),
+                        theme::text_muted(),
+                        |s| s.append_to_selected_node("- [ ] "),
+                    ))
+                    .child(ghost_btn(
+                        "fmt_quote",
+                        i18n::t(TextKey::FmtQuote),
+                        theme::text_muted(),
+                        |s| s.append_to_selected_node("> "),
+                    )),
+            );
+    }
+
+    content = content.child(render_specialized_node_inspector(s, node));
 
     if matches!(
         node_kind,
-        NodeKind::Note | NodeKind::Excerpt | NodeKind::Concept | NodeKind::LlmSynthesis
+        NodeKind::Note
+            | NodeKind::Excerpt
+            | NodeKind::Concept
+            | NodeKind::LlmSynthesis
+            | NodeKind::Drawing
     ) {
         content = content
             .child(hairline())
             .child(render_translation_section(s, node));
     }
 
-    if let Some(summary) = &node.summary {
-        content = content.child(
-            col()
-                .w_full()
-                .gap(4.0)
-                .pl(12.0)
-                .py(2.0)
-                .border_sides([0.0, 0.0, 0.0, 2.0], theme::accent_claude().alpha(0.65))
-                .child(subtle_tag("✦ AI INSIGHTS", theme::accent_claude()))
-                .child(
-                    text(summary)
-                        .font(theme::BODY_TEXT)
-                        .color(theme::text_secondary())
-                        .w_full()
-                        .wrap(),
-                ),
-        );
+    if !is_embed_media {
+        if let Some(callout) = render_ai_summary_callout(s, node) {
+            content = content.child(callout);
+        }
     }
+
+    let mut footer_row = row().w_full().center_y().gap(4.0);
+    if !is_embed_media {
+        footer_row = footer_row.child(ghost_btn(
+            "btn_node_ai_explain",
+            if is_summarizing {
+                i18n::t(TextKey::ReaderSummarizing)
+            } else {
+                i18n::t(TextKey::ReaderExplain)
+            },
+            theme::accent_claude(),
+            move |s| {
+                s.explain_node_ai(&nid_explain);
+            },
+        ));
+    }
+    footer_row = footer_row
+        .child(ghost_btn(
+            "btn_save_node",
+            i18n::t(TextKey::ReaderSave),
+            theme::text_muted(),
+            |s| {
+                s.sync_node_edits();
+                if let Some(bundle) = &s.bundle {
+                    let _ = bundle.save_graph_atomic(&s.graph);
+                }
+                s.notify_toast(i18n::t(TextKey::SettingsSavedToast));
+            },
+        ))
+        .child(el().grow(1.0));
 
     content
         .child(hairline())
-        .child(
-            row()
-                .w_full()
-                .center_y()
-                .gap(4.0)
-                .child(ghost_btn(
-                    "btn_node_ai_explain",
-                    "✦ Explain",
-                    theme::accent_claude(),
-                    move |s| {
-                        s.explain_node_ai(&nid_explain);
-                    },
-                ))
-                .child(ghost_btn("btn_save_node", "Save", theme::text_muted(), |s| {
-                    s.sync_node_edits();
-                    if let Some(bundle) = &s.bundle {
-                        let _ = bundle.save_graph_atomic(&s.graph);
-                    }
-                    s.notify_toast("Saved");
-                }))
-                .child(el().grow(1.0))
+        .child(footer_row
                 .child(ghost_btn(
                     "btn_delete_node",
-                    "Delete",
+                    i18n::t(TextKey::DashConfirmDelete),
                     theme::accent_danger().alpha(0.85),
                     move |s| {
                         s.delete_node(&nid_del);
@@ -1188,7 +2279,10 @@ fn render_edge_inspector(s: &AppState, edge: &studynodes_graph::model::Edge) -> 
                 .w_full()
                 .center_y()
                 .gap(6.0)
-                .child(subtle_tag("CONNECTION", theme::text_muted()))
+                .child(subtle_tag(
+                    i18n::t(TextKey::EdgeInspectorHeading),
+                    theme::text_muted(),
+                ))
                 .child(el().grow(1.0))
                 .child(close_panel_btn()),
         )
@@ -1210,27 +2304,42 @@ fn render_edge_inspector(s: &AppState, edge: &studynodes_graph::model::Edge) -> 
             row()
                 .w_full()
                 .gap(8.0)
-                .child(underline_tab("rel_supports", "Supports", edge.relation == EdgeRelation::Supports).on_press(
-                    move |s: &mut AppState| {
+                .child(
+                    underline_tab(
+                        "rel_supports",
+                        &i18n::edge_relation_label(&EdgeRelation::Supports),
+                        edge.relation == EdgeRelation::Supports,
+                    )
+                    .on_press(move |s: &mut AppState| {
                         if let Some(e) = s.graph.get_edge_mut(&eid_sup) {
                             e.relation = EdgeRelation::Supports;
                         }
-                    },
-                ))
-                .child(underline_tab("rel_contradicts", "Contradicts", edge.relation == EdgeRelation::Contradicts).on_press(
-                    move |s: &mut AppState| {
+                    }),
+                )
+                .child(
+                    underline_tab(
+                        "rel_contradicts",
+                        &i18n::edge_relation_label(&EdgeRelation::Contradicts),
+                        edge.relation == EdgeRelation::Contradicts,
+                    )
+                    .on_press(move |s: &mut AppState| {
                         if let Some(e) = s.graph.get_edge_mut(&eid_con) {
                             e.relation = EdgeRelation::Contradicts;
                         }
-                    },
-                ))
-                .child(underline_tab("rel_explains", "Explains", edge.relation == EdgeRelation::Explains).on_press(
-                    move |s: &mut AppState| {
+                    }),
+                )
+                .child(
+                    underline_tab(
+                        "rel_explains",
+                        &i18n::edge_relation_label(&EdgeRelation::Explains),
+                        edge.relation == EdgeRelation::Explains,
+                    )
+                    .on_press(move |s: &mut AppState| {
                         if let Some(e) = s.graph.get_edge_mut(&eid_exp) {
                             e.relation = EdgeRelation::Explains;
                         }
-                    },
-                )),
+                    }),
+                ),
         )
         .child(
             row()
@@ -1238,26 +2347,32 @@ fn render_edge_inspector(s: &AppState, edge: &studynodes_graph::model::Edge) -> 
                 .center_y()
                 .gap(8.0)
                 .child(
-                    underline_tab("btn_edge_show_label", "Show Label", !edge.hide_label).on_press(
-                        move |s: &mut AppState| {
-                            s.toggle_edge_hide_label(&eid_show, false);
-                        },
-                    ),
+                    underline_tab(
+                        "btn_edge_show_label",
+                        i18n::t(TextKey::EdgeShowLabel),
+                        !edge.hide_label,
+                    )
+                    .on_press(move |s: &mut AppState| {
+                        s.toggle_edge_hide_label(&eid_show, false);
+                    }),
                 )
                 .child(
-                    underline_tab("btn_edge_hide_label", "Hide Label", edge.hide_label).on_press(
-                        move |s: &mut AppState| {
-                            s.toggle_edge_hide_label(&eid_hide, true);
-                        },
-                    ),
+                    underline_tab(
+                        "btn_edge_hide_label",
+                        i18n::t(TextKey::EdgeHideLabel),
+                        edge.hide_label,
+                    )
+                    .on_press(move |s: &mut AppState| {
+                        s.toggle_edge_hide_label(&eid_hide, true);
+                    }),
                 )
                 .child(el().grow(1.0))
                 .child(ghost_btn(
                     "btn_toggle_all_edge_labels",
                     if s.hide_all_edge_labels {
-                        "Show All"
+                        i18n::t(TextKey::EdgeShowAll)
                     } else {
-                        "Hide All"
+                        i18n::t(TextKey::EdgeHideAll)
                     },
                     theme::text_muted(),
                     |s| s.toggle_all_edge_labels(),
@@ -1268,7 +2383,10 @@ fn render_edge_inspector(s: &AppState, edge: &studynodes_graph::model::Edge) -> 
             col()
                 .w_full()
                 .gap(6.0)
-                .child(subtle_tag("LABEL", theme::text_muted()))
+                .child(subtle_tag(
+                    i18n::t(TextKey::EdgeLabelField),
+                    theme::text_muted(),
+                ))
                 .child(
                     text_input(&s.edit_edge_label, theme::CONTROL_TEXT)
                         .key("edge_label")
@@ -1289,7 +2407,10 @@ fn render_edge_inspector(s: &AppState, edge: &studynodes_graph::model::Edge) -> 
             col()
                 .w_full()
                 .gap(6.0)
-                .child(subtle_tag("NOTE", theme::text_muted()))
+                .child(subtle_tag(
+                    i18n::t(TextKey::EdgeNoteField),
+                    theme::text_muted(),
+                ))
                 .child(
                     text_input(&s.edit_edge_note, theme::BODY_TEXT)
                         .key("edge_note")
@@ -1310,24 +2431,23 @@ fn render_edge_inspector(s: &AppState, edge: &studynodes_graph::model::Edge) -> 
                 ),
         )
         .child(hairline())
-        .child(
-            ghost_btn(
-                "btn_delete_edge",
-                "Delete Connection",
-                theme::accent_danger().alpha(0.85),
-                move |s| {
-                    s.graph.remove_edge(&edge_id_for_delete);
-                    s.selected_edge = None;
-                    s.notify_toast("Deleted connection");
-                },
-            ),
-        )
+        .child(ghost_btn(
+            "btn_delete_edge",
+            i18n::t(TextKey::EdgeDeleteBtn),
+            theme::accent_danger().alpha(0.85),
+            move |s| {
+                s.graph.remove_edge(&edge_id_for_delete);
+                s.selected_edge = None;
+                s.notify_toast(i18n::t(TextKey::EdgeDeleteBtn));
+            },
+        ))
 }
 
 fn render_readonly_doc_panel(s: &AppState, node: &Node, panel_width: f32) -> El {
     let doc_format = s.node_doc_format(&node.id);
     let fmt_badge = doc_reader::format_badge(doc_format);
     let has_pdf = s.active_pdf.as_ref().is_some_and(|p| p.node_id == node.id);
+    let is_summarizing = s.llm_pending_nodes.contains(&node.id);
     let nid_ext = node.id.clone();
     let nid_sum = node.id.clone();
 
@@ -1346,7 +2466,7 @@ fn render_readonly_doc_panel(s: &AppState, node: &Node, panel_width: f32) -> El 
         .child(el().grow(1.0))
         .child(ghost_btn(
             "btn_toggle_readonly",
-            "Edit",
+            i18n::t(TextKey::ReaderEdit),
             theme::accent_claude(),
             |s| {
                 s.set_reader_read_only(false);
@@ -1376,77 +2496,7 @@ fn render_readonly_doc_panel(s: &AppState, node: &Node, panel_width: f32) -> El 
 
     let reader_body = if has_pdf && effective_tab == DocViewTab::Pages {
         let pdf = s.active_pdf.as_ref().unwrap();
-        let cur_page = pdf.page_index;
-        let total_pages = pdf.page_count.max(1);
-        let cur_zoom = pdf.zoom;
-        let aspect = if pdf.page_size.0 > 0 && pdf.page_size.1 > 0 {
-            Some(pdf.page_size.0 as f32 / pdf.page_size.1 as f32)
-        } else {
-            None
-        };
-
-        let mut pdf_col = col().w_full().grow(1.0).min_h(0.0).gap(10.0).child(
-            row()
-                .key("readonly_pdf_controls")
-                .w_full()
-                .center_y()
-                .gap(4.0)
-                .child(ghost_btn("btn_pdf_prev", "‹", theme::text_secondary(), move |s| {
-                    s.set_pdf_page(cur_page.saturating_sub(1));
-                }))
-                .child(
-                    text(format!("{} / {}", cur_page + 1, total_pages))
-                        .font(theme::STATUS_TEXT)
-                        .color(theme::text_muted()),
-                )
-                .child(ghost_btn("btn_pdf_next", "›", theme::text_secondary(), move |s| {
-                    s.set_pdf_page(cur_page + 1);
-                }))
-                .child(el().grow(1.0))
-                .child(ghost_btn("btn_pdf_zout", "−", theme::text_muted(), move |s| {
-                    s.set_pdf_zoom(cur_zoom - 0.25);
-                }))
-                .child(
-                    text(format!("{}%", (cur_zoom * 100.0).round() as u32))
-                        .font(theme::BADGE_TEXT)
-                        .color(theme::text_muted()),
-                )
-                .child(ghost_btn("btn_pdf_zin", "+", theme::text_muted(), move |s| {
-                    s.set_pdf_zoom(cur_zoom + 0.25);
-                })),
-        );
-
-        if let Some(err) = &pdf.error {
-            pdf_col = pdf_col.child(
-                text(format!("PDF render note: {}", err))
-                    .font(theme::BODY_TEXT)
-                    .color(theme::text_secondary())
-                    .w_full()
-                    .wrap(),
-            );
-        } else {
-            let mut page_el = el()
-                .key(format!("pdf_page_canvas_{}", cur_page))
-                .w_full()
-                .radius(4.0)
-                .border(1.0, theme::border_subtle())
-                .clip_soft(0.0)
-                .pixels_fit(&pdf.pixels, SurfaceFit::Fit);
-            if let Some(ar) = aspect {
-                page_el = page_el.aspect_ratio(ar);
-            } else {
-                page_el = page_el.min_h(320.0);
-            }
-            pdf_col = pdf_col.child(
-                col()
-                    .w_full()
-                    .grow(1.0)
-                    .min_h(0.0)
-                    .scroll(ScrollSpec { stick_bottom: false })
-                    .child(page_el),
-            );
-        }
-        pdf_col
+        render_pdf_reader_panel(s, pdf, panel_width, None)
     } else {
         let mut preview_col = col()
             .key("integrated_md_reader")
@@ -1480,8 +2530,7 @@ fn render_readonly_doc_panel(s: &AppState, node: &Node, panel_width: f32) -> El 
                 .child(render_image_vision_section(s, node));
             if !node.content.trim().is_empty() {
                 let md_src = doc_reader::wrap_for_preview(&node.content, doc_format);
-                let md_style = theme::markdown_style().text_width(md_w);
-                let md_el = Markdown::new(&md_src).selectable(true).render(&md_style);
+                let md_el = render_memoized_markdown(&node.id, md_src, doc_format, md_w, true);
                 preview_col =
                     preview_col.child(el().key("image_caption_markdown").w_full().child(md_el));
             }
@@ -1489,13 +2538,12 @@ fn render_readonly_doc_panel(s: &AppState, node: &Node, panel_width: f32) -> El 
         } else {
             let is_empty = node.content.trim().is_empty();
             let md_src = if is_empty {
-                "*Read-only mode. Click **Edit** above to ingest a file or write Markdown.*".to_string()
+                i18n::t(TextKey::ReaderEmptyReadonlyMd).to_string()
             } else {
                 doc_reader::wrap_for_preview(&node.content, doc_format)
             };
 
-            let md_style = theme::markdown_style().text_width(md_w);
-            let md_el = Markdown::new(&md_src).selectable(true).render(&md_style);
+            let md_el = render_memoized_markdown(&node.id, md_src, doc_format, md_w, true);
 
             if is_empty {
                 preview_col.child(el().key("empty_doc_placeholder").w_full().child(md_el))
@@ -1527,7 +2575,7 @@ fn render_readonly_doc_panel(s: &AppState, node: &Node, panel_width: f32) -> El 
                 .border(1.0, theme::border_subtle())
                 .child(more_menu_item(
                     "btn_readonly_excerpt",
-                    "❝ Create Excerpt",
+                    i18n::t(TextKey::ReaderCreateExcerpt),
                     theme::text_primary(),
                     |s| {
                         s.inspector_more_menu_open = false;
@@ -1536,7 +2584,11 @@ fn render_readonly_doc_panel(s: &AppState, node: &Node, panel_width: f32) -> El 
                 ))
                 .child(more_menu_item(
                     "btn_readonly_summarize",
-                    "✦ Summarize with AI",
+                    if is_summarizing {
+                        i18n::t(TextKey::ReaderSummarizing)
+                    } else {
+                        i18n::t(TextKey::ReaderSummarizeWithAi)
+                    },
                     theme::accent_claude(),
                     move |s| {
                         s.inspector_more_menu_open = false;
@@ -1545,7 +2597,7 @@ fn render_readonly_doc_panel(s: &AppState, node: &Node, panel_width: f32) -> El 
                 ))
                 .child(more_menu_item(
                     "btn_open_external_reader",
-                    "Open in External App ↗",
+                    i18n::t(TextKey::ReaderOpenExternal),
                     theme::text_secondary(),
                     move |s| {
                         s.inspector_more_menu_open = false;
@@ -1563,6 +2615,10 @@ fn render_readonly_doc_panel(s: &AppState, node: &Node, panel_width: f32) -> El 
             .wrap(),
     );
 
+    if let Some(callout) = render_ai_summary_callout(s, node) {
+        sheet = sheet.child(callout);
+    }
+
     if has_pdf {
         sheet = sheet.child(
             row()
@@ -1573,7 +2629,7 @@ fn render_readonly_doc_panel(s: &AppState, node: &Node, panel_width: f32) -> El 
                 .child(
                     underline_tab(
                         "tab_doc_pages",
-                        "Pages",
+                        i18n::t(TextKey::ReaderTabPages),
                         s.doc_view_tab == DocViewTab::Pages || s.doc_view_tab == DocViewTab::Source,
                     )
                     .on_press(|s: &mut AppState| {
@@ -1581,10 +2637,14 @@ fn render_readonly_doc_panel(s: &AppState, node: &Node, panel_width: f32) -> El 
                     }),
                 )
                 .child(
-                    underline_tab("tab_doc_preview", "Text", s.doc_view_tab == DocViewTab::Preview)
-                        .on_press(|s: &mut AppState| {
-                            s.doc_view_tab = DocViewTab::Preview;
-                        }),
+                    underline_tab(
+                        "tab_doc_preview",
+                        i18n::t(TextKey::ReaderTabText),
+                        s.doc_view_tab == DocViewTab::Preview,
+                    )
+                    .on_press(|s: &mut AppState| {
+                        s.doc_view_tab = DocViewTab::Preview;
+                    }),
                 ),
         );
     } else {
@@ -1601,10 +2661,10 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
             let cur = node.meta.mastery.as_deref().unwrap_or("new");
             let mut mastery_row = row().w_full().gap(10.0);
             for (key, label, val) in [
-                ("mast_new", "New", "new"),
-                ("mast_again", "Again", "again"),
-                ("mast_good", "Good", "good"),
-                ("mast_easy", "Easy", "easy"),
+                ("mast_new", i18n::t(TextKey::ReaderMasteryNew), "new"),
+                ("mast_again", i18n::t(TextKey::ReaderMasteryAgain), "again"),
+                ("mast_good", i18n::t(TextKey::ReaderMasteryGood), "good"),
+                ("mast_easy", i18n::t(TextKey::ReaderMasteryEasy), "easy"),
             ] {
                 let id_c = nid.clone();
                 mastery_row = mastery_row.child(underline_tab(key, label, cur == val).on_press(
@@ -1618,7 +2678,10 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                 .w_full()
                 .gap(10.0)
                 .child(hairline())
-                .child(subtle_tag("ANSWER / BACK", theme::text_muted()))
+                .child(subtle_tag(
+                    i18n::t(TextKey::FlashcardAnswerLabel),
+                    theme::text_muted(),
+                ))
                 .child(
                     text_input(&s.inspector_answer_edit, theme::BODY_TEXT)
                         .key("inspector_answer")
@@ -1629,7 +2692,7 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                         .color(theme::text_primary())
                         .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
                         .placeholder(
-                            "Recall explanation shown when card is flipped...",
+                            i18n::t(TextKey::FlashcardAnswerPlaceholder),
                             theme::text_muted(),
                         )
                         .on_edit(|s: &mut AppState| &mut s.inspector_answer_edit)
@@ -1637,7 +2700,10 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                             s.sync_from_inspector_edits();
                         }),
                 )
-                .child(subtle_tag("MASTERY", theme::text_muted()))
+                .child(subtle_tag(
+                    i18n::t(TextKey::FlashcardMasteryLabel),
+                    theme::text_muted(),
+                ))
                 .child(mastery_row)
         }
         NodeKind::Formula => {
@@ -1773,6 +2839,24 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
             let framed = node.meta.section_framed;
             let id_a = nid.clone();
             let id_b = nid.clone();
+            let id_shot = nid.clone();
+            let sec_slug: String = node
+                .title
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '_'
+                    }
+                })
+                .take(40)
+                .collect();
+            let shot_name = if sec_slug.trim_matches('_').is_empty() {
+                "section_scheme.png".to_string()
+            } else {
+                format!("{}_scheme.png", sec_slug.trim_matches('_'))
+            };
             let sz = crate::state::node_world_size(node);
             col()
                 .w_full()
@@ -1783,32 +2867,77 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                         .w_full()
                         .gap(14.0)
                         .child(
-                            underline_tab("insp_sec_framed", "▭ Framed Group", framed).on_press(
-                                move |s: &mut AppState| {
-                                    if let Some(sec) = s.graph.get_node(&id_a) {
-                                        if !sec.meta.section_framed {
-                                            s.toggle_section_framed(&id_a);
-                                        }
+                            underline_tab(
+                                "insp_sec_framed",
+                                i18n::t(TextKey::SectionFramedTab),
+                                framed,
+                            )
+                            .on_press(move |s: &mut AppState| {
+                                if let Some(sec) = s.graph.get_node(&id_a) {
+                                    if !sec.meta.section_framed {
+                                        s.toggle_section_framed(&id_a);
                                     }
-                                },
-                            ),
+                                }
+                            }),
                         )
                         .child(
-                            underline_tab("insp_sec_banner", "— Banner Only", !framed).on_press(
-                                move |s: &mut AppState| {
-                                    if let Some(sec) = s.graph.get_node(&id_b) {
-                                        if sec.meta.section_framed {
-                                            s.toggle_section_framed(&id_b);
-                                        }
+                            underline_tab(
+                                "insp_sec_banner",
+                                i18n::t(TextKey::SectionBannerTab),
+                                !framed,
+                            )
+                            .on_press(move |s: &mut AppState| {
+                                if let Some(sec) = s.graph.get_node(&id_b) {
+                                    if sec.meta.section_framed {
+                                        s.toggle_section_framed(&id_b);
                                     }
-                                },
-                            ),
+                                }
+                            }),
                         ),
                 )
                 .child(
-                    text(format!("Canvas bounds: {} × {} px", sz.0 as i32, sz.1 as i32))
-                        .font(theme::STATUS_TEXT)
-                        .color(theme::text_muted()),
+                    row()
+                        .w_full()
+                        .center_y()
+                        .gap(8.0)
+                        .child(
+                            text(i18n::fmt_canvas_bounds(sz.0 as i32, sz.1 as i32))
+                                .font(theme::STATUS_TEXT)
+                                .color(theme::text_muted()),
+                        )
+                        .child(el().grow(1.0))
+                        .child(
+                            el()
+                                .key("btn_inspector_section_screenshot")
+                                .size(26.0, 26.0)
+                                .radius(6.0)
+                                .fill(theme::bg_control())
+                                .border(1.0, theme::border_subtle())
+                                .hover(theme::hover_subtle())
+                                .press(theme::press_subtle())
+                                .center()
+                                .cursor(Cursor::Pointer)
+                                .on_press_tx(move |_s: &mut AppState, tx: &mut Tx| {
+                                    let nid = id_shot.clone();
+                                    let opts = FileDialogOptions {
+                                        title: i18n::t(TextKey::SectionScreenshotBtn).to_string(),
+                                        file_name: Some(shot_name.clone()),
+                                        ..Default::default()
+                                    }
+                                    .filter("PNG Image", &["png"]);
+                                    tx.save_file(opts, move |s: &mut AppState, res, _| {
+                                        if let Ok(Some(dest)) = res {
+                                            let _ =
+                                                s.export_scheme_screenshot(Some(&nid), Some(dest));
+                                        }
+                                    });
+                                })
+                                .child(
+                                    text("📷")
+                                        .font(theme::STATUS_TEXT)
+                                        .color(theme::text_secondary()),
+                                ),
+                        ),
                 )
         }
         NodeKind::Excerpt => {
@@ -1819,9 +2948,9 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                         .get_node(src_id)
                         .map(|d| d.title.as_str())
                         .unwrap_or("Source Document");
-                    format!("▤ Open '{}' · p.{} ↗", doc_title, page_opt.unwrap_or(0) + 1)
+                    format!("▤ {} · p.{} ↗", doc_title, page_opt.unwrap_or(0) + 1)
                 }
-                _ => "No source document linked".into(),
+                _ => i18n::t(TextKey::ExcerptNoSource).into(),
             };
             ghost_btn("btn_inspector_excerpt_jump", &jump_label, theme::accent_claude(), move |s| {
                 s.jump_to_excerpt_source(&nid);
@@ -1829,7 +2958,7 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
         }
         NodeKind::Sequence => ghost_btn(
             "btn_inspector_seq_next",
-            "+ Spawn Next Step →",
+            i18n::t(TextKey::SequenceSpawnNext),
             theme::accent_claude(),
             move |s| {
                 s.add_next_sequence_step(&nid);
@@ -1838,7 +2967,7 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
         NodeKind::Checklist => {
             let tasks = doc_reader::parse_markdown_tasks(&node.content);
             let done = tasks.iter().filter(|(c, _)| *c).count();
-            text(format!("Progress: {}/{} tasks completed", done, tasks.len()))
+            text(i18n::fmt_tasks_progress(done, tasks.len()))
                 .font(theme::STATUS_TEXT)
                 .color(theme::text_muted())
         }
@@ -1963,14 +3092,18 @@ fn render_image_vision_section(s: &AppState, node: &Node) -> El {
                     s.run_image_ocr(&nid_text, OcrMode::PlainText);
                 })
                 .child(
-                    text(if is_busy { "Extracting..." } else { "Extract Text" })
-                        .font(theme::BADGE_TEXT)
-                        .color(theme::text_inverted()),
+                    text(if is_busy {
+                        i18n::t(TextKey::ReaderOcrExtracting)
+                    } else {
+                        i18n::t(TextKey::ReaderOcrExtractText)
+                    })
+                    .font(theme::BADGE_TEXT)
+                    .color(theme::text_inverted()),
                 ),
         )
         .child(ghost_btn(
             "btn_img_ocr_formula",
-            "Formula",
+            i18n::t(TextKey::ReaderOcrFormula),
             theme::text_secondary(),
             move |s| {
                 s.run_image_ocr(&nid_formula, OcrMode::EquationFormula);
@@ -2126,13 +3259,17 @@ fn render_image_vision_section(s: &AppState, node: &Node) -> El {
                                     s.mark_copied("ocr", "Copied extracted text");
                                 })
                                 .child(
-                                    text(if ocr_copied { "Copied ✓" } else { "Copy" })
-                                        .font(theme::BADGE_TEXT)
-                                        .color(if ocr_copied {
-                                            theme::accent_claude()
-                                        } else {
-                                            theme::text_secondary()
-                                        }),
+                                    text(if ocr_copied {
+                                        i18n::t(TextKey::ReaderCopied)
+                                    } else {
+                                        i18n::t(TextKey::ReaderCopy)
+                                    })
+                                    .font(theme::BADGE_TEXT)
+                                    .color(if ocr_copied {
+                                        theme::accent_claude()
+                                    } else {
+                                        theme::text_secondary()
+                                    }),
                                 ),
                         )
                         .child(ghost_btn(
@@ -2197,7 +3334,11 @@ fn render_translation_section(s: &AppState, node: &Node) -> El {
         .child(el().grow(1.0))
         .child(ghost_btn(
             "btn_translate_node",
-            if is_busy { "Translating..." } else { "Translate" },
+            if is_busy {
+                i18n::t(TextKey::ReaderTranslating)
+            } else {
+                i18n::t(TextKey::ReaderTranslate)
+            },
             theme::text_primary(),
             move |s| {
                 s.run_node_translation(&nid_trans, None);
@@ -2255,13 +3396,17 @@ fn render_translation_section(s: &AppState, node: &Node) -> El {
                                     s.mark_copied("translation", "Copied translation");
                                 })
                                 .child(
-                                    text(if tr_copied { "Copied ✓" } else { "Copy" })
-                                        .font(theme::BADGE_TEXT)
-                                        .color(if tr_copied {
-                                            theme::accent_claude()
-                                        } else {
-                                            theme::text_secondary()
-                                        }),
+                                    text(if tr_copied {
+                                        i18n::t(TextKey::ReaderCopied)
+                                    } else {
+                                        i18n::t(TextKey::ReaderCopy)
+                                    })
+                                    .font(theme::BADGE_TEXT)
+                                    .color(if tr_copied {
+                                        theme::accent_claude()
+                                    } else {
+                                        theme::text_secondary()
+                                    }),
                                 ),
                         )
                         .child(ghost_btn(
@@ -2285,4 +3430,1885 @@ fn render_translation_section(s: &AppState, node: &Node) -> El {
     }
 
     tr_col
+}
+
+pub(crate) const DRAWING_COLORS: [(&str, &str); 5] = [
+    ("draw_col_ink", "#F4F3EE"),
+    ("draw_col_coral", "#E07A5F"),
+    ("draw_col_blue", "#8FA8C8"),
+    ("draw_col_sage", "#81B29A"),
+    ("draw_col_gold", "#F2CC8F"),
+];
+
+pub(crate) fn drawing_swatch_color(hex: &str) -> Color {
+    if !theme::active_theme().is_dark() && hex == "#F4F3EE" {
+        theme::text_primary()
+    } else {
+        theme::hex(hex)
+    }
+}
+
+fn render_drawing_inspector(s: &AppState, node: &Node) -> El {
+    let accent = theme::kind_accent(NodeKind::Drawing);
+    let pad_w = (s.inspector_width - 42.0).max(200.0);
+    let pad_h = 220.0;
+    let shape = crate::canvas_view::build_drawing_shape(&node.meta.drawing_strokes, pad_w, pad_h, 1.0);
+    let drag_id = node.id.clone();
+    let undo_id = node.id.clone();
+    let clear_id = node.id.clone();
+    let text_id = node.id.clone();
+    let formula_id = node.id.clone();
+    let spawn_note_id = node.id.clone();
+    let spawn_formula_id = node.id.clone();
+    let clear_ocr_id = node.id.clone();
+    let is_busy = s.vision_pending_nodes.contains(&node.id);
+    let eraser_active = s.drawing_eraser;
+
+    let mut pad = el()
+        .key("inspector_drawing_pad")
+        .w(pad_w)
+        .h(pad_h)
+        .radius(8.0)
+        .fill(theme::bg_input())
+        .border(1.0, theme::border_default())
+        .cursor(Cursor::Crosshair)
+        .on_drag(move |s: &mut AppState, d, tx| match d.phase {
+            Phase::Down => {
+                let nx = (d.x / d.w.max(1.0)).clamp(0.0, 1.0);
+                let ny = (d.y / d.h.max(1.0)).clamp(0.0, 1.0);
+                s.begin_drawing_stroke(&drag_id, nx, ny);
+                tx.instant();
+            }
+            Phase::Move => {
+                let nx = (d.x / d.w.max(1.0)).clamp(0.0, 1.0);
+                let ny = (d.y / d.h.max(1.0)).clamp(0.0, 1.0);
+                s.extend_drawing_stroke(&drag_id, nx, ny);
+                tx.instant();
+            }
+            Phase::Up => {
+                s.finish_drawing_stroke(&drag_id);
+            }
+        })
+        .child(canvas(shape).absolute(0.0, 0.0).w_full().h_full());
+
+    if node.meta.drawing_strokes.is_empty() {
+        pad = pad.child(
+            el().absolute(0.0, 0.0).w_full().h_full().center().child(
+                text(i18n::t(TextKey::DrawingEmptyHint))
+                    .font(theme::STATUS_TEXT)
+                    .color(theme::text_muted()),
+            ),
+        );
+    }
+
+    let mut color_swatches = row().center_y().gap(5.0);
+    for (ckey, hex) in DRAWING_COLORS {
+        let active = !eraser_active && s.drawing_color_hex.eq_ignore_ascii_case(hex);
+        let swatch_color = drawing_swatch_color(hex);
+        color_swatches = color_swatches.child(
+            el()
+                .key(ckey)
+                .size(16.0, 16.0)
+                .radius(8.0)
+                .fill(swatch_color)
+                .border(
+                    if active { 2.0 } else { 1.0 },
+                    if active {
+                        theme::text_primary()
+                    } else {
+                        theme::border_default()
+                    },
+                )
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.drawing_eraser = false;
+                    s.drawing_color_hex = hex.to_string();
+                }),
+        );
+    }
+
+    let widths = [
+        ("draw_w_thin", i18n::t(TextKey::DrawingThin), 2.0f32),
+        ("draw_w_med", i18n::t(TextKey::DrawingMedium), 3.5f32),
+        ("draw_w_thick", i18n::t(TextKey::DrawingThick), 6.0f32),
+    ];
+    let mut width_row = row().center_y().gap(4.0);
+    for (wkey, wlabel, wval) in widths {
+        let active = (s.drawing_stroke_width - wval).abs() < 0.4;
+        width_row = width_row.child(
+            el()
+                .key(wkey)
+                .px(7.0)
+                .py(3.0)
+                .radius(5.0)
+                .fill(if active {
+                    theme::bg_control()
+                } else {
+                    Color::TRANSPARENT
+                })
+                .border(
+                    1.0,
+                    if active {
+                        theme::border_strong()
+                    } else {
+                        theme::border_subtle()
+                    },
+                )
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.drawing_stroke_width = wval;
+                })
+                .child(
+                    text(wlabel)
+                        .font(theme::BADGE_TEXT)
+                        .color(if active {
+                            theme::text_primary()
+                        } else {
+                            theme::text_muted()
+                        }),
+                ),
+        );
+    }
+
+    let tools_row = row()
+        .w_full()
+        .center_y()
+        .gap(5.0)
+        .child(
+            el()
+                .key("btn_draw_pen")
+                .px(8.0)
+                .py(4.0)
+                .radius(5.0)
+                .fill(if !eraser_active {
+                    accent.alpha(0.18)
+                } else {
+                    theme::bg_control()
+                })
+                .border(
+                    1.0,
+                    if !eraser_active {
+                        accent.alpha(0.55)
+                    } else {
+                        theme::border_subtle()
+                    },
+                )
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut AppState| {
+                    s.drawing_eraser = false;
+                })
+                .child(
+                    text(i18n::t(TextKey::DrawingPen))
+                        .font(theme::BADGE_TEXT)
+                        .color(if !eraser_active {
+                            accent
+                        } else {
+                            theme::text_secondary()
+                        }),
+                ),
+        )
+        .child(
+            el()
+                .key("btn_draw_eraser")
+                .px(8.0)
+                .py(4.0)
+                .radius(5.0)
+                .fill(if eraser_active {
+                    accent.alpha(0.18)
+                } else {
+                    theme::bg_control()
+                })
+                .border(
+                    1.0,
+                    if eraser_active {
+                        accent.alpha(0.55)
+                    } else {
+                        theme::border_subtle()
+                    },
+                )
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut AppState| {
+                    s.drawing_eraser = true;
+                })
+                .child(
+                    text(i18n::t(TextKey::DrawingEraser))
+                        .font(theme::BADGE_TEXT)
+                        .color(if eraser_active {
+                            accent
+                        } else {
+                            theme::text_secondary()
+                        }),
+                ),
+        )
+        .child(el().grow(1.0))
+        .child(ghost_icon_btn(
+            "btn_draw_undo",
+            "↺",
+            theme::text_secondary(),
+            false,
+            move |s| s.undo_drawing_stroke(&undo_id),
+        ))
+        .child(ghost_icon_btn(
+            "btn_draw_clear",
+            "×",
+            theme::text_muted(),
+            false,
+            move |s| s.clear_drawing_strokes(&clear_id),
+        ));
+
+    let style_row = row()
+        .w_full()
+        .center_y()
+        .gap(8.0)
+        .child(color_swatches)
+        .child(el().grow(1.0))
+        .child(width_row);
+
+    let interpret_row = row()
+        .w_full()
+        .center_y()
+        .gap(6.0)
+        .child(
+            el()
+                .key("btn_draw_interpret_text")
+                .h(26.0)
+                .px(10.0)
+                .radius(6.0)
+                .fill(theme::accent_primary())
+                .hover(theme::accent_primary().alpha(0.88))
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.interpret_drawing_node(&text_id, OcrMode::PlainText);
+                })
+                .child(
+                    text(if is_busy {
+                        i18n::t(TextKey::DrawingInterpreting)
+                    } else {
+                        i18n::t(TextKey::DrawingInterpretText)
+                    })
+                    .font(theme::BADGE_TEXT)
+                    .color(theme::text_inverted()),
+                ),
+        )
+        .child(ghost_btn(
+            "btn_draw_interpret_formula",
+            i18n::t(TextKey::DrawingInterpretFormula),
+            theme::accent_claude(),
+            move |s| s.interpret_drawing_node(&formula_id, OcrMode::EquationFormula),
+        ));
+
+    let mut sec = col()
+        .key("drawing_inspector_section")
+        .w_full()
+        .gap(10.0)
+        .child(tools_row)
+        .child(style_row)
+        .child(pad)
+        .child(interpret_row);
+
+    if let Some(err) = &s.vision_last_error {
+        sec = sec.child(
+            text(err)
+                .font(theme::BADGE_TEXT)
+                .color(theme::accent_danger())
+                .w_full()
+                .wrap(),
+        );
+    }
+
+    if let Some(extracted) = node
+        .meta
+        .extracted_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        let extracted_owned = extracted.to_string();
+        let draw_copied = s.is_recently_copied("drawing_ocr");
+        sec = sec.child(
+            col()
+                .key("drawing_ocr_result")
+                .w_full()
+                .gap(8.0)
+                .padding(10.0)
+                .radius(8.0)
+                .fill(theme::bg_card())
+                .border(1.0, accent.alpha(0.35))
+                .child(subtle_tag(
+                    i18n::t(TextKey::DrawingRecognizedTitle),
+                    accent,
+                ))
+                .child(
+                    text(extracted)
+                        .font(theme::BODY_TEXT)
+                        .color(theme::text_primary())
+                        .w_full()
+                        .wrap(),
+                )
+                .child(
+                    row()
+                        .w_full()
+                        .center_y()
+                        .gap(4.0)
+                        .child(
+                            el()
+                                .key("btn_draw_copy_ocr")
+                                .px(7.0)
+                                .py(3.0)
+                                .radius(5.0)
+                                .fill(theme::bg_control())
+                                .hover(theme::hover_subtle())
+                                .cursor(Cursor::Pointer)
+                                .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                                    tx.copy(extracted_owned.clone());
+                                    s.mark_copied(
+                                        "drawing_ocr",
+                                        i18n::t(TextKey::ReaderCopied),
+                                    );
+                                })
+                                .child(
+                                    text(if draw_copied {
+                                        i18n::t(TextKey::ReaderCopied)
+                                    } else {
+                                        i18n::t(TextKey::DrawingCopyText)
+                                    })
+                                    .font(theme::BADGE_TEXT)
+                                    .color(if draw_copied {
+                                        accent
+                                    } else {
+                                        theme::text_primary()
+                                    }),
+                                ),
+                        )
+                        .child(el().grow(1.0))
+                        .child(ghost_btn(
+                            "btn_draw_spawn_note",
+                            "+ Note",
+                            theme::text_secondary(),
+                            move |s| {
+                                s.spawn_note_from_extracted_text(&spawn_note_id);
+                            },
+                        ))
+                        .child(ghost_btn(
+                            "btn_draw_spawn_formula",
+                            "+ Formula",
+                            theme::text_secondary(),
+                            move |s| {
+                                s.spawn_formula_from_extracted_text(&spawn_formula_id);
+                            },
+                        ))
+                        .child(ghost_btn(
+                            "btn_draw_clear_ocr",
+                            "×",
+                            theme::text_muted(),
+                            move |s| s.clear_extracted_text(&clear_ocr_id),
+                        )),
+                ),
+        );
+    }
+
+    sec
+}
+
+fn render_media_inspector(s: &AppState, node: &Node) -> El {
+    let accent = theme::kind_accent(node.kind);
+    let nid_pick = node.id.clone();
+    let nid_url_submit = node.id.clone();
+    let nid_url_btn = node.id.clone();
+    let nid_ts_submit = node.id.clone();
+    let nid_ts_btn = node.id.clone();
+
+    let mut sec = col()
+        .key("media_inspector_section")
+        .w_full()
+        .gap(10.0)
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(6.0)
+                .child(
+                    el()
+                        .key("btn_ingest_media")
+                        .px(9.0)
+                        .py(5.0)
+                        .radius(6.0)
+                        .fill(theme::bg_control())
+                        .border(1.0, theme::border_default())
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press_tx(move |_s: &mut AppState, tx: &mut Tx| {
+                            let opts = FileDialogOptions {
+                                title: i18n::t(TextKey::MediaIngestFile).to_string(),
+                                ..Default::default()
+                            }
+                            .filter(
+                                "Media",
+                                &[
+                                    "mp4", "mov", "m4v", "webm", "mkv", "mp3", "wav", "m4a",
+                                    "flac", "ogg", "aac", "opus",
+                                ],
+                            );
+                            let nid = nid_pick.clone();
+                            tx.open_file(opts, move |s: &mut AppState, res, _| {
+                                if let Ok(Some(path)) = res {
+                                    s.ingest_media_into_node(&nid, &path);
+                                }
+                            });
+                        })
+                        .child(
+                            text(format!("+ {}", i18n::t(TextKey::MediaIngestFile)))
+                                .font(theme::STATUS_TEXT)
+                                .color(theme::text_primary()),
+                        ),
+                )
+                .child(el().grow(1.0)),
+        )
+        .child(
+            row()
+                .w_full()
+                .h(34.0)
+                .pl(10.0)
+                .pr(4.0)
+                .gap(6.0)
+                .center_y()
+                .radius(6.0)
+                .fill(theme::bg_input())
+                .border(1.0, theme::border_subtle())
+                .child(
+                    text_input(&s.media_url_edit, theme::STATUS_TEXT)
+                        .key("input_media_url")
+                        .label("Media URL")
+                        .single_line()
+                        .grow(1.0)
+                        .color(theme::text_primary())
+                        .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                        .placeholder(i18n::t(TextKey::MediaUrlPlaceholder), theme::text_muted())
+                        .on_edit(|s: &mut AppState| &mut s.media_url_edit)
+                        .on_submit(move |s: &mut AppState, _| {
+                            s.save_media_url(&nid_url_submit);
+                        }),
+                )
+                .child(
+                    el()
+                        .key("btn_save_media_url")
+                        .px(8.0)
+                        .py(4.0)
+                        .radius(5.0)
+                        .fill(accent.alpha(0.18))
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.save_media_url(&nid_url_btn);
+                        })
+                        .child(
+                            text(i18n::t(TextKey::MediaSaveBtn))
+                                .font(theme::BADGE_TEXT)
+                                .color(accent),
+                        ),
+                ),
+        );
+
+    if let Some(player) = s.media_player_for(&node.id) {
+        if node.kind == NodeKind::Video {
+            sec = sec.child(
+                el()
+                    .w_full()
+                    .h(168.0)
+                    .radius(8.0)
+                    .fill(Color::BLACK)
+                    .video(player, SurfaceFit::Fit),
+            );
+        }
+        let nid_play = node.id.clone();
+        let nid_back = node.id.clone();
+        let nid_fwd = node.id.clone();
+        let nid_mute = node.id.clone();
+        let nid_rate = node.id.clone();
+        let nid_mark = node.id.clone();
+        let nid_scrub = node.id.clone();
+        let nid_retry_fail = node.id.clone();
+        let cur = player.time();
+        let dur = player.duration().unwrap_or(0.0);
+        let frac = if dur > 0.0 {
+            (cur / dur).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
+        let bar_w = (s.inspector_width - 42.0).max(160.0);
+        let playing = player.is_playing();
+        let muted = player.muted();
+        let rate = player.rate();
+        let player_err = match player.state() {
+            rune::PlayerState::Failed(msg) => Some(msg),
+            _ => None,
+        };
+
+        sec = sec
+            .child(
+                el()
+                    .key("insp_media_scrub")
+                    .w(bar_w)
+                    .h(8.0)
+                    .radius(4.0)
+                    .fill(theme::border_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_drag(move |s: &mut AppState, d, tx| match d.phase {
+                        Phase::Down | Phase::Move => {
+                            let ratio = (d.x / d.w.max(1.0)).clamp(0.0, 1.0) as f64;
+                            if let Some(dur_val) = s.media_player_for(&nid_scrub).and_then(|p| p.duration()) {
+                                if dur_val > 0.0 {
+                                    s.seek_media(&nid_scrub, ratio * dur_val);
+                                    tx.instant();
+                                }
+                            }
+                        }
+                        Phase::Up => {}
+                    })
+                    .child(
+                        el()
+                            .w((bar_w * frac).clamp(0.0, bar_w))
+                            .h_full()
+                            .radius(4.0)
+                            .fill(accent),
+                    ),
+            )
+            .child(
+                row()
+                    .w_full()
+                    .center_y()
+                    .gap(5.0)
+                    .child(
+                        el()
+                            .key("btn_insp_media_play")
+                            .px(8.0)
+                            .py(4.0)
+                            .radius(5.0)
+                            .fill(theme::bg_control())
+                            .border(1.0, theme::border_default())
+                            .hover(theme::hover_subtle())
+                            .cursor(Cursor::Pointer)
+                            .on_press(move |s: &mut AppState| {
+                                s.toggle_media_play(&nid_play);
+                            })
+                            .child(
+                                text(if playing { "⏸ Pause" } else { "▶ Play" })
+                                    .font(theme::BADGE_TEXT)
+                                    .color(accent),
+                            ),
+                    )
+                    .child(
+                        el()
+                            .key("btn_insp_media_back")
+                            .px(6.0)
+                            .py(4.0)
+                            .radius(5.0)
+                            .fill(theme::bg_control())
+                            .hover(theme::hover_subtle())
+                            .cursor(Cursor::Pointer)
+                            .on_press(move |s: &mut AppState| {
+                                let t = s
+                                    .media_player_for(&nid_back)
+                                    .map(|p| p.time() - 10.0)
+                                    .unwrap_or(0.0);
+                                s.seek_media(&nid_back, t.max(0.0));
+                            })
+                            .child(
+                                text("-10s")
+                                    .font(theme::BADGE_TEXT)
+                                    .color(theme::text_secondary()),
+                            ),
+                    )
+                    .child(
+                        el()
+                            .key("btn_insp_media_fwd")
+                            .px(6.0)
+                            .py(4.0)
+                            .radius(5.0)
+                            .fill(theme::bg_control())
+                            .hover(theme::hover_subtle())
+                            .cursor(Cursor::Pointer)
+                            .on_press(move |s: &mut AppState| {
+                                let t = s
+                                    .media_player_for(&nid_fwd)
+                                    .map(|p| p.time() + 10.0)
+                                    .unwrap_or(10.0);
+                                s.seek_media(&nid_fwd, t);
+                            })
+                            .child(
+                                text("+10s")
+                                    .font(theme::BADGE_TEXT)
+                                    .color(theme::text_secondary()),
+                            ),
+                    )
+                    .child(
+                        el()
+                            .key("btn_insp_media_mute")
+                            .px(6.0)
+                            .py(4.0)
+                            .radius(5.0)
+                            .fill(theme::bg_control())
+                            .hover(theme::hover_subtle())
+                            .cursor(Cursor::Pointer)
+                            .on_press(move |s: &mut AppState| {
+                                s.toggle_media_mute(&nid_mute);
+                            })
+                            .child(
+                                text(if muted { "Unmute" } else { "Mute" })
+                                    .font(theme::BADGE_TEXT)
+                                    .color(theme::text_secondary()),
+                            ),
+                    )
+                    .child(
+                        el()
+                            .key("btn_insp_media_rate")
+                            .px(6.0)
+                            .py(4.0)
+                            .radius(5.0)
+                            .fill(theme::bg_control())
+                            .hover(theme::hover_subtle())
+                            .cursor(Cursor::Pointer)
+                            .on_press(move |s: &mut AppState| {
+                                s.cycle_media_rate(&nid_rate);
+                            })
+                            .child(
+                                text(format!("{:.2}x", rate))
+                                    .font(theme::BADGE_TEXT)
+                                    .color(theme::text_secondary()),
+                            ),
+                    )
+                    .child(el().grow(1.0))
+                    .child(
+                        el()
+                            .key("btn_insp_media_mark")
+                            .px(7.0)
+                            .py(4.0)
+                            .radius(5.0)
+                            .fill(theme::bg_control())
+                            .border(1.0, theme::border_subtle())
+                            .hover(theme::hover_subtle())
+                            .cursor(Cursor::Pointer)
+                            .on_press(move |s: &mut AppState| {
+                                s.mark_current_media_timestamp(&nid_mark);
+                            })
+                            .child(
+                                text("+ Mark")
+                                    .font(theme::BADGE_TEXT)
+                                    .color(theme::text_primary()),
+                            ),
+                    ),
+            )
+            .child(
+                text(if dur > 0.0 {
+                    format!(
+                        "{} / {}",
+                        media_helper::format_timestamp(cur),
+                        media_helper::format_timestamp(dur)
+                    )
+                } else {
+                    media_helper::format_timestamp(cur)
+                })
+                .font(theme::BADGE_TEXT)
+                .color(theme::text_muted()),
+            );
+        if let Some(err) = player_err {
+            sec = sec.child(
+                row()
+                    .w_full()
+                    .center_y()
+                    .gap(6.0)
+                    .child(
+                        text(err)
+                            .font(theme::BADGE_TEXT)
+                            .color(theme::accent_danger())
+                            .grow(1.0)
+                            .wrap(),
+                    )
+                    .child(
+                        el()
+                            .key("btn_insp_media_retry")
+                            .px(7.0)
+                            .py(3.5)
+                            .radius(5.0)
+                            .fill(theme::bg_control())
+                            .hover(theme::hover_subtle())
+                            .cursor(Cursor::Pointer)
+                            .on_press(move |s: &mut AppState| {
+                                s.media_players.remove(&nid_retry_fail);
+                                let _ = s.ensure_media_player(&nid_retry_fail);
+                            })
+                            .child(
+                                text("↻")
+                                    .font(theme::BADGE_TEXT)
+                                    .color(theme::text_primary()),
+                            ),
+                    ),
+            );
+        }
+    } else if let Some(url) = node
+        .meta
+        .media_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
+        let nid_open = node.id.clone();
+        let nid_reload = node.id.clone();
+        let nid_toggle = node.id.clone();
+        let plat = media_helper::classify_media_url(url);
+        let is_iframe = AppState::media_uses_iframe(url);
+        let collapsed = s.embed_collapsed.contains(&node.id);
+        let mut actions_row = row().w_full().center_y().gap(6.0);
+        if is_iframe {
+            actions_row = actions_row
+                .child(
+                    el()
+                        .key("btn_insp_reload_embed")
+                        .px(8.0)
+                        .py(4.0)
+                        .radius(5.0)
+                        .fill(theme::bg_control())
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.reload_embed_iframe(&nid_reload);
+                        })
+                        .child(
+                            text("↻")
+                                .font(theme::BADGE_TEXT)
+                                .color(theme::text_primary()),
+                        ),
+                )
+                .child(
+                    el()
+                        .key("btn_insp_toggle_embed")
+                        .px(8.0)
+                        .py(4.0)
+                        .radius(5.0)
+                        .fill(theme::bg_control())
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.toggle_embed_collapsed(&nid_toggle);
+                        })
+                        .child(
+                            text(if collapsed {
+                                i18n::t(TextKey::MediaShowEmbed)
+                            } else {
+                                i18n::t(TextKey::MediaHideEmbed)
+                            })
+                            .font(theme::BADGE_TEXT)
+                            .color(theme::text_secondary()),
+                        ),
+                );
+        }
+        actions_row = actions_row.child(el().grow(1.0)).child(
+            el()
+                .key("btn_insp_media_open_url")
+                .px(8.0)
+                .py(4.0)
+                .radius(5.0)
+                .fill(theme::bg_control())
+                .border(1.0, theme::border_subtle())
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                    s.open_media_external_url(&nid_open, 0.0, tx);
+                })
+                .child(
+                    text(i18n::t(TextKey::MediaOpenLink))
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_primary()),
+                ),
+        );
+        sec = sec.child(
+            col()
+                .w_full()
+                .padding(8.0)
+                .gap(6.0)
+                .radius(6.0)
+                .fill(theme::bg_card())
+                .border(1.0, theme::border_subtle())
+                .child(
+                    row()
+                        .w_full()
+                        .center_y()
+                        .gap(8.0)
+                        .child(subtle_tag(plat.label(), accent))
+                        .child(
+                            text(if is_iframe {
+                                i18n::t(TextKey::MediaIframeActive)
+                            } else {
+                                ""
+                            })
+                            .font(theme::BADGE_TEXT)
+                            .color(theme::text_secondary())
+                            .grow(1.0),
+                        ),
+                )
+                .child(actions_row),
+        );
+    }
+
+    if node.kind == NodeKind::Audio {
+        sec = sec.child(render_audio_subtitles_inspector(s, node, accent));
+    }
+
+    // Add timestamp row
+    sec = sec.child(
+        row()
+            .w_full()
+            .h(32.0)
+            .gap(6.0)
+            .center_y()
+            .child(
+                el()
+                    .w(68.0)
+                    .h_full()
+                    .px(8.0)
+                    .center_y()
+                    .radius(5.0)
+                    .fill(theme::bg_input())
+                    .border(1.0, theme::border_subtle())
+                    .child(
+                        text_input(&s.media_ts_time_edit, theme::STATUS_TEXT)
+                            .key("input_ts_time")
+                            .label("Timestamp time")
+                            .single_line()
+                            .w_full()
+                            .color(theme::text_primary())
+                            .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                            .placeholder("01:30", theme::text_muted())
+                            .on_edit(|s: &mut AppState| &mut s.media_ts_time_edit),
+                    ),
+            )
+            .child(
+                el()
+                    .grow(1.0)
+                    .h_full()
+                    .px(8.0)
+                    .center_y()
+                    .radius(5.0)
+                    .fill(theme::bg_input())
+                    .border(1.0, theme::border_subtle())
+                    .child(
+                        text_input(&s.media_ts_label_edit, theme::STATUS_TEXT)
+                            .key("input_ts_label")
+                            .label("Timestamp label")
+                            .single_line()
+                            .w_full()
+                            .color(theme::text_primary())
+                            .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                            .placeholder("Key moment...", theme::text_muted())
+                            .on_edit(|s: &mut AppState| &mut s.media_ts_label_edit)
+                            .on_submit(move |s: &mut AppState, _| {
+                                let secs = media_helper::parse_timestamp(&s.media_ts_time_edit.text)
+                                    .unwrap_or_else(|| {
+                                        s.media_player_for(&nid_ts_submit)
+                                            .map(|p| p.time())
+                                            .unwrap_or(0.0)
+                                    });
+                                let lbl = s.media_ts_label_edit.text.clone();
+                                s.add_media_timestamp(&nid_ts_submit, secs, lbl);
+                                s.media_ts_time_edit = rune::TextEdit::new("");
+                                s.media_ts_label_edit = rune::TextEdit::new("");
+                            }),
+                    ),
+            )
+            .child(
+                el()
+                    .key("btn_add_media_ts")
+                    .h_full()
+                    .px(9.0)
+                    .center()
+                    .radius(5.0)
+                    .fill(accent.alpha(0.2))
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        let secs = media_helper::parse_timestamp(&s.media_ts_time_edit.text)
+                            .unwrap_or_else(|| {
+                                s.media_player_for(&nid_ts_btn)
+                                    .map(|p| p.time())
+                                    .unwrap_or(0.0)
+                            });
+                        let lbl = s.media_ts_label_edit.text.clone();
+                        s.add_media_timestamp(&nid_ts_btn, secs, lbl);
+                        s.media_ts_time_edit = rune::TextEdit::new("");
+                        s.media_ts_label_edit = rune::TextEdit::new("");
+                    })
+                    .child(
+                        text(i18n::t(TextKey::MediaAddTimestamp))
+                            .font(theme::BADGE_TEXT)
+                            .color(accent),
+                    ),
+            ),
+    );
+
+    // Existing timestamps
+    for (idx, ts) in node.meta.timestamps.iter().enumerate() {
+        let nid_j = node.id.clone();
+        let nid_d = node.id.clone();
+        let secs = ts.seconds;
+        let ts_id = ts.id.clone();
+        let jump_lbl = format!("▶ {} · {}", media_helper::format_timestamp(secs), ts.label);
+        sec = sec.child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(6.0)
+                .px(8.0)
+                .py(5.0)
+                .radius(5.0)
+                .fill(theme::bg_card())
+                .border(1.0, theme::border_subtle())
+                .child(
+                    el()
+                        .key(format!("btn_insp_ts_jump_{}", idx))
+                        .grow(1.0)
+                        .cursor(Cursor::Pointer)
+                        .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                            s.jump_to_media_timestamp(&nid_j, secs, tx);
+                        })
+                        .child(
+                            text(jump_lbl)
+                                .font(theme::STATUS_TEXT)
+                                .color(accent)
+                                .truncate(),
+                        ),
+                )
+                .child(
+                    el()
+                        .key(format!("btn_insp_ts_del_{}", idx))
+                        .px(6.0)
+                        .py(2.0)
+                        .radius(4.0)
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.remove_media_timestamp(&nid_d, &ts_id);
+                        })
+                        .child(
+                            text("×")
+                                .font(theme::STATUS_TEXT)
+                                .color(theme::text_muted()),
+                        ),
+                ),
+        );
+    }
+
+    sec
+}
+
+fn render_audio_subtitles_inspector(s: &AppState, node: &Node, accent: Color) -> El {
+    let nid_auto = node.id.clone();
+    let nid_load = node.id.clone();
+    let nid_cc = node.id.clone();
+    let is_pending = s.audio_subtitle_pending.contains(&node.id);
+    let err_opt = s.audio_subtitle_errors.get(&node.id).cloned();
+    let plain_text = node
+        .meta
+        .transcript_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| media_helper::cues_to_plain_text(&node.meta.subtitles));
+    let timed_text = media_helper::cues_to_timed_text(&node.meta.subtitles);
+    let has_cues = !node.meta.subtitles.is_empty();
+    let has_any = has_cues || !plain_text.is_empty();
+    let active_idx = s.media_player_for(&node.id).and_then(|p| {
+        media_helper::active_subtitle_cue(&node.meta.subtitles, p.time()).map(|(idx, _)| idx)
+    });
+
+    let mut box_col = col()
+        .key("media_subtitles_section")
+        .w_full()
+        .padding(8.0)
+        .gap(8.0)
+        .radius(6.0)
+        .fill(theme::bg_card())
+        .border(1.0, theme::border_subtle())
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(6.0)
+                .child(subtle_tag(
+                    i18n::t(TextKey::AudioSubtitlesTitle),
+                    accent,
+                ))
+                .child(el().grow(1.0))
+                .child(
+                    el()
+                        .key("btn_insp_cc_on_node")
+                        .px(7.0)
+                        .py(3.5)
+                        .radius(5.0)
+                        .fill(if node.meta.show_subtitles_on_card {
+                            accent.alpha(0.22)
+                        } else {
+                            theme::bg_control()
+                        })
+                        .border(
+                            1.0,
+                            if node.meta.show_subtitles_on_card {
+                                accent.alpha(0.6)
+                            } else {
+                                theme::border_subtle()
+                            },
+                        )
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.toggle_audio_subtitles_on_card(&nid_cc);
+                        })
+                        .child(
+                            text(i18n::t(TextKey::AudioShowSubtitlesOnCard))
+                                .font(theme::BADGE_TEXT)
+                                .color(if node.meta.show_subtitles_on_card {
+                                    accent
+                                } else {
+                                    theme::text_secondary()
+                                }),
+                        ),
+                ),
+        )
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(6.0)
+                .child(
+                    el()
+                        .key("btn_insp_auto_subtitles")
+                        .px(9.0)
+                        .py(4.5)
+                        .radius(5.0)
+                        .fill(theme::bg_control())
+                        .border(1.0, theme::border_default())
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.generate_audio_subtitles(&nid_auto);
+                        })
+                        .child(
+                            text(if is_pending {
+                                i18n::t(TextKey::AudioGeneratingSubtitles)
+                            } else {
+                                i18n::t(TextKey::AudioAutoSubtitles)
+                            })
+                            .font(theme::BADGE_TEXT)
+                            .color(accent),
+                        ),
+                )
+                .child(
+                    el()
+                        .key("btn_insp_load_subtitles")
+                        .px(8.0)
+                        .py(4.5)
+                        .radius(5.0)
+                        .fill(theme::bg_control())
+                        .border(1.0, theme::border_subtle())
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press_tx(move |_: &mut AppState, tx: &mut Tx| {
+                            let opts = FileDialogOptions {
+                                title: "Load Subtitle File".into(),
+                                ..Default::default()
+                            }
+                            .filter("Subtitles", &["srt", "vtt", "txt"]);
+                            let target_id = nid_load.clone();
+                            tx.open_file(opts, move |s: &mut AppState, res, _| {
+                                if let Ok(Some(path)) = res {
+                                    s.ingest_subtitle_file_into_node(&target_id, &path);
+                                }
+                            });
+                        })
+                        .child(
+                            text(i18n::t(TextKey::AudioLoadSubtitles))
+                                .font(theme::BADGE_TEXT)
+                                .color(theme::text_secondary()),
+                        ),
+                )
+                .child(el().grow(1.0)),
+        );
+
+    if let Some(err) = err_opt {
+        box_col = box_col.child(
+            text(err)
+                .font(theme::BADGE_TEXT)
+                .color(theme::accent_danger())
+                .w_full()
+                .wrap(),
+        );
+    }
+
+    if has_any {
+        let plain_copied = s.is_recently_copied("audio_sub_insp");
+        let timed_copied = s.is_recently_copied("audio_sub_timed_insp");
+        let plain_payload = plain_text.clone();
+        let mut copy_row = row()
+            .w_full()
+            .center_y()
+            .gap(6.0)
+            .child(
+                el()
+                    .key("btn_insp_copy_subtitles")
+                    .px(8.0)
+                    .py(3.5)
+                    .radius(5.0)
+                    .fill(theme::bg_control())
+                    .border(1.0, theme::border_subtle())
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                        tx.copy(plain_payload.clone());
+                        s.mark_copied("audio_sub_insp", "Copied subtitle text");
+                    })
+                    .child(
+                        text(if plain_copied {
+                            i18n::t(TextKey::ReaderCopied)
+                        } else {
+                            i18n::t(TextKey::AudioCopyText)
+                        })
+                        .font(theme::BADGE_TEXT)
+                        .color(if plain_copied {
+                            accent
+                        } else {
+                            theme::text_primary()
+                        }),
+                    ),
+            );
+        if has_cues && !timed_text.is_empty() {
+            let timed_payload = timed_text.clone();
+            copy_row = copy_row.child(
+                el()
+                    .key("btn_insp_copy_subtitles_timed")
+                    .px(8.0)
+                    .py(3.5)
+                    .radius(5.0)
+                    .fill(theme::bg_control())
+                    .border(1.0, theme::border_subtle())
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                        tx.copy(timed_payload.clone());
+                        s.mark_copied("audio_sub_timed_insp", "Copied timestamped subtitles");
+                    })
+                    .child(
+                        text(if timed_copied {
+                            i18n::t(TextKey::ReaderCopied)
+                        } else {
+                            i18n::t(TextKey::AudioCopyTimed)
+                        })
+                        .font(theme::BADGE_TEXT)
+                        .color(if timed_copied {
+                            accent
+                        } else {
+                            theme::text_secondary()
+                        }),
+                    ),
+            );
+        }
+        box_col = box_col.child(copy_row);
+
+        let mut list_col = col()
+            .w_full()
+            .max_h(180.0)
+            .gap(4.0)
+            .scroll(ScrollSpec { stick_bottom: false });
+        if has_cues {
+            for (idx, cue) in node.meta.subtitles.iter().enumerate() {
+                let is_cur = active_idx == Some(idx);
+                let nid_seek = node.id.clone();
+                let secs = cue.start;
+                list_col = list_col.child(
+                    row()
+                        .key(format!("insp_sub_cue_{}", idx))
+                        .w_full()
+                        .px(6.0)
+                        .py(4.0)
+                        .gap(6.0)
+                        .radius(4.0)
+                        .fill(if is_cur {
+                            accent.alpha(0.18)
+                        } else {
+                            theme::bg_input()
+                        })
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.seek_media(&nid_seek, secs);
+                        })
+                        .child(
+                            text(media_helper::format_timestamp(cue.start))
+                                .font(theme::BADGE_TEXT)
+                                .color(accent),
+                        )
+                        .child(
+                            text(&cue.text)
+                                .font(theme::STATUS_TEXT)
+                                .color(if is_cur {
+                                    theme::text_primary()
+                                } else {
+                                    theme::text_secondary()
+                                })
+                                .grow(1.0)
+                                .wrap(),
+                        ),
+                );
+            }
+        } else {
+            list_col = list_col.child(
+                text(plain_text)
+                    .font(theme::STATUS_TEXT)
+                    .color(theme::text_secondary())
+                    .w_full()
+                    .wrap()
+                    .selectable(true),
+            );
+        }
+        box_col = box_col.child(list_col);
+    }
+
+    box_col
+}
+
+fn render_calendar_inspector(s: &AppState, node: &Node) -> El {
+    let accent = theme::kind_accent(NodeKind::Calendar);
+    let (today_y, today_m, today_d) = media_helper::today_ymd();
+    let today_str = media_helper::format_ymd(today_y, today_m, today_d);
+    let cy = node.meta.calendar_year.unwrap_or(today_y);
+    let cm = node.meta.calendar_month.unwrap_or(today_m);
+    let selected_date = s
+        .selected_calendar_date
+        .get(&node.id)
+        .cloned()
+        .unwrap_or_else(|| today_str.clone());
+    let mode = node.meta.calendar_view_mode;
+
+    let mode_m_id = node.id.clone();
+    let mode_w_id = node.id.clone();
+    let prev_id = node.id.clone();
+    let next_id = node.id.clone();
+    let wk_prev_id = node.id.clone();
+    let wk_next_id = node.id.clone();
+    let day_note_id = node.id.clone();
+    let day_note_sub_id = node.id.clone();
+    let add_submit_id = node.id.clone();
+    let add_btn_id = node.id.clone();
+
+    let mut sec = col()
+        .key("calendar_inspector_section")
+        .w_full()
+        .gap(10.0)
+        .child(
+            row()
+                .padding(2.0)
+                .gap(3.0)
+                .radius(5.0)
+                .fill(theme::bg_input())
+                .border(1.0, theme::border_subtle())
+                .child(
+                    el()
+                        .key("btn_insp_cal_mode_month")
+                        .px(9.0)
+                        .py(4.0)
+                        .radius(4.0)
+                        .fill(if mode == CalendarViewMode::Month {
+                            theme::bg_control()
+                        } else {
+                            Color::TRANSPARENT
+                        })
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.set_calendar_view_mode(&mode_m_id, CalendarViewMode::Month);
+                        })
+                        .child(
+                            text(i18n::t(TextKey::CalModeMonth))
+                                .font(theme::BADGE_TEXT)
+                                .color(if mode == CalendarViewMode::Month {
+                                    theme::text_primary()
+                                } else {
+                                    theme::text_muted()
+                                }),
+                        ),
+                )
+                .child(
+                    el()
+                        .key("btn_insp_cal_mode_week")
+                        .px(9.0)
+                        .py(4.0)
+                        .radius(4.0)
+                        .fill(if mode == CalendarViewMode::Week {
+                            theme::bg_control()
+                        } else {
+                            Color::TRANSPARENT
+                        })
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.set_calendar_view_mode(&mode_w_id, CalendarViewMode::Week);
+                        })
+                        .child(
+                            text(i18n::t(TextKey::CalModeWeek))
+                                .font(theme::BADGE_TEXT)
+                                .color(if mode == CalendarViewMode::Week {
+                                    theme::text_primary()
+                                } else {
+                                    theme::text_muted()
+                                }),
+                        ),
+                ),
+        );
+
+    if mode == CalendarViewMode::Week {
+        let anchor_mon = node
+            .meta
+            .calendar_week_start
+            .clone()
+            .unwrap_or_else(|| media_helper::monday_of_week(&selected_date));
+        let week = media_helper::week_dates(&anchor_mon);
+        let (sy, sm, sd) = media_helper::parse_ymd(&week[0].0).unwrap_or((cy, cm, 1));
+        let (ey, em, ed) = media_helper::parse_ymd(&week[6].0).unwrap_or((sy, sm, sd));
+        let range_label = format!(
+            "{} {} – {} {}, {}",
+            i18n::month_short(sm),
+            sd,
+            i18n::month_short(em),
+            ed,
+            ey
+        );
+
+        sec = sec.child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(6.0)
+                .child(
+                    el()
+                        .key("btn_insp_cal_week_prev")
+                        .px(8.0)
+                        .py(4.0)
+                        .radius(5.0)
+                        .fill(theme::bg_control())
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.calendar_step_week(&wk_prev_id, -1);
+                        })
+                        .child(
+                            text("‹")
+                                .font(theme::CONTROL_TEXT)
+                                .color(theme::text_primary()),
+                        ),
+                )
+                .child(el().grow(1.0).center().child(
+                    text(range_label)
+                        .font(theme::BODY_TEXT)
+                        .color(theme::text_primary()),
+                ))
+                .child(
+                    el()
+                        .key("btn_insp_cal_week_next")
+                        .px(8.0)
+                        .py(4.0)
+                        .radius(5.0)
+                        .fill(theme::bg_control())
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.calendar_step_week(&wk_next_id, 1);
+                        })
+                        .child(
+                            text("›")
+                                .font(theme::CONTROL_TEXT)
+                                .color(theme::text_primary()),
+                        ),
+                ),
+        );
+
+        let mut days_col = col().w_full().gap(4.0);
+        for (wd_idx, (date_str, _wd_name, day_num)) in week.into_iter().enumerate() {
+            let is_sel = selected_date == date_str;
+            let day_note = node
+                .meta
+                .calendar_day_notes
+                .get(&date_str)
+                .map(String::as_str)
+                .unwrap_or("")
+                .trim();
+            let evt_cnt = node
+                .meta
+                .calendar_events
+                .iter()
+                .filter(|e| e.date == date_str)
+                .count();
+            let nid = node.id.clone();
+            let dp = date_str.clone();
+            days_col = days_col.child(
+                row()
+                    .key(format!("insp_cal_week_day_{}", date_str))
+                    .w_full()
+                    .px(8.0)
+                    .py(6.0)
+                    .gap(8.0)
+                    .center_y()
+                    .radius(6.0)
+                    .fill(if is_sel {
+                        theme::bg_control()
+                    } else {
+                        theme::bg_input()
+                    })
+                    .border(
+                        1.0,
+                        if is_sel {
+                            accent
+                        } else {
+                            theme::border_subtle()
+                        },
+                    )
+                    .cursor(Cursor::Pointer)
+                    .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                        s.calendar_select_date(&nid, dp.clone());
+                        tx.focus_when_shown("input_cal_day_note", false);
+                    })
+                    .child(
+                        text(format!("{} {:02}", i18n::weekday_short(wd_idx), day_num))
+                            .font(theme::BADGE_TEXT)
+                            .color(if is_sel {
+                                accent
+                            } else {
+                                theme::text_primary()
+                            }),
+                    )
+                    .child(
+                        text(if !day_note.is_empty() {
+                            day_note
+                        } else {
+                            ""
+                        })
+                        .font(theme::STATUS_TEXT)
+                        .color(theme::text_secondary())
+                        .grow(1.0)
+                        .truncate(),
+                    )
+                    .child(
+                        text(if evt_cnt > 0 {
+                            format!("{} evt", evt_cnt)
+                        } else {
+                            String::new()
+                        })
+                        .font(theme::BADGE_TEXT)
+                        .color(accent),
+                    ),
+            );
+        }
+        sec = sec.child(days_col);
+    } else {
+        sec = sec.child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(6.0)
+                .child(
+                    el()
+                        .key("btn_insp_cal_prev")
+                        .px(8.0)
+                        .py(4.0)
+                        .radius(5.0)
+                        .fill(theme::bg_control())
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.calendar_step_month(&prev_id, -1);
+                        })
+                        .child(
+                            text("‹")
+                                .font(theme::CONTROL_TEXT)
+                                .color(theme::text_primary()),
+                        ),
+                )
+                .child(el().grow(1.0).center().child(
+                    text(format!("{} {}", i18n::month_full(cm), cy))
+                        .font(theme::BODY_TEXT)
+                        .color(theme::text_primary()),
+                ))
+                .child(
+                    el()
+                        .key("btn_insp_cal_next")
+                        .px(8.0)
+                        .py(4.0)
+                        .radius(5.0)
+                        .fill(theme::bg_control())
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.calendar_step_month(&next_id, 1);
+                        })
+                        .child(
+                            text("›")
+                                .font(theme::CONTROL_TEXT)
+                                .color(theme::text_primary()),
+                        ),
+                ),
+        );
+
+        // Weekday row
+        let mut wk_row = row().w_full().gap(3.0);
+        for wd_idx in 0..7 {
+            wk_row = wk_row.child(
+                el().grow(1.0).center().child(
+                    text(i18n::weekday_narrow(wd_idx))
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_muted()),
+                ),
+            );
+        }
+        sec = sec.child(wk_row);
+
+        // Month grid
+        let offset = media_helper::weekday_of_first(cy, cm);
+        let dim = media_helper::days_in_month(cy, cm);
+        let num_rows = (offset + dim + 6) / 7;
+        let mut grid = col().w_full().gap(3.0);
+        for r in 0..num_rows {
+            let mut r_el = row().w_full().gap(3.0);
+            for c in 0..7 {
+                let slot = r * 7 + c;
+                if slot < offset || slot >= offset + dim {
+                    r_el = r_el.child(el().grow(1.0).h(26.0));
+                } else {
+                    let day = slot - offset + 1;
+                    let date_str = media_helper::format_ymd(cy, cm, day);
+                    let has_evt = node.meta.calendar_events.iter().any(|e| e.date == date_str);
+                    let has_note = node
+                        .meta
+                        .calendar_day_notes
+                        .get(&date_str)
+                        .is_some_and(|t| !t.trim().is_empty());
+                    let has_mark = has_evt || has_note;
+                    let is_sel = selected_date == date_str;
+                    let is_today = today_str == date_str;
+                    let nid = node.id.clone();
+                    let dp = date_str.clone();
+                    r_el = r_el.child(
+                        el()
+                            .key(format!("insp_cal_day_{}", date_str))
+                            .grow(1.0)
+                            .h(26.0)
+                            .radius(5.0)
+                            .fill(if is_sel {
+                                accent.alpha(0.24)
+                            } else if has_mark {
+                                accent.alpha(0.1)
+                            } else {
+                                theme::bg_card()
+                            })
+                            .border(
+                                1.0,
+                                if is_sel {
+                                    accent
+                                } else if is_today {
+                                    theme::border_default()
+                                } else {
+                                    theme::border_subtle()
+                                },
+                            )
+                            .center()
+                            .cursor(Cursor::Pointer)
+                            .on_press(move |s: &mut AppState| {
+                                s.calendar_select_date(&nid, dp.clone());
+                            })
+                            .child(
+                                text(if has_mark {
+                                    format!("{}•", day)
+                                } else {
+                                    format!("{}", day)
+                                })
+                                .font(theme::BADGE_TEXT)
+                                .color(if is_sel || has_mark {
+                                    accent
+                                } else {
+                                    theme::text_secondary()
+                                }),
+                            ),
+                    );
+                }
+            }
+            grid = grid.child(r_el);
+        }
+        sec = sec.child(grid);
+    }
+
+    // Daily Note editor for selected_date (available in both Month and Week mode)
+    let mut day_note_hdr = row()
+        .w_full()
+        .center_y()
+        .child(subtle_tag(&selected_date, accent))
+        .child(el().grow(1.0));
+    if !s.cal_day_note_edit.text.trim().is_empty() {
+        let clr_id = node.id.clone();
+        let clr_date = selected_date.clone();
+        day_note_hdr = day_note_hdr.child(
+            el()
+                .key("btn_clear_cal_day_note")
+                .px(6.0)
+                .py(2.0)
+                .radius(4.0)
+                .fill(theme::bg_control())
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.set_calendar_day_note(&clr_id, clr_date.clone(), String::new());
+                })
+                .child(
+                    text("×")
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_muted()),
+                ),
+        );
+    }
+    sec = sec.child(
+        col()
+            .w_full()
+            .padding(8.0)
+            .gap(6.0)
+            .radius(6.0)
+            .fill(theme::bg_input())
+            .border(1.0, accent.alpha(0.35))
+            .child(day_note_hdr)
+            .child(
+                text_input(&s.cal_day_note_edit, theme::BODY_TEXT)
+                    .key("input_cal_day_note")
+                    .label("Daily calendar note")
+                    .w_full()
+                    .min_h(52.0)
+                    .color(theme::text_primary())
+                    .caret(accent, accent.alpha(0.25))
+                    .placeholder(i18n::t(TextKey::CalDayNotePlaceholder), theme::text_muted())
+                    .on_edit(|s: &mut AppState| &mut s.cal_day_note_edit)
+                    .on_input_change(move |s: &mut AppState, _| {
+                        s.sync_calendar_day_note_edit(&day_note_id);
+                    })
+                    .on_submit(move |s: &mut AppState, _| {
+                        s.cal_day_note_edit.insert("\n");
+                        s.sync_calendar_day_note_edit(&day_note_sub_id);
+                    }),
+            ),
+    );
+
+    // Add Event form
+    sec = sec
+        .child(
+            row()
+                .w_full()
+                .h(32.0)
+                .gap(6.0)
+                .center_y()
+                .child(
+                    el()
+                        .grow(1.0)
+                        .h_full()
+                        .px(8.0)
+                        .center_y()
+                        .radius(5.0)
+                        .fill(theme::bg_input())
+                        .border(1.0, theme::border_subtle())
+                        .child(
+                            text_input(&s.cal_event_date_edit, theme::STATUS_TEXT)
+                                .key("input_cal_date")
+                                .label("Event date")
+                                .single_line()
+                                .w_full()
+                                .color(theme::text_primary())
+                                .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                                .placeholder("YYYY-MM-DD", theme::text_muted())
+                                .on_edit(|s: &mut AppState| &mut s.cal_event_date_edit),
+                        ),
+                )
+                .child(
+                    el()
+                        .w(76.0)
+                        .h_full()
+                        .px(8.0)
+                        .center_y()
+                        .radius(5.0)
+                        .fill(theme::bg_input())
+                        .border(1.0, theme::border_subtle())
+                        .child(
+                            text_input(&s.cal_event_time_edit, theme::STATUS_TEXT)
+                                .key("input_cal_time")
+                                .label("Event time")
+                                .single_line()
+                                .w_full()
+                                .color(theme::text_primary())
+                                .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                                .placeholder("14:00", theme::text_muted())
+                                .on_edit(|s: &mut AppState| &mut s.cal_event_time_edit),
+                        ),
+                ),
+        )
+        .child(
+            row()
+                .w_full()
+                .h(32.0)
+                .gap(6.0)
+                .center_y()
+                .child(
+                    el()
+                        .grow(1.0)
+                        .h_full()
+                        .px(8.0)
+                        .center_y()
+                        .radius(5.0)
+                        .fill(theme::bg_input())
+                        .border(1.0, theme::border_subtle())
+                        .child(
+                            text_input(&s.cal_event_title_edit, theme::STATUS_TEXT)
+                                .key("input_cal_title")
+                                .label("Event title")
+                                .single_line()
+                                .w_full()
+                                .color(theme::text_primary())
+                                .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                                .placeholder("Event title...", theme::text_muted())
+                                .on_edit(|s: &mut AppState| &mut s.cal_event_title_edit)
+                                .on_submit(move |s: &mut AppState, _| {
+                                    let d = s.cal_event_date_edit.text.clone();
+                                    let tm = if s.cal_event_time_edit.text.trim().is_empty() {
+                                        None
+                                    } else {
+                                        Some(s.cal_event_time_edit.text.clone())
+                                    };
+                                    let title = s.cal_event_title_edit.text.clone();
+                                    let notes = s.cal_event_notes_edit.text.clone();
+                                    s.add_calendar_event(&add_submit_id, d, tm, title, notes);
+                                    s.cal_event_time_edit = rune::TextEdit::new("");
+                                    s.cal_event_title_edit = rune::TextEdit::new("");
+                                    s.cal_event_notes_edit = rune::TextEdit::new("");
+                                }),
+                        ),
+                )
+                .child(
+                    el()
+                        .key("btn_add_cal_event")
+                        .h_full()
+                        .px(10.0)
+                        .center()
+                        .radius(5.0)
+                        .fill(accent.alpha(0.2))
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            let d = s.cal_event_date_edit.text.clone();
+                            let tm = if s.cal_event_time_edit.text.trim().is_empty() {
+                                None
+                            } else {
+                                Some(s.cal_event_time_edit.text.clone())
+                            };
+                            let title = s.cal_event_title_edit.text.clone();
+                            let notes = s.cal_event_notes_edit.text.clone();
+                            s.add_calendar_event(&add_btn_id, d, tm, title, notes);
+                            s.cal_event_time_edit = rune::TextEdit::new("");
+                            s.cal_event_title_edit = rune::TextEdit::new("");
+                            s.cal_event_notes_edit = rune::TextEdit::new("");
+                        })
+                        .child(
+                            text(i18n::t(TextKey::CalAddEvent))
+                                .font(theme::BADGE_TEXT)
+                                .color(accent),
+                        ),
+                ),
+        );
+
+    // Event list
+    for (idx, ev) in node.meta.calendar_events.iter().enumerate() {
+        let nid_t = node.id.clone();
+        let nid_d = node.id.clone();
+        let ev_id_t = ev.id.clone();
+        let ev_id_d = ev.id.clone();
+        let tm_str = ev
+            .time
+            .as_deref()
+            .filter(|t| !t.is_empty())
+            .map(|t| format!("{} ", t))
+            .unwrap_or_default();
+        sec = sec.child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(6.0)
+                .px(8.0)
+                .py(5.0)
+                .radius(5.0)
+                .fill(if ev.date == selected_date {
+                    accent.alpha(0.1)
+                } else {
+                    theme::bg_card()
+                })
+                .border(
+                    1.0,
+                    if ev.date == selected_date {
+                        accent.alpha(0.35)
+                    } else {
+                        theme::border_subtle()
+                    },
+                )
+                .child(
+                    el()
+                        .key(format!("btn_insp_cal_toggle_{}", idx))
+                        .px(4.0)
+                        .py(2.0)
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.toggle_calendar_event(&nid_t, &ev_id_t);
+                        })
+                        .child(
+                            text(if ev.completed { "☑" } else { "☐" })
+                                .font(theme::STATUS_TEXT)
+                                .color(if ev.completed {
+                                    theme::accent_claude()
+                                } else {
+                                    accent
+                                }),
+                        ),
+                )
+                .child(
+                    text(format!("{} {}{}", ev.date, tm_str, ev.title))
+                        .font(theme::STATUS_TEXT)
+                        .color(if ev.completed {
+                            theme::text_muted()
+                        } else {
+                            theme::text_primary()
+                        })
+                        .grow(1.0)
+                        .truncate(),
+                )
+                .child(
+                    el()
+                        .key(format!("btn_insp_cal_del_{}", idx))
+                        .px(6.0)
+                        .py(2.0)
+                        .radius(4.0)
+                        .hover(theme::hover_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.remove_calendar_event(&nid_d, &ev_id_d);
+                        })
+                        .child(
+                            text("×")
+                                .font(theme::STATUS_TEXT)
+                                .color(theme::text_muted()),
+                        ),
+                ),
+        );
+    }
+
+    sec
 }

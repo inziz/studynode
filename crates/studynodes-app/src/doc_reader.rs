@@ -18,6 +18,53 @@ pub enum ReaderMode {
     CustomExternal,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum PdfLayoutMode {
+    #[default]
+    Continuous,
+    TwoPage,
+    SinglePage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DockPosition {
+    #[default]
+    Bottom,
+    Top,
+    Left,
+    Right,
+}
+
+impl DockPosition {
+    pub const fn all() -> [DockPosition; 4] {
+        [
+            DockPosition::Bottom,
+            DockPosition::Top,
+            DockPosition::Left,
+            DockPosition::Right,
+        ]
+    }
+
+    pub const fn cycle_next(self) -> Self {
+        match self {
+            Self::Bottom => Self::Top,
+            Self::Top => Self::Left,
+            Self::Left => Self::Right,
+            Self::Right => Self::Bottom,
+        }
+    }
+
+    pub const fn key_suffix(self) -> &'static str {
+        match self {
+            Self::Bottom => "bottom",
+            Self::Top => "top",
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+}
+
 fn default_inspector_width() -> f32 {
     460.0
 }
@@ -26,15 +73,19 @@ fn default_read_only() -> bool {
     true
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_target_language() -> String {
     "es".into()
 }
 
-fn default_ollama_url() -> String {
+pub(crate) fn default_ollama_url() -> String {
     "http://127.0.0.1:11434".into()
 }
 
-fn default_ollama_model() -> String {
+pub(crate) fn default_ollama_model() -> String {
     "qwen2.5:3b".into()
 }
 
@@ -70,6 +121,51 @@ pub struct ReaderPreferences {
     /// Optional Cloud Vision model identifier (e.g. `deepseek-ai/DeepSeek-OCR` or `gemini-2.5-flash`).
     #[serde(default)]
     pub vision_model: String,
+    /// Optional AI LLM API key (Gemini / OpenAI / DeepSeek / OpenRouter).
+    #[serde(default)]
+    pub ai_api_key: String,
+    /// Optional OpenAI-compatible AI base URL (blank = provider auto-detect).
+    #[serde(default)]
+    pub ai_base_url: String,
+    /// Optional AI model identifier (e.g. `gemini-2.5-flash` or `gpt-4o-mini`).
+    #[serde(default)]
+    pub ai_model: String,
+    /// Optional dedicated API key specifically for Project AI Chat (falls back to `ai_api_key` when empty).
+    #[serde(default)]
+    pub chat_api_key: String,
+    /// Optional dedicated OpenAI-compatible base URL for Project AI Chat.
+    #[serde(default)]
+    pub chat_base_url: String,
+    /// Optional dedicated model identifier for Project AI Chat.
+    #[serde(default)]
+    pub chat_model: String,
+    /// Selected visual UI theme (`WarmCharcoal`, `MidnightSlate`, `WarmPaper`, `NordicMist`).
+    #[serde(default)]
+    pub theme: crate::theme::ThemeId,
+    /// Use Windows DirectManipulation for smooth 2D trackpad pan & pinch (false = OS wheel fallback).
+    #[serde(default = "default_true")]
+    pub use_direct_manipulation: bool,
+    /// Active UI localization language.
+    #[serde(default)]
+    pub ui_locale: crate::i18n::UiLocale,
+    /// When true, AI summaries are requested in the selected UI language instead of source language.
+    #[serde(default)]
+    pub ai_summary_follow_ui_language: bool,
+    /// Animate traveling pulses along edge wires on the canvas.
+    #[serde(default = "default_true")]
+    pub animate_wires: bool,
+    /// Multi-page vs spread vs single-page PDF viewing layout.
+    #[serde(default)]
+    pub pdf_layout_mode: PdfLayoutMode,
+    /// Saved project collection tags for organizing workspaces on the dashboard.
+    #[serde(default)]
+    pub collections: Vec<String>,
+    /// Automatically generate subtitles when ingesting local audio files (when AI provider or companion file is available).
+    #[serde(default = "default_true")]
+    pub auto_transcribe_audio: bool,
+    /// Placement of the canvas floating dock bar (`Bottom`, `Top`, `Left`, or `Right`).
+    #[serde(default)]
+    pub dock_position: DockPosition,
 }
 
 impl Default for ReaderPreferences {
@@ -86,6 +182,21 @@ impl Default for ReaderPreferences {
             vision_api_key: String::new(),
             vision_base_url: String::new(),
             vision_model: String::new(),
+            ai_api_key: String::new(),
+            ai_base_url: String::new(),
+            ai_model: String::new(),
+            chat_api_key: String::new(),
+            chat_base_url: String::new(),
+            chat_model: String::new(),
+            theme: crate::theme::ThemeId::default(),
+            use_direct_manipulation: true,
+            ui_locale: crate::i18n::UiLocale::default(),
+            ai_summary_follow_ui_language: false,
+            animate_wires: true,
+            pdf_layout_mode: PdfLayoutMode::default(),
+            collections: Vec::new(),
+            auto_transcribe_audio: true,
+            dock_position: DockPosition::default(),
         }
     }
 }
@@ -152,7 +263,7 @@ pub fn launch_external_reader(file_path: &Path, custom_reader_path: &str) -> Res
     ))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DocFormat {
     Pdf,
     Markdown,
@@ -247,63 +358,108 @@ pub struct ExtractedDoc {
     pub page_count: Option<usize>,
 }
 
+#[derive(Clone, Debug)]
 pub struct RenderedPdfPage {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
     pub page_count: usize,
+    pub page_dimensions: Vec<(f32, f32)>,
 }
 
-/// Render a PDF page purely in Rust via `hayro` (`vello_cpu`) into straight RGBA8 pixels.
-pub fn render_pdf_page(path: &Path, page_index: usize, scale: f32) -> Result<RenderedPdfPage, String> {
-    let bytes = fs::read(path).map_err(|e| format!("Could not read PDF: {}", e))?;
-    let pdf = Pdf::new(bytes).map_err(|e| format!("Invalid or encrypted PDF: {:?}", e))?;
-    let pages = pdf.pages();
-    let page_count = pages.len();
-    if page_count == 0 {
-        return Err("PDF contains 0 pages".into());
-    }
+/// Reusable parsed PDF session so multi-page scrolling & zooming
+/// avoid re-reading and re-parsing the PDF syntax/xref table on every page.
+pub struct PdfRenderSession {
+    pdf: Pdf,
+    page_dimensions: Vec<(f32, f32)>,
+}
 
-    let clamped_idx = page_index.min(page_count - 1);
-    let page = &pages[clamped_idx];
-    let scale = scale.clamp(0.5, 3.0);
-
-    let cache = RenderCache::new();
-    let interp_settings = InterpreterSettings::default();
-    let render_settings = RenderSettings::default();
-    let pixmap_settings = PixmapSettings {
-        x_scale: scale,
-        y_scale: scale,
-        bg_color: WHITE,
-    };
-
-    let pixmap = render(
-        page,
-        &cache,
-        &interp_settings,
-        &render_settings,
-        &pixmap_settings,
-    );
-
-    let mut rgba = Vec::with_capacity(pixmap.data().len() * 4);
-    for px in pixmap.data() {
-        if px.a == 255 {
-            rgba.extend_from_slice(&[px.r, px.g, px.b, 255]);
-        } else if px.a == 0 {
-            rgba.extend_from_slice(&[0, 0, 0, 0]);
-        } else {
-            let a = px.a as u16;
-            let unpremul = |c: u8| -> u8 { ((c as u16 * 255 + a / 2) / a).min(255) as u8 };
-            rgba.extend_from_slice(&[unpremul(px.r), unpremul(px.g), unpremul(px.b), px.a]);
+impl PdfRenderSession {
+    pub fn open(path: &Path) -> Result<Self, String> {
+        let bytes = fs::read(path).map_err(|e| format!("Could not read PDF: {}", e))?;
+        let pdf = Pdf::new(bytes).map_err(|e| format!("Invalid or encrypted PDF: {:?}", e))?;
+        let pages = pdf.pages();
+        if pages.is_empty() {
+            return Err("PDF contains 0 pages".into());
         }
+        let page_dimensions = pages
+            .iter()
+            .map(|p| {
+                let (w, h) = p.render_dimensions();
+                (w.max(1.0), h.max(1.0))
+            })
+            .collect();
+        Ok(Self {
+            pdf,
+            page_dimensions,
+        })
     }
 
-    Ok(RenderedPdfPage {
-        width: u32::from(pixmap.width()),
-        height: u32::from(pixmap.height()),
-        rgba,
-        page_count,
-    })
+    #[allow(dead_code)]
+    pub fn page_count(&self) -> usize {
+        self.page_dimensions.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn page_dimensions(&self) -> &[(f32, f32)] {
+        &self.page_dimensions
+    }
+
+    pub fn render_page(&self, page_index: usize, scale: f32) -> Result<RenderedPdfPage, String> {
+        let pages = self.pdf.pages();
+        let page_count = pages.len();
+        if page_count == 0 {
+            return Err("PDF contains 0 pages".into());
+        }
+
+        let clamped_idx = page_index.min(page_count - 1);
+        let page = &pages[clamped_idx];
+        let scale = scale.clamp(0.5, 3.0);
+
+        let cache = RenderCache::new();
+        let interp_settings = InterpreterSettings::default();
+        let render_settings = RenderSettings::default();
+        let pixmap_settings = PixmapSettings {
+            x_scale: scale,
+            y_scale: scale,
+            bg_color: WHITE,
+        };
+
+        let pixmap = render(
+            page,
+            &cache,
+            &interp_settings,
+            &render_settings,
+            &pixmap_settings,
+        );
+
+        let mut rgba = Vec::with_capacity(pixmap.data().len() * 4);
+        for px in pixmap.data() {
+            if px.a == 255 {
+                rgba.extend_from_slice(&[px.r, px.g, px.b, 255]);
+            } else if px.a == 0 {
+                rgba.extend_from_slice(&[0, 0, 0, 0]);
+            } else {
+                let a = px.a as u16;
+                let unpremul = |c: u8| -> u8 { ((c as u16 * 255 + a / 2) / a).min(255) as u8 };
+                rgba.extend_from_slice(&[unpremul(px.r), unpremul(px.g), unpremul(px.b), px.a]);
+            }
+        }
+
+        Ok(RenderedPdfPage {
+            width: u32::from(pixmap.width()),
+            height: u32::from(pixmap.height()),
+            rgba,
+            page_count,
+            page_dimensions: self.page_dimensions.clone(),
+        })
+    }
+}
+
+/// Render a single PDF page purely in Rust via `hayro` (`vello_cpu`) into straight RGBA8 pixels.
+#[allow(dead_code)]
+pub fn render_pdf_page(path: &Path, page_index: usize, scale: f32) -> Result<RenderedPdfPage, String> {
+    PdfRenderSession::open(path)?.render_page(page_index, scale)
 }
 
 /// Extract structured Markdown from all supported standard study & document formats.

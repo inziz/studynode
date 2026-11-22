@@ -23,6 +23,13 @@ pub enum GraphCommand {
         old_note: String,
         new_note: String,
     },
+    /// Atomic graph snapshot (nodes & edges) for multi-op AI canvas actions, preserving camera viewport.
+    Snapshot {
+        before_nodes: HashMap<NodeId, Node>,
+        before_edges: HashMap<EdgeId, Edge>,
+        after_nodes: HashMap<NodeId, Node>,
+        after_edges: HashMap<EdgeId, Edge>,
+    },
     Batch(Vec<GraphCommand>),
 }
 
@@ -59,6 +66,14 @@ impl GraphCommand {
                     edge.label = new_label.clone();
                     edge.note = new_note.clone();
                 }
+            }
+            Self::Snapshot {
+                after_nodes,
+                after_edges,
+                ..
+            } => {
+                graph.nodes = after_nodes.clone();
+                graph.edges = after_edges.clone();
             }
             Self::Batch(cmds) => {
                 for cmd in cmds {
@@ -104,6 +119,14 @@ impl GraphCommand {
                     edge.note = old_note.clone();
                 }
             }
+            Self::Snapshot {
+                before_nodes,
+                before_edges,
+                ..
+            } => {
+                graph.nodes = before_nodes.clone();
+                graph.edges = before_edges.clone();
+            }
             Self::Batch(cmds) => {
                 for cmd in cmds.iter().rev() {
                     cmd.undo(graph);
@@ -127,6 +150,12 @@ impl CommandHistory {
 
     pub fn execute(&mut self, cmd: GraphCommand, graph: &mut StudyGraph) {
         cmd.apply(graph);
+        self.undo_stack.push(cmd);
+        self.redo_stack.clear();
+    }
+
+    /// Record a command that was already applied to `graph` (e.g. AI patch staging).
+    pub fn push_applied(&mut self, cmd: GraphCommand) {
         self.undo_stack.push(cmd);
         self.redo_stack.clear();
     }

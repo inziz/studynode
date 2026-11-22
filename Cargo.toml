@@ -20,7 +20,7 @@ thiserror = "2.0"
 sha2 = "0.10"
 tempfile = "3.10"
 tokio = { version = "1.40", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 rstar = "0.12"
 
 [patch.crates-io]
@@ -36,6 +36,7 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = 0
+opt-level = 2
 
 [profile.dev.package.oar-ocr]
 opt-level = 3
@@ -50,4 +51,40 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.hayro]
+opt-level = 3
+
+[profile.dev.package.hayro-interpret]
+opt-level = 3
+
+[profile.dev.package.hayro-syntax]
+opt-level = 3
+
+[profile.dev.package.hayro-font]
+opt-level = 3
+
+[profile.dev.package.hayro-cmap]
+opt-level = 3
+
+[profile.dev.package.hayro-jpeg2000]
+opt-level = 3
+
+[profile.dev.package.hayro-jbig2]
+opt-level = 3
+
+[profile.dev.package.hayro-ccitt]
+opt-level = 3
+
+[profile.dev.package.hayro-postscript]
+opt-level = 3
+
+[profile.dev.package.vello_cpu]
+opt-level = 3
+
+[profile.dev.package.vello_common]
+opt-level = 3
+
+[profile.dev.package.kurbo]
 opt-level = 3

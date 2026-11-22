@@ -18,6 +18,7 @@ pub enum TouchpadEvent {
 mod imp {
     use super::TouchpadEvent;
     use std::cell::{Cell, RefCell};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::DirectManipulation::{
@@ -40,6 +41,7 @@ mod imp {
         CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
     };
     use windows::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
     use windows::Win32::UI::Input::Pointer::GetPointerType;
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -50,11 +52,14 @@ mod imp {
 
     const SUBCLASS_ID: usize = 0x5354_4E44; // "STND"
     const TIMER_ID: usize = 0x5354_4E45;
+    const BASELINE_TRANSFORM: (f32, f32, f32) = (1.0, -500_000.0, -500_000.0);
 
     static EVENTS: Mutex<Vec<TouchpadEvent>> = Mutex::new(Vec::new());
     static WAKER: Mutex<Option<rune::Waker>> = Mutex::new(None);
     /// Laid-out canvas bounds `[x, y, w, h]` in logical window points.
     static CANVAS_BOUNDS: Mutex<Option<[f32; 4]>> = Mutex::new(None);
+    static ENABLED: AtomicBool = AtomicBool::new(true);
+    static ACTIVE: AtomicBool = AtomicBool::new(false);
 
     struct DmController {
         hwnd: isize,
@@ -136,12 +141,30 @@ mod imp {
         ) -> WinResult<()> {
             if current == DIRECTMANIPULATION_RUNNING || current == DIRECTMANIPULATION_INERTIA {
                 self.active.set(true);
-                if current == DIRECTMANIPULATION_RUNNING && previous != DIRECTMANIPULATION_INERTIA {
-                    self.last.set(None);
+                ACTIVE.store(true, Ordering::Relaxed);
+                if current == DIRECTMANIPULATION_RUNNING
+                    && previous != DIRECTMANIPULATION_INERTIA
+                    && self.last.get().is_none()
+                {
+                    let mut initial = BASELINE_TRANSFORM;
+                    if let Some(vp) = viewport.as_ref() {
+                        if let Ok(content) =
+                            unsafe { vp.GetPrimaryContent::<IDirectManipulationContent>() }
+                        {
+                            let mut m = [0.0f32; 6];
+                            if unsafe { content.GetContentTransform(&mut m) }.is_ok()
+                                && m[0].is_finite()
+                                && m[0] > 1e-4
+                            {
+                                initial = (m[0], m[4], m[5]);
+                            }
+                        }
+                    }
+                    self.last.set(Some(initial));
                 }
             } else if current == DIRECTMANIPULATION_READY || current == DIRECTMANIPULATION_DISABLED {
                 self.active.set(false);
-                self.last.set(None);
+                ACTIVE.store(false, Ordering::Relaxed);
                 if current == DIRECTMANIPULATION_READY
                     && (previous == DIRECTMANIPULATION_RUNNING
                         || previous == DIRECTMANIPULATION_INERTIA)
@@ -151,9 +174,11 @@ mod imp {
                         unsafe {
                             let _ = vp.ZoomToRect(500_000.0, 500_000.0, 501_000.0, 501_000.0, false);
                         }
-                        self.last.set(None);
+                        self.last.set(Some(BASELINE_TRANSFORM));
                         self.resetting.set(false);
                     }
+                } else {
+                    self.last.set(None);
                 }
             }
             Ok(())
@@ -183,45 +208,49 @@ mod imp {
             let scale = m[0];
             let tx = m[4];
             let ty = m[5];
+            if !scale.is_finite() || !tx.is_finite() || !ty.is_finite() || scale <= 1e-4 {
+                return Ok(());
+            }
 
             let hwnd = HWND(self.hwnd as *mut core::ffi::c_void);
             let dpi_scale = dpi_scale_for(hwnd);
 
-            if let Some((prev_scale, prev_tx, prev_ty)) = self.last.get() {
-                let scale_ratio = if prev_scale > 1e-4 {
-                    scale / prev_scale
-                } else {
-                    1.0
-                };
-                if scale_ratio.is_finite()
-                    && (scale_ratio - 1.0).abs() > 0.0005
-                    && (0.5..=2.0).contains(&scale_ratio)
-                {
-                    let mut pt = POINT::default();
-                    unsafe {
-                        let _ = GetCursorPos(&mut pt);
-                    }
-                    let (cx, cy) = client_logical_point(hwnd, pt);
-                    push_event(TouchpadEvent::Zoom {
-                        factor: scale_ratio,
-                        x: cx,
-                        y: cy,
-                    });
-                } else {
-                    let dx = (tx - prev_tx) / dpi_scale;
-                    let dy = (ty - prev_ty) / dpi_scale;
-                    if dx.is_finite()
-                        && dy.is_finite()
-                        && dx.abs() < 400.0
-                        && dy.abs() < 400.0
-                        && (dx.abs() > 1e-4 || dy.abs() > 1e-4)
-                    {
-                        push_event(TouchpadEvent::Pan { dx, dy });
-                    }
-                }
-            }
+            let Some((prev_scale, prev_tx, prev_ty)) = self.last.get() else {
+                self.last.set(Some((scale, tx, ty)));
+                return Ok(());
+            };
 
-            self.last.set(Some((scale, tx, ty)));
+            let scale_ratio = scale / prev_scale;
+            if scale_ratio.is_finite()
+                && (scale_ratio - 1.0).abs() >= 0.00015
+                && (0.5..=2.0).contains(&scale_ratio)
+            {
+                let mut pt = POINT::default();
+                unsafe {
+                    let _ = GetCursorPos(&mut pt);
+                }
+                let (cx, cy) = client_logical_point(hwnd, pt);
+                push_event(TouchpadEvent::Zoom {
+                    factor: scale_ratio,
+                    x: cx,
+                    y: cy,
+                });
+                // Advance both scale and tx/ty together so scaling around DirectManipulation's
+                // content origin (~500k) never leaks as a sideways pan delta.
+                self.last.set(Some((scale, tx, ty)));
+            } else if (scale - prev_scale).abs() <= 1e-5 {
+                let dx = (tx - prev_tx) / dpi_scale;
+                let dy = (ty - prev_ty) / dpi_scale;
+                if dx.abs() < 400.0
+                    && dy.abs() < 400.0
+                    && (dx.abs() > 1e-4 || dy.abs() > 1e-4)
+                {
+                    push_event(TouchpadEvent::Pan { dx, dy });
+                }
+                self.last.set(Some((prev_scale, tx, ty)));
+            }
+            // Otherwise (micro scale change < 0.015%): retain prev_scale so tiny pinch
+            // increments accumulate cleanly across frames instead of getting dropped.
             Ok(())
         }
     }
@@ -275,7 +304,7 @@ mod imp {
                 hwnd: hwnd.0 as isize,
                 active: Cell::new(false),
                 resetting: Cell::new(false),
-                last: Cell::new(None),
+                last: Cell::new(Some(BASELINE_TRANSFORM)),
             }
             .into();
             let cookie = viewport.AddEventHandler(Some(hwnd), &handler)?;
@@ -306,7 +335,8 @@ mod imp {
                 let is_touchpad =
                     unsafe { GetPointerType(pointer_id, &mut ptype).is_ok() } && ptype == PT_TOUCHPAD;
 
-                if is_touchpad && point_in_canvas(hwnd) {
+                let ctrl_held = unsafe { GetKeyState(VK_CONTROL.0 as i32) < 0 };
+                if ENABLED.load(Ordering::Relaxed) && is_touchpad && !ctrl_held && point_in_canvas(hwnd) {
                     let vp = DM_STATE.with(|cell| {
                         cell.borrow()
                             .as_ref()
@@ -358,6 +388,7 @@ mod imp {
                 LRESULT(0)
             }
             WM_NCDESTROY => {
+                ACTIVE.store(false, Ordering::Relaxed);
                 let ctrl = DM_STATE.with(|cell| {
                     let mut b = cell.borrow_mut();
                     if b.as_ref().is_some_and(|c| c.hwnd == hwnd.0 as isize) {
@@ -416,7 +447,24 @@ mod imp {
         });
     }
 
+    pub fn set_enabled(enabled: bool) {
+        ENABLED.store(enabled, Ordering::Relaxed);
+        if !enabled {
+            ACTIVE.store(false, Ordering::Relaxed);
+            if let Ok(mut q) = EVENTS.lock() {
+                q.clear();
+            }
+        }
+    }
+
+    pub fn is_active() -> bool {
+        ENABLED.load(Ordering::Relaxed) && ACTIVE.load(Ordering::Relaxed)
+    }
+
     pub fn pump_updates() {
+        if !ENABLED.load(Ordering::Relaxed) {
+            return;
+        }
         let pair = DM_STATE.with(|cell| {
             cell.borrow()
                 .as_ref()
@@ -425,7 +473,10 @@ mod imp {
         if let Some((um, vp)) = pair {
             unsafe {
                 if let Ok(status) = vp.GetStatus() {
-                    if status == DIRECTMANIPULATION_RUNNING || status == DIRECTMANIPULATION_INERTIA {
+                    let running = status == DIRECTMANIPULATION_RUNNING
+                        || status == DIRECTMANIPULATION_INERTIA;
+                    ACTIVE.store(running, Ordering::Relaxed);
+                    if running {
                         let _ = um.Update(Option::<&IDirectManipulationFrameInfoProvider>::None);
                     }
                 }
@@ -434,11 +485,40 @@ mod imp {
     }
 
     pub fn take_events() -> Vec<TouchpadEvent> {
-        if let Ok(mut q) = EVENTS.lock() {
+        let raw = if let Ok(mut q) = EVENTS.lock() {
             std::mem::take(&mut *q)
         } else {
-            Vec::new()
+            return Vec::new();
+        };
+        let mut coalesced: Vec<TouchpadEvent> = Vec::with_capacity(raw.len());
+        for ev in raw {
+            match (coalesced.last_mut(), ev) {
+                (
+                    Some(TouchpadEvent::Pan {
+                        dx: acc_x,
+                        dy: acc_y,
+                    }),
+                    TouchpadEvent::Pan { dx, dy },
+                ) => {
+                    *acc_x += dx;
+                    *acc_y += dy;
+                }
+                (
+                    Some(TouchpadEvent::Zoom {
+                        factor: acc_factor,
+                        x: acc_x,
+                        y: acc_y,
+                    }),
+                    TouchpadEvent::Zoom { factor, x, y },
+                ) => {
+                    *acc_factor = (*acc_factor * factor).clamp(0.25, 4.0);
+                    *acc_x = x;
+                    *acc_y = y;
+                }
+                _ => coalesced.push(ev),
+            }
         }
+        coalesced
     }
 }
 
@@ -448,6 +528,10 @@ mod imp {
 
     pub fn set_waker(_waker: rune::Waker) {}
     pub fn set_canvas_bounds(_bounds: Option<[f32; 4]>) {}
+    pub fn set_enabled(_enabled: bool) {}
+    pub fn is_active() -> bool {
+        false
+    }
     pub fn attach(_window: &rune::WindowHandle) {}
     pub fn pump_updates() {}
     pub fn take_events() -> Vec<TouchpadEvent> {
@@ -455,4 +539,6 @@ mod imp {
     }
 }
 
-pub use imp::{attach, pump_updates, set_canvas_bounds, set_waker, take_events};
+pub use imp::{
+    attach, is_active, pump_updates, set_canvas_bounds, set_enabled, set_waker, take_events,
+};
