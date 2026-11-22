@@ -12,8 +12,8 @@ path = "src/main.rs"
 studynodes-graph = { path = "../studynodes-graph" }
 studynodes-llm = { path = "../studynodes-llm" }
 studynodes-vision = { path = "../studynodes-vision" }
-rune = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/crates/rune", features = ["native-file-dialog"] }
-rune-kit = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/crates/rune-kit", features = ["markdown", "mermaid"] }
+rune = { git = "https://github.com/anomalyco/rune.git", rev = "01096f25021fb356b867c1b1868363467deb5143", features = ["native-file-dialog"] }
+rune-kit = { git = "https://github.com/anomalyco/rune.git", rev = "01096f25021fb356b867c1b1868363467deb5143", features = ["markdown", "mermaid"] }
 hayro = "0.9"
 pdf-extract = "0.12"
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }

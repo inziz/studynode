@@ -24,12 +24,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "mul
 rstar = "0.12"
 
 [patch.crates-io]
-wgpu-hal = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/vendor/wgpu-hal" }
-winit = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/vendor/winit" }
-sctk-adwaita = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/vendor/sctk-adwaita" }
-parley_engine = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/vendor/parley_engine" }
-accesskit_windows = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/vendor/accesskit_windows" }
-accesskit_macos = { path = "C:/Users/pelotadewindows11/.gemini/antigravity/brain/c9cdafef-02e7-47fb-85ad-2413450dca49/scratch/rune/vendor/accesskit_macos" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune.git", rev = "01096f25021fb356b867c1b1868363467deb5143" }
+winit = { git = "https://github.com/anomalyco/rune.git", rev = "01096f25021fb356b867c1b1868363467deb5143" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune.git", rev = "01096f25021fb356b867c1b1868363467deb5143" }
+parley_engine = { git = "https://github.com/anomalyco/rune.git", rev = "01096f25021fb356b867c1b1868363467deb5143" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune.git", rev = "01096f25021fb356b867c1b1868363467deb5143" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune.git", rev = "01096f25021fb356b867c1b1868363467deb5143" }
 
 [profile.dev]
 debug = "line-tables-only"
