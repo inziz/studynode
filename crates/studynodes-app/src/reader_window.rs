@@ -2620,6 +2620,7 @@ fn render_popout_formula(
         ),
     );
 
+    let is_code = formula_math::is_code_language(Some(cur_lang));
     let mut card = col()
         .key("popout_formula_view")
         .w_full()
@@ -2634,32 +2635,93 @@ fn render_popout_formula(
                 .font(TextStyle::new(17.0, 600.0))
                 .color(theme::text_primary()),
         )
-        .child(lang_row)
-        .child(
+        .child(lang_row);
+
+    if !is_code {
+        let preview_text = if is_ro {
+            snap.content.as_str()
+        } else {
+            s.source_edit.text.as_str()
+        };
+        let preview_sel = if is_ro {
+            None
+        } else {
+            Some(s.source_edit.range())
+        };
+        let mut pretty_card = col()
+            .key("popout_formula_pretty")
+            .w_full()
+            .min_h(110.0)
+            .padding(18.0)
+            .gap(10.0)
+            .radius(6.0)
+            .fill(theme::bg_input())
+            .border(1.0, theme::border_default())
+            .center()
+            .child(graph_formula::render_pretty_math_formula(
+                preview_text,
+                21.0,
+                preview_sel,
+                "Empty equation.",
+            ));
+        if let Some(ro) = graph_formula::evaluate_formula_readout(preview_text) {
+            pretty_card = pretty_card.child(
+                row()
+                    .w_full()
+                    .center_y()
+                    .px(12.0)
+                    .py(7.0)
+                    .radius(6.0)
+                    .fill(theme::accent_claude())
+                    .child(
+                        text(ro)
+                            .font(TextStyle::new(14.5, 650.0).mono())
+                            .color(theme::text_inverted()),
+                    ),
+            );
+        }
+        card = card.child(pretty_card);
+    }
+
+    if is_ro {
+        if is_code {
+            card = card.child(
+                col()
+                    .w_full()
+                    .min_h(140.0)
+                    .padding(18.0)
+                    .radius(6.0)
+                    .fill(theme::bg_input())
+                    .border(1.0, theme::border_default())
+                    .child(
+                        text(if snap.content.trim().is_empty() {
+                            "Empty snippet."
+                        } else {
+                            snap.content.trim()
+                        })
+                        .font(TextStyle::new(16.0, 500.0).mono().lh(24.0))
+                        .color(theme::text_primary())
+                        .w_full()
+                        .wrap(),
+                    ),
+            );
+        }
+    } else {
+        let nid_f = node_id.clone();
+        card = card.child(
             col()
                 .w_full()
-                .min_h(140.0)
-                .padding(18.0)
+                .min_h(if is_code { 140.0 } else { 72.0 })
+                .padding(14.0)
                 .radius(6.0)
                 .fill(theme::bg_input())
                 .border(1.0, theme::border_default())
-                .child(if is_ro {
-                    text(if snap.content.trim().is_empty() {
-                        "Empty equation."
-                    } else {
-                        snap.content.trim()
-                    })
-                    .font(TextStyle::new(16.0, 500.0).mono().lh(24.0))
-                    .color(theme::text_primary())
-                    .w_full()
-                    .wrap()
-                } else {
-                    let nid_f = node_id.clone();
+                .child(
                     text_input(&s.source_edit, TextStyle::new(15.0, 500.0).mono().lh(22.0))
                         .key("popout_formula_input")
                         .label("Formula source")
                         .w_full()
-                        .min_h(110.0)
+                        .min_h(if is_code { 110.0 } else { 44.0 })
                         .color(theme::text_primary())
                         .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
                         .on_edit(|s: &mut PopoutReaderState| &mut s.source_edit)
@@ -2672,9 +2734,10 @@ fn render_popout_formula(
                                 title,
                                 content,
                             });
-                        })
-                }),
+                        }),
+                ),
         );
+    }
 
     if !is_ro {
         let mut sym_rows = col().w_full().gap(6.0);

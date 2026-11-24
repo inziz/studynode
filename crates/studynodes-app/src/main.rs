@@ -1461,9 +1461,14 @@ mod tests {
         rt.invalidate();
         settle_frames(rt, 45);
 
-        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some(&format!("formula_input_{}", eq_id.as_str()))));
+        assert!(has_element_key(rt, &format!("formula_pretty_{}", eq_id.as_str())));
+        assert!(has_element_key(rt, &format!("formula_input_{}", eq_id.as_str())));
+        assert!(has_element_key(rt, "insp_formula_keypad"));
 
-        click_key(rt, &format!("formula_sym_{}_0", eq_id.as_str()));
+        click_key(rt, "insp_fkp_main_func");
+        settle_frames(rt, 3);
+        click_key(rt, "insp_fkp_func_sum");
+        settle_frames(rt, 3);
         assert!(rt.state.graph.get_node(&eq_id).unwrap().content.contains('∑'));
 
         if let Some(eq) = rt.state.graph.get_node_mut(&eq_id) {
@@ -5921,5 +5926,121 @@ mod tests {
             .unwrap();
         assert_eq!(pruned, 1);
         assert!(rt.state.asset_path_cache.get(&ans_hash).unwrap().exists());
+    }
+
+    #[test]
+    fn test_photomath_formula_keyboard_pages_rendering_and_readout() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Photomath Formula E2E");
+        rt.invalidate();
+        settle_frames(rt, 6);
+
+        click_key(rt, "btn_toggle_block_menu");
+        settle_frames(rt, 4);
+        click_key(rt, "btn_add_formula");
+        settle_frames(rt, 6);
+
+        let f_id = rt
+            .state
+            .graph
+            .nodes
+            .values()
+            .find(|n| n.kind == NodeKind::Formula)
+            .expect("Formula node must be created")
+            .id
+            .clone();
+
+        assert!(rt.state.inspector_open);
+        assert!(has_element_key(rt, "insp_formula_pretty"));
+        assert!(has_element_key(rt, "insp_formula_keypad"));
+        assert!(has_element_key(rt, &format!("formula_pretty_{}", f_id.as_str())));
+        assert!(!has_element_key(rt, "inspector_content"));
+
+        // Clear initial default content and compose `2x + root(3, 27) = ln(e)` via Photomath keypad
+        click_key(rt, "insp_formula_clear");
+        settle_frames(rt, 2);
+        assert_eq!(rt.state.graph.get_node(&f_id).unwrap().content, "");
+
+        for key in [
+            "insp_fkp_main_2",
+            "insp_fkp_main_x",
+            "insp_fkp_main_add",
+            "insp_fkp_main_func",
+            "insp_fkp_func_nroot",
+            "insp_fkp_func_123",
+            "insp_fkp_main_3",
+            "insp_fkp_right",
+            "insp_fkp_main_2",
+            "insp_fkp_main_7",
+            "insp_fkp_right",
+            "insp_fkp_main_eq",
+        ] {
+            click_key(rt, key);
+            settle_frames(rt, 2);
+        }
+
+        assert_eq!(
+            rt.state.graph.get_node(&f_id).unwrap().content,
+            "2x + root(3, 27) = "
+        );
+        assert!(has_element_key(rt, "insp_formula_readout"));
+        assert!(has_element_key(
+            rt,
+            &format!("formula_readout_{}", f_id.as_str())
+        ));
+        assert_eq!(
+            crate::graph_formula::evaluate_formula_readout(
+                &rt.state.graph.get_node(&f_id).unwrap().content
+            )
+            .as_deref(),
+            Some("2x + 3")
+        );
+
+        click_key(rt, "insp_fkp_main_func");
+        settle_frames(rt, 2);
+        click_key(rt, "insp_fkp_func_ln");
+        settle_frames(rt, 2);
+        click_key(rt, "insp_fkp_func_e");
+        settle_frames(rt, 2);
+
+        let solved_eq = rt.state.graph.get_node(&f_id).unwrap().content.clone();
+        assert_eq!(solved_eq, "2x + root(3, 27) = ln(e)");
+        assert_eq!(
+            crate::graph_formula::evaluate_formula_readout(&solved_eq).as_deref(),
+            Some("x = -1")
+        );
+
+        // Toggle Alpha -> Greek pages & Raw LaTeX input box
+        click_key(rt, "insp_fkp_func_123");
+        settle_frames(rt, 2);
+        click_key(rt, "insp_fkp_main_abc");
+        settle_frames(rt, 2);
+        assert!(has_element_key(rt, "insp_fkp_alpha_a"));
+        click_key(rt, "insp_fkp_alpha_greek");
+        settle_frames(rt, 2);
+        assert!(has_element_key(rt, "insp_fkp_greek_alpha"));
+
+        click_key(rt, "insp_fkp_raw");
+        settle_frames(rt, 2);
+        assert!(has_element_key(rt, "inspector_formula_input"));
+        click_key(rt, "insp_fkp_raw");
+        settle_frames(rt, 2);
+        assert!(!has_element_key(rt, "inspector_formula_input"));
+
+        // Verify RUST language switches cleanly to code mode and back
+        click_key(rt, "lang_rust");
+        settle_frames(rt, 3);
+        assert!(has_element_key(rt, "inspector_formula_input"));
+        assert!(!has_element_key(rt, "insp_formula_keypad"));
+        click_key(rt, "lang_math");
+        settle_frames(rt, 3);
+        assert!(has_element_key(rt, "insp_formula_keypad"));
+
+        // Verify persistence across bundle reload
+        let dir = rt.state.bundle.as_ref().unwrap().root_dir.clone();
+        let (_, loaded) = studynodes_graph::ProjectBundle::open(&dir).expect("open bundle");
+        let persisted = loaded.get_node(&f_id).expect("persisted Formula node");
+        assert_eq!(persisted.content, "2x + root(3, 27) = ln(e)");
     }
 }

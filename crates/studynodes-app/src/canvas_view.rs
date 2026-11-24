@@ -3834,83 +3834,185 @@ fn render_formula_body(
 ) -> El {
     let select_id = node.id.clone();
     let is_editing = is_selected && s.editing_node_id.as_ref() == Some(&node.id);
-    let formula_text = if node.content.trim().is_empty() {
-        "Click to edit equation..."
+    let is_code = formula_math::is_code_language(node.meta.language.as_deref());
+
+    if is_code {
+        let code_text = if node.content.trim().is_empty() {
+            "Write code snippet..."
+        } else {
+            node.content.trim()
+        };
+        if is_editing {
+            return col()
+                .key(format!("node_body_{}", node.id.as_str()))
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .clip_soft(0.0)
+                .padding(7.0 * zoom)
+                .child(
+                    col()
+                        .w_full()
+                        .grow(1.0)
+                        .min_h(0.0)
+                        .radius(4.0 * zoom)
+                        .fill(theme::bg_input())
+                        .border(1.0, theme::border_default())
+                        .padding(7.0 * zoom)
+                        .child(
+                            text_input(
+                                &s.canvas_content_edit,
+                                TextStyle::new(body_size, 500.0).mono().lh(body_size * 1.4),
+                            )
+                            .key(format!("formula_input_{}", node.id.as_str()))
+                            .label("Formula code editor")
+                            .w_full()
+                            .grow(1.0)
+                            .color(theme::text_primary())
+                            .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                            .placeholder("Write code snippet...", theme::text_muted())
+                            .on_edit(|s: &mut AppState| &mut s.canvas_content_edit)
+                            .on_input_change(|s: &mut AppState, _| {
+                                s.sync_from_canvas_edits();
+                            }),
+                        ),
+                );
+        } else {
+            return col()
+                .key(format!("node_body_{}", node.id.as_str()))
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .clip_soft(0.0)
+                .padding(8.0 * zoom)
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.select_node(select_id.clone(), false);
+                })
+                .child(
+                    col()
+                        .w_full()
+                        .grow(1.0)
+                        .min_h(0.0)
+                        .radius(4.0 * zoom)
+                        .fill(theme::bg_input())
+                        .border(1.0, theme::border_subtle())
+                        .padding(8.0 * zoom)
+                        .child(
+                            text(code_text)
+                                .font(TextStyle::new(body_size, 500.0).mono().lh(body_size * 1.42))
+                                .color(if node.content.trim().is_empty() {
+                                    theme::text_muted()
+                                } else {
+                                    theme::text_primary()
+                                })
+                                .w_full()
+                                .wrap(),
+                        ),
+                );
+        }
+    }
+
+    let (active_text, active_sel) = if is_editing {
+        if s.inspector_content_edit.focused {
+            (
+                s.inspector_content_edit.text.as_str(),
+                Some(s.inspector_content_edit.range()),
+            )
+        } else {
+            (
+                s.canvas_content_edit.text.as_str(),
+                Some(s.canvas_content_edit.range()),
+            )
+        }
     } else {
-        node.content.trim()
+        (node.content.as_str(), None)
     };
+    let math_fs = (body_size * 1.16).clamp(11.0, 26.0);
+    let readout = graph_formula::evaluate_formula_readout(active_text);
+
+    let mut preview_box = col()
+        .key(format!("formula_pretty_{}", node.id.as_str()))
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .radius(4.0 * zoom)
+        .fill(theme::bg_input())
+        .border(
+            1.0,
+            if is_editing {
+                theme::border_default()
+            } else {
+                theme::border_subtle()
+            },
+        )
+        .padding((7.0 * zoom).clamp(5.0, 14.0))
+        .gap(4.0 * zoom)
+        .child(
+            el().w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .clip_soft(0.0)
+                .center()
+                .child(graph_formula::render_pretty_math_formula(
+                    active_text,
+                    math_fs,
+                    active_sel,
+                    if is_editing {
+                        "Type equation here..."
+                    } else {
+                        "Click to write formula..."
+                    },
+                )),
+        );
+
+    if let Some(ro) = readout {
+        preview_box = preview_box.child(
+            row()
+                .w_full()
+                .child(el().grow(1.0))
+                .child(
+                    el()
+                        .key(format!("formula_readout_{}", node.id.as_str()))
+                        .px((6.0 * zoom).clamp(4.0, 10.0))
+                        .py((2.0 * zoom).clamp(1.5, 5.0))
+                        .radius(4.0 * zoom)
+                        .fill(theme::accent_claude().alpha(0.18))
+                        .border(1.0, theme::accent_claude().alpha(0.45))
+                        .child(
+                            text(ro)
+                                .font(TextStyle::new(badge_size, 600.0).mono())
+                                .color(theme::accent_claude())
+                                .truncate(),
+                        ),
+                ),
+        );
+    }
 
     if is_editing {
         let fmt_id = node.id.clone();
-        let mut sym_bar = row().w_full().center_y().gap(2.5 * zoom);
-        for (idx, &(label, sym)) in formula_math::QUICK_CARD_SYMBOLS.iter().take(7).enumerate() {
-            let sym_nid = node.id.clone();
-            sym_bar = sym_bar.child(
-                el()
-                    .key(format!("formula_sym_{}_{}", node.id.as_str(), idx))
-                    .px((4.0 * zoom).clamp(3.0, 6.0))
-                    .py((2.0 * zoom).clamp(1.0, 4.0))
-                    .radius(3.0 * zoom)
-                    .fill(theme::bg_control())
-                    .hover(theme::hover_subtle())
-                    .border(1.0, theme::border_subtle())
-                    .cursor(Cursor::Pointer)
-                    .on_press(move |s: &mut AppState| {
-                        s.insert_formula_symbol(&sym_nid, sym);
-                    })
-                    .child(
-                        text(label)
-                            .font(TextStyle::new(badge_size, 500.0).mono())
-                            .color(theme::text_primary()),
-                    ),
-            );
-        }
-        sym_bar = sym_bar.child(el().grow(1.0)).child(
-            el()
-                .key(format!("formula_fmt_{}", node.id.as_str()))
-                .px((5.0 * zoom).clamp(3.0, 8.0))
-                .py((2.0 * zoom).clamp(1.0, 4.0))
-                .radius(3.0 * zoom)
-                .fill(theme::accent_claude().alpha(0.16))
-                .hover(theme::accent_claude().alpha(0.24))
-                .border(1.0, theme::accent_claude().alpha(0.45))
-                .cursor(Cursor::Pointer)
-                .on_press(move |s: &mut AppState| {
-                    s.format_formula_node(&fmt_id);
-                })
-                .child(
-                    text("\\→∑")
-                        .font(TextStyle::new(badge_size, 600.0).mono())
-                        .color(theme::accent_claude()),
-                ),
-        );
-
-        col()
-            .key(format!("node_body_{}", node.id.as_str()))
+        let input_row = row()
             .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .clip_soft(0.0)
-            .padding(7.0 * zoom)
-            .gap(4.5 * zoom)
+            .center_y()
+            .gap(4.0 * zoom)
             .child(
-                col()
-                    .w_full()
+                el()
                     .grow(1.0)
-                    .min_h(0.0)
+                    .min_w(0.0)
+                    .px((6.0 * zoom).clamp(4.0, 10.0))
+                    .py((3.0 * zoom).clamp(2.0, 6.0))
                     .radius(4.0 * zoom)
                     .fill(theme::bg_input())
-                    .border(1.0, theme::border_default())
-                    .padding(7.0 * zoom)
+                    .border(1.0, theme::border_subtle())
                     .child(
                         text_input(
                             &s.canvas_content_edit,
-                            TextStyle::new(body_size, 500.0).mono().lh(body_size * 1.4),
+                            TextStyle::new((body_size * 0.90).clamp(9.0, 14.0), 500.0).mono(),
                         )
                         .key(format!("formula_input_{}", node.id.as_str()))
                         .label("Formula editor")
+                        .single_line()
                         .w_full()
-                        .grow(1.0)
                         .color(theme::text_primary())
                         .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
                         .placeholder("Type math or \\alpha, \\sum, -> ...", theme::text_muted())
@@ -3918,10 +4020,42 @@ fn render_formula_body(
                         .on_input_change(|s: &mut AppState, _| {
                             s.sync_from_canvas_edits();
                             s.maybe_auto_expand_formula_on_canvas_edit();
+                            let (a, b) = s.canvas_content_edit.range();
+                            let cb = b.min(s.inspector_content_edit.text.len());
+                            s.inspector_content_edit.set_selection(a.min(cb), cb);
                         }),
                     ),
             )
-            .child(sym_bar)
+            .child(
+                el()
+                    .key(format!("formula_fmt_{}", node.id.as_str()))
+                    .px((5.0 * zoom).clamp(3.0, 8.0))
+                    .py((3.0 * zoom).clamp(2.0, 6.0))
+                    .radius(4.0 * zoom)
+                    .fill(theme::accent_claude().alpha(0.16))
+                    .hover(theme::accent_claude().alpha(0.24))
+                    .border(1.0, theme::accent_claude().alpha(0.45))
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.format_formula_node(&fmt_id);
+                    })
+                    .child(
+                        text("\\→∑")
+                            .font(TextStyle::new(badge_size, 600.0).mono())
+                            .color(theme::accent_claude()),
+                    ),
+            );
+
+        col()
+            .key(format!("node_body_{}", node.id.as_str()))
+            .w_full()
+            .grow(1.0)
+            .min_h(0.0)
+            .clip_soft(0.0)
+            .padding(6.0 * zoom)
+            .gap(4.0 * zoom)
+            .child(preview_box)
+            .child(input_row)
     } else {
         col()
             .key(format!("node_body_{}", node.id.as_str()))
@@ -3929,32 +4063,12 @@ fn render_formula_body(
             .grow(1.0)
             .min_h(0.0)
             .clip_soft(0.0)
-            .padding(8.0 * zoom)
+            .padding(7.0 * zoom)
             .cursor(Cursor::Pointer)
             .on_press(move |s: &mut AppState| {
                 s.select_node(select_id.clone(), false);
             })
-            .child(
-                col()
-                    .w_full()
-                    .grow(1.0)
-                    .min_h(0.0)
-                    .radius(4.0 * zoom)
-                    .fill(theme::bg_input())
-                    .border(1.0, theme::border_subtle())
-                    .padding(8.0 * zoom)
-                    .child(
-                        text(formula_text)
-                            .font(TextStyle::new(body_size, 500.0).mono().lh(body_size * 1.42))
-                            .color(if node.content.trim().is_empty() {
-                                theme::text_muted()
-                            } else {
-                                theme::text_primary()
-                            })
-                            .w_full()
-                            .wrap(),
-                    ),
-            )
+            .child(preview_box)
     }
 }
 

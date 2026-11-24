@@ -239,6 +239,7 @@ pub(crate) fn resizable_node_bounds(kind: NodeKind) -> Option<((f32, f32), (f32,
         NodeKind::Document => Some(((220.0, 160.0), (960.0, 820.0))),
         NodeKind::Image => Some(((120.0, 90.0), (1400.0, 1100.0))),
         NodeKind::Flashcard => Some(((210.0, 140.0), (860.0, 640.0))),
+        NodeKind::Formula => Some(((200.0, 110.0), (960.0, 640.0))),
         NodeKind::Video => Some(((240.0, 176.0), (1280.0, 860.0))),
         NodeKind::Audio => Some(((230.0, 112.0), (900.0, 520.0))),
         NodeKind::Drawing => Some(((240.0, 180.0), (960.0, 720.0))),
@@ -597,7 +598,9 @@ pub struct AppState {
     pub quiz_q_img_hash: Option<String>,
     pub quiz_ans_img_hash: Option<String>,
 
-    // Graphic Formula sidebar keypad mode & plot pan state
+    // Formula & Graphic Formula sidebar keypad modes & plot pan state
+    pub formula_keypad_page: formula_math::FormulaKeypadPage,
+    pub formula_show_raw_input: bool,
     pub graph_keypad_mode: graph_formula::KeypadMode,
     pub graph_drag_origin: Option<(NodeId, f64, f64)>,
 
@@ -908,6 +911,8 @@ impl AppState {
             quiz_correct_idx: 0,
             quiz_q_img_hash: None,
             quiz_ans_img_hash: None,
+            formula_keypad_page: formula_math::FormulaKeypadPage::default(),
+            formula_show_raw_input: false,
             graph_keypad_mode: graph_formula::KeypadMode::default(),
             graph_drag_origin: None,
             asset_path_cache: HashMap::new(),
@@ -3088,13 +3093,13 @@ impl AppState {
                 }
                 self.ai_panel_open = false;
                 self.editing_node_id = None;
-            } else if n.kind == NodeKind::GraphFormula {
+            } else if matches!(n.kind, NodeKind::GraphFormula | NodeKind::Formula) {
                 if !self.inspector_popped_out {
                     self.inspector_open = true;
                 }
                 self.ai_panel_open = false;
                 self.editing_node_id = Some(id.clone());
-            } else if matches!(n.kind, NodeKind::Note | NodeKind::Formula | NodeKind::Text) {
+            } else if matches!(n.kind, NodeKind::Note | NodeKind::Text) {
                 self.editing_node_id = Some(id.clone());
             } else {
                 self.editing_node_id = None;
@@ -3350,6 +3355,46 @@ impl AppState {
         } else {
             self.status_message = "Formula already formatted".into();
         }
+    }
+
+    pub fn apply_formula_keypad(&mut self, id: &NodeId, action: formula_math::FormulaKeyAction) {
+        match action {
+            formula_math::FormulaKeyAction::SetPage(page) => {
+                self.formula_keypad_page = page;
+                return;
+            }
+            formula_math::FormulaKeyAction::ToggleRawInput => {
+                self.formula_show_raw_input = !self.formula_show_raw_input;
+                return;
+            }
+            formula_math::FormulaKeyAction::FormatShorthand => {
+                self.format_formula_node(id);
+                return;
+            }
+            _ => {}
+        }
+
+        if !self.selected_nodes.contains(id) {
+            self.select_node(id.clone(), false);
+        }
+
+        if self.inspector_content_edit.focused {
+            formula_math::apply_formula_key_to_edit(&mut self.inspector_content_edit, action);
+            self.sync_from_inspector_edits();
+            let (a, b) = self.inspector_content_edit.range();
+            let clamped_b = b.min(self.canvas_content_edit.text.len());
+            let clamped_a = a.min(clamped_b);
+            self.canvas_content_edit.set_selection(clamped_a, clamped_b);
+        } else {
+            formula_math::apply_formula_key_to_edit(&mut self.canvas_content_edit, action);
+            self.sync_from_canvas_edits();
+            let (a, b) = self.canvas_content_edit.range();
+            let clamped_b = b.min(self.inspector_content_edit.text.len());
+            let clamped_a = a.min(clamped_b);
+            self.inspector_content_edit
+                .set_selection(clamped_a, clamped_b);
+        }
+        self.persist_graph_and_snapshot();
     }
 
     pub fn maybe_auto_expand_formula_on_canvas_edit(&mut self) {

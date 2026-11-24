@@ -2553,12 +2553,14 @@ pub fn build_graph_plot(content: &str, vp: &GraphViewport, w: f32, h: f32, scale
 // 2D Readable Math Typesetter (Fractions, Nth-Roots with Vinculum, Exponents)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum DisplayNode {
     Row(Vec<DisplayNode>),
     Text(String),
     Op(String),
     Placeholder,
+    ActivePlaceholder,
+    Caret,
     Frac(Box<DisplayNode>, Box<DisplayNode>),
     Sqrt {
         index: Option<Box<DisplayNode>>,
@@ -2573,6 +2575,69 @@ enum DisplayNode {
         upper: Option<Box<DisplayNode>>,
         body: Box<DisplayNode>,
     },
+    BigOp {
+        sym: &'static str,
+        lower: Option<Box<DisplayNode>>,
+        upper: Option<Box<DisplayNode>>,
+        body: Option<Box<DisplayNode>>,
+    },
+}
+
+const ACTIVE_PLACEHOLDER_SENTINEL: char = '\u{E000}';
+const CARET_SENTINEL: char = '\u{E001}';
+
+fn display_superscript_char_to_ascii(ch: char) -> Option<char> {
+    match ch {
+        'ⁱ' => Some('i'),
+        'ˣ' => Some('x'),
+        _ => superscript_char_to_ascii(ch),
+    }
+}
+
+fn display_subscript_char_to_ascii(ch: char) -> Option<char> {
+    match ch {
+        'ᵢ' => Some('i'),
+        'ⱼ' => Some('j'),
+        'ₖ' => Some('k'),
+        'ₙ' => Some('n'),
+        'ₓ' => Some('x'),
+        'ₐ' => Some('a'),
+        'ₑ' => Some('e'),
+        'ₒ' => Some('o'),
+        '₊' => Some('+'),
+        '₋' => Some('-'),
+        '₌' => Some('='),
+        '₍' => Some('('),
+        '₎' => Some(')'),
+        _ => subscript_char_to_ascii(ch),
+    }
+}
+
+fn inject_display_cursor(content: &str, selection: Option<(usize, usize)>) -> String {
+    let Some((raw_a, raw_b)) = selection else {
+        return content.to_string();
+    };
+    let len = content.len();
+    let a = raw_a.min(len);
+    let b = raw_b.min(len);
+    if a > b || !content.is_char_boundary(a) || !content.is_char_boundary(b) {
+        return content.to_string();
+    }
+    if &content[a..b] == "□" {
+        let mut out = String::with_capacity(content.len() + 4);
+        out.push_str(&content[..a]);
+        out.push(ACTIVE_PLACEHOLDER_SENTINEL);
+        out.push_str(&content[b..]);
+        return out;
+    }
+    if a == b && !content.trim().is_empty() {
+        let mut out = String::with_capacity(content.len() + 4);
+        out.push_str(&content[..a]);
+        out.push(CARET_SENTINEL);
+        out.push_str(&content[a..]);
+        return out;
+    }
+    content.to_string()
 }
 
 fn find_matching_delim(chars: &[char], open_idx: usize, open: char, close: char) -> Option<usize> {
@@ -2601,6 +2666,36 @@ fn split_top_level_relation(line: &str) -> Option<(String, &'static str, String)
         match chars[i] {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth = (depth - 1).max(0),
+            '⇔' if depth == 0 => {
+                let l: String = chars[..i].iter().collect();
+                let r: String = chars[i + 1..].iter().collect();
+                return Some((l, "⇔", r));
+            }
+            '→' if depth == 0 => {
+                let l: String = chars[..i].iter().collect();
+                let r: String = chars[i + 1..].iter().collect();
+                return Some((l, "→", r));
+            }
+            '≈' if depth == 0 => {
+                let l: String = chars[..i].iter().collect();
+                let r: String = chars[i + 1..].iter().collect();
+                return Some((l, "≈", r));
+            }
+            '≠' if depth == 0 => {
+                let l: String = chars[..i].iter().collect();
+                let r: String = chars[i + 1..].iter().collect();
+                return Some((l, "≠", r));
+            }
+            '∝' if depth == 0 => {
+                let l: String = chars[..i].iter().collect();
+                let r: String = chars[i + 1..].iter().collect();
+                return Some((l, "∝", r));
+            }
+            '!' if depth == 0 && chars.get(i + 1) == Some(&'=') => {
+                let l: String = chars[..i].iter().collect();
+                let r: String = chars[i + 2..].iter().collect();
+                return Some((l, "≠", r));
+            }
             '=' if depth == 0 => {
                 let l: String = chars[..i].iter().collect();
                 let r: String = chars[i + 1..].iter().collect();
@@ -2616,7 +2711,17 @@ fn split_top_level_relation(line: &str) -> Option<(String, &'static str, String)
                 let r: String = chars[i + 1..].iter().collect();
                 return Some((l, "≥", r));
             }
+            '-' if depth == 0 && chars.get(i + 1) == Some(&'>') => {
+                let l: String = chars[..i].iter().collect();
+                let r: String = chars[i + 2..].iter().collect();
+                return Some((l, "→", r));
+            }
             '<' if depth == 0 => {
+                if chars.get(i + 1) == Some(&'=') && chars.get(i + 2) == Some(&'>') {
+                    let l: String = chars[..i].iter().collect();
+                    let r: String = chars[i + 3..].iter().collect();
+                    return Some((l, "⇔", r));
+                }
                 if chars.get(i + 1) == Some(&'=') {
                     let l: String = chars[..i].iter().collect();
                     let r: String = chars[i + 2..].iter().collect();
@@ -2687,15 +2792,18 @@ fn parse_display_add(s: &str) -> DisplayNode {
         match chars[i] {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth = (depth - 1).max(0),
-            '+' | '-' | '−' if depth == 0 && i > seg_start => {
-                // Don't split after '^' or '*' or '/' or 'e'
+            '+' | '-' | '−' | '±' if depth == 0 && i > seg_start => {
+                // Don't split after '^', '_', binary operators, or opening delimiters
                 let prev = chars[..i]
                     .iter()
                     .rev()
                     .find(|c| !c.is_whitespace())
                     .copied()
                     .unwrap_or(' ');
-                if !matches!(prev, '^' | '*' | '/' | '·' | '×' | '÷' | '(' | ',') {
+                if !matches!(
+                    prev,
+                    '^' | '_' | '*' | '/' | '·' | '×' | '÷' | '(' | '{' | '[' | ','
+                ) {
                     let seg: String = chars[seg_start..i].iter().collect();
                     items.push(parse_display_mul(&seg));
                     let op_ch = if chars[i] == '-' { '−' } else { chars[i] };
@@ -2766,6 +2874,62 @@ fn parse_display_mul(s: &str) -> DisplayNode {
     parse_display_tokens(trimmed)
 }
 
+fn consume_script_arg(chars: &[char], start_idx: usize) -> (DisplayNode, usize) {
+    let mut i = start_idx;
+    if i >= chars.len() {
+        return (DisplayNode::Placeholder, i);
+    }
+    if chars[i] == '(' {
+        if let Some(close) = find_matching_delim(chars, i, '(', ')') {
+            let inner: String = chars[i + 1..close].iter().collect();
+            return (parse_display_add(&inner), close + 1);
+        }
+        return (DisplayNode::Placeholder, i + 1);
+    }
+    if chars[i] == '{' {
+        if let Some(close) = find_matching_delim(chars, i, '{', '}') {
+            let inner: String = chars[i + 1..close].iter().collect();
+            return (parse_display_add(&inner), close + 1);
+        }
+        return (DisplayNode::Placeholder, i + 1);
+    }
+    if chars[i] == ACTIVE_PLACEHOLDER_SENTINEL {
+        return (DisplayNode::ActivePlaceholder, i + 1);
+    }
+    if chars[i] == '□' {
+        return (DisplayNode::Placeholder, i + 1);
+    }
+    if chars[i] == CARET_SENTINEL {
+        return (DisplayNode::Caret, i + 1);
+    }
+    let start = i;
+    while i < chars.len()
+        && (chars[i].is_alphanumeric() || chars[i] == '.' || chars[i] == '-' || chars[i] == '−')
+    {
+        i += 1;
+    }
+    if i > start {
+        let s: String = chars[start..i].iter().collect();
+        (DisplayNode::Text(s), i)
+    } else {
+        (DisplayNode::Placeholder, i)
+    }
+}
+
+fn attach_postfix(items: &mut Vec<DisplayNode>, wrap: impl FnOnce(DisplayNode) -> DisplayNode) {
+    match items.pop() {
+        Some(DisplayNode::Caret) => {
+            if let Some(real_base) = items.pop() {
+                items.push(wrap(DisplayNode::Row(vec![real_base, DisplayNode::Caret])));
+            } else {
+                items.push(wrap(DisplayNode::Caret));
+            }
+        }
+        Some(prev) => items.push(wrap(prev)),
+        None => items.push(wrap(DisplayNode::Placeholder)),
+    }
+}
+
 fn parse_display_tokens(s: &str) -> DisplayNode {
     let chars: Vec<char> = s.trim().chars().collect();
     let mut items: Vec<DisplayNode> = Vec::new();
@@ -2774,6 +2938,18 @@ fn parse_display_tokens(s: &str) -> DisplayNode {
     while i < chars.len() {
         let c = chars[i];
         if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+
+        if c == ACTIVE_PLACEHOLDER_SENTINEL {
+            items.push(DisplayNode::ActivePlaceholder);
+            i += 1;
+            continue;
+        }
+
+        if c == CARET_SENTINEL {
+            items.push(DisplayNode::Caret);
             i += 1;
             continue;
         }
@@ -2805,6 +2981,185 @@ fn parse_display_tokens(s: &str) -> DisplayNode {
                 }
             };
             items.push(DisplayNode::Deriv(Box::new(body)));
+            continue;
+        }
+
+        // LaTeX `\frac{num}{den}`
+        if rest.starts_with("\\frac")
+            && !rest[5..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic())
+        {
+            let mut k = i + 5;
+            while k < chars.len() && chars[k].is_whitespace() {
+                k += 1;
+            }
+            if chars.get(k) == Some(&'{') {
+                if let Some(c1) = find_matching_delim(&chars, k, '{', '}') {
+                    let num_str: String = chars[k + 1..c1].iter().collect();
+                    let mut m = c1 + 1;
+                    while m < chars.len() && chars[m].is_whitespace() {
+                        m += 1;
+                    }
+                    if chars.get(m) == Some(&'{') {
+                        if let Some(c2) = find_matching_delim(&chars, m, '{', '}') {
+                            let den_str: String = chars[m + 1..c2].iter().collect();
+                            items.push(DisplayNode::Frac(
+                                Box::new(parse_display_add(&num_str)),
+                                Box::new(parse_display_add(&den_str)),
+                            ));
+                            i = c2 + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // LaTeX `\sqrt[n]{expr}` or `\sqrt{expr}`
+        if rest.starts_with("\\sqrt")
+            && !rest[5..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic())
+        {
+            let mut k = i + 5;
+            while k < chars.len() && chars[k].is_whitespace() {
+                k += 1;
+            }
+            let mut idx_node = None;
+            if chars.get(k) == Some(&'[') {
+                if let Some(close_b) = find_matching_delim(&chars, k, '[', ']') {
+                    let inner: String = chars[k + 1..close_b].iter().collect();
+                    idx_node = Some(Box::new(parse_display_add(&inner)));
+                    k = close_b + 1;
+                    while k < chars.len() && chars[k].is_whitespace() {
+                        k += 1;
+                    }
+                }
+            }
+            let (rad, next_i) = consume_radical_arg(&chars, k);
+            items.push(DisplayNode::Sqrt {
+                index: idx_node,
+                radicand: Box::new(rad),
+            });
+            i = next_i;
+            continue;
+        }
+
+        // Big operators `∑` and `∏`
+        if c == '∑' || c == '∏' {
+            let sym = if c == '∑' { "∑" } else { "∏" };
+            let mut k = i + 1;
+            while k < chars.len() && chars[k].is_whitespace() {
+                k += 1;
+            }
+            if chars.get(k) == Some(&'(') {
+                if let Some(close) = find_matching_delim(&chars, k, '(', ')') {
+                    let inner: String = chars[k + 1..close].iter().collect();
+                    let args = split_top_level_commas(&inner);
+                    i = close + 1;
+                    if args.len() == 3 {
+                        items.push(DisplayNode::BigOp {
+                            sym,
+                            lower: Some(Box::new(parse_display_add(&args[0]))),
+                            upper: Some(Box::new(parse_display_add(&args[1]))),
+                            body: Some(Box::new(parse_display_add(&args[2]))),
+                        });
+                    } else if args.len() == 2 {
+                        items.push(DisplayNode::BigOp {
+                            sym,
+                            lower: Some(Box::new(parse_display_add(&args[0]))),
+                            upper: None,
+                            body: Some(Box::new(parse_display_add(&args[1]))),
+                        });
+                    } else {
+                        items.push(DisplayNode::BigOp {
+                            sym,
+                            lower: None,
+                            upper: None,
+                            body: Some(Box::new(parse_display_add(&inner))),
+                        });
+                    }
+                    continue;
+                }
+            }
+
+            let mut lower: Option<DisplayNode> = None;
+            let mut upper: Option<DisplayNode> = None;
+            let mut has_bounds = false;
+
+            loop {
+                while k < chars.len() && chars[k].is_whitespace() {
+                    k += 1;
+                }
+                if k >= chars.len() {
+                    break;
+                }
+                if chars[k] == '_' && lower.is_none() {
+                    let (node, next_k) = consume_script_arg(&chars, k + 1);
+                    lower = Some(node);
+                    has_bounds = true;
+                    k = next_k;
+                } else if chars[k] == '^' && upper.is_none() {
+                    let (node, next_k) = consume_script_arg(&chars, k + 1);
+                    upper = Some(node);
+                    has_bounds = true;
+                    k = next_k;
+                } else if lower.is_none() && display_subscript_char_to_ascii(chars[k]).is_some() {
+                    let mut sub = String::new();
+                    while k < chars.len() {
+                        if let Some(ch) = display_subscript_char_to_ascii(chars[k]) {
+                            sub.push(ch);
+                            k += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    lower = Some(DisplayNode::Text(sub));
+                    has_bounds = true;
+                } else if upper.is_none() && display_superscript_char_to_ascii(chars[k]).is_some() {
+                    let mut sup = String::new();
+                    while k < chars.len() {
+                        if let Some(ch) = display_superscript_char_to_ascii(chars[k]) {
+                            sup.push(ch);
+                            k += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    upper = Some(DisplayNode::Text(sup));
+                    has_bounds = true;
+                } else {
+                    break;
+                }
+            }
+
+            if has_bounds {
+                let rem: String = chars[k..].iter().collect();
+                let body = if rem.trim().is_empty() {
+                    None
+                } else {
+                    Some(Box::new(parse_display_tokens(&rem)))
+                };
+                i = chars.len();
+                items.push(DisplayNode::BigOp {
+                    sym,
+                    lower: lower.map(Box::new),
+                    upper: upper.map(Box::new),
+                    body,
+                });
+                continue;
+            }
+
+            items.push(DisplayNode::BigOp {
+                sym,
+                lower: None,
+                upper: None,
+                body: None,
+            });
+            i += 1;
             continue;
         }
 
@@ -2847,12 +3202,12 @@ fn parse_display_tokens(s: &str) -> DisplayNode {
             continue;
         }
 
-        // Superscripts before √ -> nth root
-        if superscript_char_to_ascii(c).is_some() {
+        // Superscripts before √ -> nth root, otherwise superscript postfix
+        if display_superscript_char_to_ascii(c).is_some() {
             let mut sup = String::new();
             let mut j = i;
             while j < chars.len() {
-                if let Some(m) = superscript_char_to_ascii(chars[j]) {
+                if let Some(m) = display_superscript_char_to_ascii(chars[j]) {
                     sup.push(m);
                     j += 1;
                 } else {
@@ -2877,14 +3232,33 @@ fn parse_display_tokens(s: &str) -> DisplayNode {
                 });
                 continue;
             }
-            // Superscript after previous item
-            if let Some(prev) = items.pop() {
-                items.push(DisplayNode::Sup(
-                    Box::new(prev),
-                    Box::new(DisplayNode::Text(sup)),
-                ));
+            let sup_node = DisplayNode::Text(sup);
+            if items.is_empty() {
+                items.push(sup_node);
             } else {
-                items.push(DisplayNode::Text(sup));
+                attach_postfix(&mut items, |base| DisplayNode::Sup(Box::new(base), Box::new(sup_node)));
+            }
+            i = j;
+            continue;
+        }
+
+        // Unicode subscripts -> subscript postfix
+        if display_subscript_char_to_ascii(c).is_some() {
+            let mut sub = String::new();
+            let mut j = i;
+            while j < chars.len() {
+                if let Some(m) = display_subscript_char_to_ascii(chars[j]) {
+                    sub.push(m);
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            let sub_node = DisplayNode::Text(sub);
+            if items.is_empty() {
+                items.push(sub_node);
+            } else {
+                attach_postfix(&mut items, |base| DisplayNode::Sub(Box::new(base), Box::new(sub_node)));
             }
             i = j;
             continue;
@@ -2930,36 +3304,23 @@ fn parse_display_tokens(s: &str) -> DisplayNode {
         }
 
         if c == '^' {
-            i += 1;
-            let exp = if chars.get(i) == Some(&'(') {
-                if let Some(close) = find_matching_delim(&chars, i, '(', ')') {
-                    let inner: String = chars[i + 1..close].iter().collect();
-                    i = close + 1;
-                    parse_display_add(&inner)
-                } else {
-                    DisplayNode::Placeholder
-                }
-            } else if i < chars.len() {
-                if chars[i] == '□' {
-                    i += 1;
-                    DisplayNode::Placeholder
-                } else {
-                    let start = i;
-                    while i < chars.len()
-                        && (chars[i].is_ascii_alphanumeric() || chars[i] == '.' || chars[i] == '-')
-                    {
-                        i += 1;
-                    }
-                    let exp_str: String = chars[start..i].iter().collect();
-                    DisplayNode::Text(exp_str)
-                }
-            } else {
-                DisplayNode::Placeholder
-            };
-            if let Some(prev) = items.pop() {
-                items.push(DisplayNode::Sup(Box::new(prev), Box::new(exp)));
-            } else {
+            let (exp, next_i) = consume_script_arg(&chars, i + 1);
+            i = next_i;
+            if items.is_empty() {
                 items.push(exp);
+            } else {
+                attach_postfix(&mut items, |base| DisplayNode::Sup(Box::new(base), Box::new(exp)));
+            }
+            continue;
+        }
+
+        if c == '_' {
+            let (sub, next_i) = consume_script_arg(&chars, i + 1);
+            i = next_i;
+            if items.is_empty() {
+                items.push(sub);
+            } else {
+                attach_postfix(&mut items, |base| DisplayNode::Sub(Box::new(base), Box::new(sub)));
             }
             continue;
         }
@@ -2970,8 +3331,14 @@ fn parse_display_tokens(s: &str) -> DisplayNode {
             continue;
         }
 
+        if c == '×' {
+            items.push(DisplayNode::Op(" × ".into()));
+            i += 1;
+            continue;
+        }
+
         // `root(n, expr)` or `nthroot(n, expr)` -> nice radical
-        if (rest.starts_with("root(") || rest.starts_with("nthroot(")) && i == 0 || rest.starts_with("root(") || rest.starts_with("nthroot(") {
+        if rest.starts_with("root(") || rest.starts_with("nthroot(") {
             let paren_i = i + if rest.starts_with("nthroot(") { 7 } else { 4 };
             if let Some(close) = find_matching_delim(&chars, paren_i, '(', ')') {
                 let inner: String = chars[paren_i + 1..close].iter().collect();
@@ -3012,8 +3379,25 @@ fn parse_display_tokens(s: &str) -> DisplayNode {
         while i < chars.len() {
             let ch = chars[i];
             if ch.is_whitespace()
-                || matches!(ch, '√' | '∫' | '□' | '|' | '(' | '^' | '*' | '·')
-                || superscript_char_to_ascii(ch).is_some()
+                || matches!(
+                    ch,
+                    '√' | '∫'
+                        | '∑'
+                        | '∏'
+                        | '□'
+                        | '|'
+                        | '('
+                        | '^'
+                        | '_'
+                        | '*'
+                        | '·'
+                        | '×'
+                        | '\\'
+                )
+                || ch == ACTIVE_PLACEHOLDER_SENTINEL
+                || ch == CARET_SENTINEL
+                || display_superscript_char_to_ascii(ch).is_some()
+                || display_subscript_char_to_ascii(ch).is_some()
             {
                 break;
             }
@@ -3057,8 +3441,20 @@ fn consume_radical_arg(chars: &[char], start_idx: usize) -> (DisplayNode, usize)
             return (parse_display_add(&inner), close + 1);
         }
     }
+    if chars.get(k) == Some(&'{') {
+        if let Some(close) = find_matching_delim(chars, k, '{', '}') {
+            let inner: String = chars[k + 1..close].iter().collect();
+            return (parse_display_add(&inner), close + 1);
+        }
+    }
+    if chars.get(k) == Some(&ACTIVE_PLACEHOLDER_SENTINEL) {
+        return (DisplayNode::ActivePlaceholder, k + 1);
+    }
     if chars.get(k) == Some(&'□') {
         return (DisplayNode::Placeholder, k + 1);
+    }
+    if chars.get(k) == Some(&CARET_SENTINEL) {
+        return (DisplayNode::Caret, k + 1);
     }
     let mut j = k;
     while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '.') {
@@ -3073,7 +3469,7 @@ fn consume_radical_arg(chars: &[char], start_idx: usize) -> (DisplayNode, usize)
 }
 
 fn render_display_node(node: &DisplayNode, font_size: f32) -> El {
-    let fs = font_size.clamp(9.0, 28.0);
+    let fs = font_size.clamp(8.0, 30.0);
     let fg = theme::text_primary();
     let muted = theme::text_secondary();
     match node {
@@ -3089,28 +3485,51 @@ fn render_display_node(node: &DisplayNode, font_size: f32) -> El {
             .color(fg),
         DisplayNode::Op(s) => text(s)
             .font(TextStyle::new(fs, 450.0).lh(fs * 1.25))
-            .color(muted),
+            .color(fg.alpha(0.86)),
         DisplayNode::Placeholder => el()
-            .w((fs * 0.72).clamp(8.0, 18.0))
-            .h((fs * 0.95).clamp(11.0, 22.0))
+            .w((fs * 0.68).clamp(7.5, 17.0))
+            .h((fs * 0.90).clamp(10.0, 21.0))
             .mx(1.5)
             .radius(2.5)
-            .fill(theme::bg_control())
-            .border(1.0, theme::accent_claude().alpha(0.75)),
+            .fill(theme::bg_control().alpha(0.65))
+            .border(1.0, theme::text_muted().alpha(0.60)),
+        DisplayNode::ActivePlaceholder => {
+            let w = (fs * 0.72).clamp(8.5, 19.0);
+            let h = (fs * 0.94).clamp(11.0, 22.0);
+            col()
+                .items_center()
+                .gap(1.5)
+                .mx(1.5)
+                .child(
+                    el()
+                        .w(w)
+                        .h(h)
+                        .radius(2.5)
+                        .fill(theme::accent_claude().alpha(0.16))
+                        .border(1.35, theme::accent_claude()),
+                )
+                .child(el().w(w).h(2.0).radius(1.0).fill(theme::accent_claude()))
+        }
+        DisplayNode::Caret => el()
+            .w(1.5)
+            .h((fs * 1.12).clamp(11.0, 25.0))
+            .mx(0.5)
+            .radius(0.75)
+            .fill(theme::accent_claude()),
         DisplayNode::Frac(num, den) => {
-            let sub_fs = (fs * 0.78).max(8.5);
+            let sub_fs = (fs * 0.78).max(7.5);
             col()
                 .items_center()
                 .gap(1.5)
                 .px(2.0)
                 .child(render_display_node(num, sub_fs))
-                .child(el().w_full().min_w(14.0).h(1.25).fill(fg))
+                .child(el().w_full().min_w((fs * 0.8).max(10.0)).h(1.25).fill(fg))
                 .child(render_display_node(den, sub_fs))
         }
         DisplayNode::Sqrt { index, radicand } => {
-            let idx_fs = (fs * 0.62).max(8.0);
+            let idx_fs = (fs * 0.60).max(7.0);
             let rad_h = fs * 1.3;
-            let hook_w = (fs * 0.58).max(8.0);
+            let hook_w = (fs * 0.58).max(7.0);
             let radical_shape = Shape::new().stroke(
                 vec![
                     [1.0, rad_h * 0.56],
@@ -3146,14 +3565,14 @@ fn render_display_node(node: &DisplayNode, font_size: f32) -> El {
                 )
         }
         DisplayNode::Sup(base, exp) => {
-            let sup_fs = (fs * 0.68).max(8.0);
+            let sup_fs = (fs * 0.66).max(7.5);
             row()
                 .items_start()
                 .child(render_display_node(base, fs))
                 .child(el().pb(fs * 0.35).child(render_display_node(exp, sup_fs)))
         }
         DisplayNode::Sub(base, sub) => {
-            let sub_fs = (fs * 0.66).max(8.0);
+            let sub_fs = (fs * 0.66).max(7.5);
             row()
                 .items_end()
                 .child(render_display_node(base, fs))
@@ -3166,7 +3585,7 @@ fn render_display_node(node: &DisplayNode, font_size: f32) -> El {
             .child(render_display_node(inner, fs))
             .child(el().w(1.25).h(fs * 1.18).fill(fg)),
         DisplayNode::Deriv(inner) => {
-            let sub_fs = (fs * 0.72).max(8.5);
+            let sub_fs = (fs * 0.70).max(7.5);
             row()
                 .center_y()
                 .gap(3.0)
@@ -3175,13 +3594,13 @@ fn render_display_node(node: &DisplayNode, font_size: f32) -> El {
                         .items_center()
                         .gap(1.0)
                         .child(text("d").font(TextStyle::new(sub_fs, 500.0)).color(fg))
-                        .child(el().w_full().min_w(12.0).h(1.2).fill(fg))
+                        .child(el().w_full().min_w(10.0).h(1.2).fill(fg))
                         .child(text("dx").font(TextStyle::new(sub_fs, 500.0)).color(fg)),
                 )
                 .child(render_display_node(inner, fs))
         }
         DisplayNode::Integral { lower, upper, body } => {
-            let lim_fs = (fs * 0.62).max(7.5);
+            let lim_fs = (fs * 0.60).max(7.0);
             let mut r = row().center_y().gap(2.0).child(
                 text("∫")
                     .font(TextStyle::new(fs * 1.25, 450.0))
@@ -3198,34 +3617,167 @@ fn render_display_node(node: &DisplayNode, font_size: f32) -> El {
                 r = r.child(lim_col);
             }
             r.child(render_display_node(body, fs))
-                .child(text(" dx").font(TextStyle::new(fs * 0.88, 450.0)).color(muted))
+                .child(text(" dx").font(TextStyle::new(fs * 0.85, 450.0)).color(muted))
+        }
+        DisplayNode::BigOp {
+            sym,
+            lower,
+            upper,
+            body,
+        } => {
+            let lim_fs = (fs * 0.58).max(7.0);
+            let mut op_col = col().items_center().gap(0.5);
+            if let Some(u) = upper {
+                op_col = op_col.child(render_display_node(u, lim_fs));
+            }
+            op_col = op_col.child(
+                text(*sym)
+                    .font(TextStyle::new(fs * 1.32, 450.0).lh(fs * 1.2))
+                    .color(fg),
+            );
+            if let Some(l) = lower {
+                op_col = op_col.child(render_display_node(l, lim_fs));
+            }
+            if let Some(b) = body {
+                row()
+                    .center_y()
+                    .gap(4.0)
+                    .child(op_col)
+                    .child(render_display_node(b, fs))
+            } else {
+                op_col
+            }
         }
     }
 }
 
-pub fn render_pretty_math(content: &str, font_size: f32) -> El {
-    let lines: Vec<&str> = content
-        .split(['\n', ';'])
+fn render_pretty_math_impl(
+    content: &str,
+    font_size: f32,
+    selection: Option<(usize, usize)>,
+    show_curve_dots: bool,
+    split_semicolons: bool,
+    placeholder: &str,
+) -> El {
+    let fs = font_size.clamp(9.0, 28.0);
+    if content.trim().is_empty() {
+        if selection.is_some() && !show_curve_dots {
+            return row()
+                .center_y()
+                .gap(4.0)
+                .child(
+                    el().w(1.5)
+                        .h((fs * 1.15).clamp(13.0, 26.0))
+                        .radius(0.75)
+                        .fill(theme::accent_claude()),
+                )
+                .child(
+                    el().pb(2.0)
+                        .border_sides([0.0, 0.0, 1.0, 0.0], theme::border_default())
+                        .child(
+                            text(placeholder)
+                                .font(TextStyle::new(fs * 0.80, 400.0))
+                                .color(theme::text_muted()),
+                        ),
+                );
+        }
+        return text(placeholder)
+            .font(TextStyle::new(fs * 0.85, 400.0))
+            .color(theme::text_muted());
+    }
+
+    let decorated = inject_display_cursor(content, selection);
+    let raw_lines: Vec<&str> = if split_semicolons {
+        decorated.split(['\n', ';']).collect()
+    } else {
+        decorated.split('\n').collect()
+    };
+    let lines: Vec<&str> = raw_lines
+        .into_iter()
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .collect();
     if lines.is_empty() {
-        return text("y = sin(x)")
-            .font(TextStyle::new(font_size, 400.0))
+        return text(placeholder)
+            .font(TextStyle::new(fs * 0.85, 400.0))
             .color(theme::text_muted());
     }
-    let mut c = col().gap(4.0);
+    let mut c = col().gap(5.0);
     for (idx, line) in lines.iter().enumerate() {
-        let dot_color = curve_palette_color(idx);
         let ast = parse_display_node(line);
         let mut r = row().center_y().gap(6.0);
-        if lines.len() > 1 {
-            r = r.child(el().size(6.0, 6.0).radius(3.0).fill(dot_color));
+        if show_curve_dots && lines.len() > 1 {
+            r = r.child(
+                el().size(6.0, 6.0)
+                    .radius(3.0)
+                    .fill(curve_palette_color(idx)),
+            );
         }
-        r = r.child(render_display_node(&ast, font_size));
+        r = r.child(render_display_node(&ast, fs));
         c = c.child(r);
     }
     c
+}
+
+pub fn render_pretty_math(content: &str, font_size: f32) -> El {
+    render_pretty_math_impl(content, font_size, None, true, true, "y = sin(x)")
+}
+
+pub fn render_pretty_math_formula(
+    content: &str,
+    font_size: f32,
+    selection: Option<(usize, usize)>,
+    placeholder: &str,
+) -> El {
+    render_pretty_math_impl(content, font_size, selection, false, false, placeholder)
+}
+
+pub fn render_keycap_math(expr: &str, font_size: f32) -> El {
+    let ast = parse_display_node(expr);
+    render_display_node(&ast, font_size.clamp(8.0, 14.0))
+}
+
+/// Evaluate or simplify a standalone math expression/equation for `NodeKind::Formula`.
+/// Returns `None` cleanly for empty, multi-statement symbolic notes, or trivial echoes.
+pub fn evaluate_formula_readout(content: &str) -> Option<String> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (stmts, err) = parse_statements(trimmed);
+    if err.is_some() || stmts.is_empty() {
+        return None;
+    }
+    let mut vp = GraphViewport {
+        center_x: 0.0,
+        center_y: 0.0,
+        span_x: 40.0,
+    };
+    let mut ro = evaluate_readout(&stmts, &vp)?;
+    if matches!(stmts.first(), Some(PlotStatement::EquationX { .. })) && !ro.starts_with("x = ") {
+        vp.span_x = 200.0;
+        if let Some(wider) = evaluate_readout(&stmts, &vp) {
+            ro = wider;
+        }
+    }
+    let norm = |s: &str| {
+        s.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .replace("·", "")
+            .replace("−", "-")
+    };
+    let n_ro = norm(&ro);
+    let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
+    if n_ro == norm(first_line) {
+        return None;
+    }
+    if let Some((_, rhs)) = first_line.split_once('=') {
+        if n_ro == norm(rhs) {
+            return None;
+        }
+    }
+    Some(ro)
 }
 
 // ---------------------------------------------------------------------------
@@ -3510,5 +4062,43 @@ mod tests {
 
         apply_keypad_to_edit(&mut edit, KeypadAction::Backspace);
         assert_eq!(edit.text, "2x + ³√(2)");
+    }
+
+    #[test]
+    fn test_formula_2d_display_ast_and_readout() {
+        assert_eq!(
+            evaluate_formula_readout("2x + root(3, 27) = □").as_deref(),
+            Some("2x + 3")
+        );
+        assert_eq!(
+            evaluate_formula_readout("2x + root(3, 27) = ln(e)").as_deref(),
+            Some("x = -1")
+        );
+        assert_eq!(evaluate_formula_readout("3 + 4").as_deref(), Some("= 7"));
+        assert_eq!(evaluate_formula_readout("x"), None);
+        assert_eq!(evaluate_formula_readout("Δw_ij = η · x_i · y_j"), None);
+
+        assert!(matches!(
+            parse_display_node("\\frac{a + b}{c}"),
+            DisplayNode::Frac(_, _)
+        ));
+        assert!(matches!(
+            parse_display_node("root(3, 27)"),
+            DisplayNode::Sqrt { index: Some(_), .. }
+        ));
+        assert!(matches!(
+            parse_display_node("∑(i=1, n, x_i)"),
+            DisplayNode::BigOp { sym: "∑", lower: Some(_), upper: Some(_), body: Some(_) }
+        ));
+        assert!(matches!(
+            parse_display_node("∑ᵢ₌₁ⁿ xᵢ"),
+            DisplayNode::BigOp { sym: "∑", lower: Some(_), upper: Some(_), body: Some(_) }
+        ));
+
+        let decorated = inject_display_cursor("2x + root(□, □)", Some((10, 13)));
+        assert!(matches!(
+            parse_display_node(&decorated),
+            DisplayNode::Row(ref v) if v.iter().any(|n| matches!(n, DisplayNode::Sqrt { index: Some(b), .. } if matches!(**b, DisplayNode::ActivePlaceholder)))
+        ));
     }
 }

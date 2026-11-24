@@ -2230,11 +2230,15 @@ fn render_generic_node_inspector(s: &AppState, node: &Node) -> El {
         content = content
             .child(render_graph_formula_inspector(s, node))
             .child(hairline());
+    } else if node_kind == NodeKind::Formula {
+        content = content
+            .child(render_formula_inspector(s, node))
+            .child(hairline());
     }
 
     if !matches!(
         node_kind,
-        NodeKind::Video | NodeKind::Drawing | NodeKind::Quiz | NodeKind::GraphFormula
+        NodeKind::Video | NodeKind::Drawing | NodeKind::Quiz | NodeKind::GraphFormula | NodeKind::Formula
     ) {
         content = content
             .child(
@@ -2317,7 +2321,12 @@ fn render_generic_node_inspector(s: &AppState, node: &Node) -> El {
         }
     }
 
-    content = content.child(render_specialized_node_inspector(s, node));
+    if !matches!(
+        node_kind,
+        NodeKind::Video | NodeKind::Drawing | NodeKind::GraphFormula | NodeKind::Formula
+    ) {
+        content = content.child(render_specialized_node_inspector(s, node));
+    }
 
     if matches!(
         node_kind,
@@ -2995,135 +3004,7 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                 ))
                 .child(mastery_row)
         }
-        NodeKind::Formula => {
-            let cur = node.meta.language.as_deref().unwrap_or("MATH");
-            let mut langs = row().w_full().gap(12.0);
-            for (key, lang) in [
-                ("lang_math", "MATH"),
-                ("lang_rust", "RUST"),
-                ("lang_py", "PY"),
-                ("lang_chem", "CHEM"),
-            ] {
-                let id_c = nid.clone();
-                langs = langs.child(
-                    underline_tab(key, lang, cur.eq_ignore_ascii_case(lang)).on_press(
-                        move |s: &mut AppState| {
-                            s.set_formula_language(&id_c, lang);
-                        },
-                    ),
-                );
-            }
-
-            let fmt_nid = nid.clone();
-            let formula_col = col()
-                .w_full()
-                .gap(10.0)
-                .child(hairline())
-                .child(
-                    row()
-                        .w_full()
-                        .center_y()
-                        .child(langs)
-                        .child(el().grow(1.0))
-                        .child(ghost_btn(
-                            "btn_inspector_formula_format",
-                            "∑ Format",
-                            theme::accent_claude(),
-                            move |s| {
-                                s.format_formula_node(&fmt_nid);
-                            },
-                        )),
-                );
-
-            let mut sym_panel = col()
-                .w_full()
-                .gap(5.0)
-                .child(subtle_tag("SYMBOLS", theme::text_muted()));
-            for (group_name, syms) in [
-                ("Greek", formula_math::GREEK_SYMBOLS),
-                ("Operators", formula_math::OP_SYMBOLS),
-                ("Scripts", formula_math::SCRIPT_SYMBOLS),
-            ] {
-                let mut g_col = col().w_full().gap(3.0).child(
-                    text(group_name)
-                        .font(theme::BADGE_TEXT)
-                        .color(theme::text_muted()),
-                );
-                for (r_idx, chunk) in syms.chunks(8).enumerate() {
-                    let mut r = row().w_full().gap(4.0);
-                    for (c_idx, sym) in chunk.iter().enumerate() {
-                        let id_s = nid.clone();
-                        let sym_str = *sym;
-                        r = r.child(
-                            el()
-                                .key(format!("insp_sym_{}_{}_{}", group_name, r_idx, c_idx))
-                                .min_w(26.0)
-                                .h(24.0)
-                                .px(5.0)
-                                .radius(5.0)
-                                .hover(theme::hover_subtle())
-                                .center()
-                                .cursor(Cursor::Pointer)
-                                .on_press(move |s: &mut AppState| {
-                                    s.insert_formula_symbol(&id_s, sym_str);
-                                })
-                                .child(
-                                    text(sym_str)
-                                        .font(TextStyle::new(12.0, 500.0).mono())
-                                        .color(theme::text_primary()),
-                                ),
-                        );
-                    }
-                    g_col = g_col.child(r);
-                }
-                sym_panel = sym_panel.child(g_col);
-            }
-
-            let mut tpl_panel = col()
-                .w_full()
-                .gap(4.0)
-                .child(subtle_tag("TEMPLATES", theme::text_muted()));
-            for chunk in formula_math::FORMULA_TEMPLATES.chunks(3) {
-                let mut r = row().w_full().gap(4.0);
-                for &(name, tpl) in chunk {
-                    let id_t = nid.clone();
-                    r = r.child(
-                        el()
-                            .key(format!("insp_tpl_{}", name))
-                            .grow(1.0)
-                            .py(5.0)
-                            .px(6.0)
-                            .radius(6.0)
-                            .hover(theme::hover_subtle())
-                            .center()
-                            .cursor(Cursor::Pointer)
-                            .on_press(move |s: &mut AppState| {
-                                let selected = s.selected_nodes.contains(&id_t);
-                                if let Some(n) = s.graph.get_node_mut(&id_t) {
-                                    n.content = tpl.to_string();
-                                    if selected {
-                                        s.canvas_content_edit = rune::TextEdit::new(&n.content);
-                                        s.inspector_content_edit = rune::TextEdit::new(&n.content);
-                                    }
-                                }
-                                if let Some(bundle) = &s.bundle {
-                                    let _ = bundle.save_graph_atomic(&s.graph);
-                                }
-                                s.push_reader_snapshot();
-                                s.notify_toast(format!("Applied {} template", name));
-                            })
-                            .child(
-                                text(name)
-                                    .font(theme::BADGE_TEXT)
-                                    .color(theme::text_secondary()),
-                            ),
-                    );
-                }
-                tpl_panel = tpl_panel.child(r);
-            }
-
-            formula_col.child(sym_panel).child(tpl_panel)
-        }
+        NodeKind::Formula => el(),
         NodeKind::Section => {
             let framed = node.meta.section_framed;
             let id_a = nid.clone();
@@ -4527,6 +4408,404 @@ pub(crate) fn drawing_swatch_color(hex: &str) -> Color {
     } else {
         theme::hex(hex)
     }
+}
+
+fn render_formula_inspector(s: &AppState, node: &Node) -> El {
+    let nid = node.id.clone();
+    let cur_lang = node.meta.language.as_deref().unwrap_or("MATH");
+    let is_code = formula_math::is_code_language(Some(cur_lang));
+
+    let mut langs = row().gap(10.0);
+    for (key, lang) in [
+        ("lang_math", "MATH"),
+        ("lang_rust", "RUST"),
+        ("lang_py", "PY"),
+        ("lang_chem", "CHEM"),
+    ] {
+        let id_c = nid.clone();
+        langs = langs.child(
+            underline_tab(key, lang, cur_lang.eq_ignore_ascii_case(lang)).on_press(
+                move |s: &mut AppState| {
+                    s.set_formula_language(&id_c, lang);
+                },
+            ),
+        );
+    }
+
+    if is_code {
+        return col()
+            .w_full()
+            .gap(10.0)
+            .child(
+                col()
+                    .w_full()
+                    .min_h(140.0)
+                    .max_h(260.0)
+                    .px(10.0)
+                    .py(8.0)
+                    .radius(8.0)
+                    .fill(theme::bg_input())
+                    .border(1.0, theme::border_default())
+                    .scroll(ScrollSpec { stick_bottom: false })
+                    .child(
+                        text_input(&s.inspector_content_edit, theme::MONO_BODY)
+                            .key("inspector_formula_input")
+                            .label("Formula code editor")
+                            .w_full()
+                            .min_h(120.0)
+                            .color(theme::text_primary())
+                            .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                            .placeholder("Write code snippet...", theme::text_muted())
+                            .on_edit(|s: &mut AppState| &mut s.inspector_content_edit)
+                            .on_input_change(|s: &mut AppState, _| {
+                                s.sync_from_inspector_edits();
+                            })
+                            .on_submit(|s: &mut AppState, _| {
+                                s.inspector_content_edit.insert("\n");
+                                s.sync_from_inspector_edits();
+                            }),
+                    ),
+            )
+            .child(row().w_full().center_y().child(langs));
+    }
+
+    let is_editing = s.selected_nodes.contains(&node.id)
+        && s.editing_node_id.as_ref() == Some(&node.id);
+    let (active_content, active_sel) = if is_editing {
+        if s.canvas_content_edit.focused {
+            (
+                s.canvas_content_edit.text.as_str(),
+                s.canvas_content_edit.range(),
+            )
+        } else {
+            (
+                s.inspector_content_edit.text.as_str(),
+                s.inspector_content_edit.range(),
+            )
+        }
+    } else {
+        (node.content.as_str(), (node.content.len(), node.content.len()))
+    };
+
+    let mut out = col().w_full().gap(8.0);
+
+    // 1. Photomath-style 2D Live Expression Area
+    let mut display_row = row().w_full().center_y().gap(6.0).child(
+        el().grow(1.0)
+            .min_w(0.0)
+            .clip_soft(0.0)
+            .child(graph_formula::render_pretty_math_formula(
+                active_content,
+                19.0,
+                if is_editing { Some(active_sel) } else { None },
+                "Type your equation here...",
+            )),
+    );
+    if !active_content.trim().is_empty() {
+        let clr_id = nid.clone();
+        display_row = display_row.child(
+            el().key("insp_formula_clear")
+                .size(22.0, 22.0)
+                .radius(11.0)
+                .hover(theme::hover_subtle())
+                .press(theme::press_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.apply_formula_keypad(&clr_id, formula_math::FormulaKeyAction::Clear);
+                })
+                .child(icons::ph(&icons::X, 12.0, theme::text_muted())),
+        );
+    }
+
+    out = out.child(
+        col()
+            .key("insp_formula_pretty")
+            .w_full()
+            .min_h(72.0)
+            .max_h(140.0)
+            .px(12.0)
+            .py(10.0)
+            .radius(8.0)
+            .fill(theme::bg_input())
+            .border(1.0, theme::border_default())
+            .scroll(ScrollSpec { stick_bottom: false })
+            .child(display_row),
+    );
+
+    // 2. Live Photomath Simplification / Solution Readout Banner
+    if let Some(ro) = graph_formula::evaluate_formula_readout(active_content) {
+        out = out.child(
+            row()
+                .key("insp_formula_readout")
+                .w_full()
+                .center_y()
+                .px(12.0)
+                .py(7.0)
+                .radius(6.0)
+                .fill(theme::accent_claude())
+                .child(
+                    text(ro)
+                        .font(TextStyle::new(14.0, 650.0).mono())
+                        .color(theme::text_inverted())
+                        .truncate(),
+                )
+                .child(el().grow(1.0))
+                .child(icons::ph(
+                    &icons::CARET_RIGHT,
+                    12.5,
+                    theme::text_inverted().alpha(0.85),
+                )),
+        );
+    }
+
+    // 3. Optional Collapsible Raw Text/LaTeX Input (synced with keypad & canvas)
+    if s.formula_show_raw_input {
+        out = out.child(
+            col()
+                .w_full()
+                .px(10.0)
+                .py(6.0)
+                .radius(6.0)
+                .fill(theme::bg_input())
+                .border(1.0, theme::border_subtle())
+                .child(
+                    text_input(&s.inspector_content_edit, theme::MONO_BODY)
+                        .key("inspector_formula_input")
+                        .label("Formula raw math input")
+                        .w_full()
+                        .min_h(32.0)
+                        .color(theme::text_primary())
+                        .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                        .placeholder(
+                            "Type math or \\alpha, \\frac{a}{b}, \\sqrt{x}...",
+                            theme::text_muted(),
+                        )
+                        .on_edit(|s: &mut AppState| &mut s.inspector_content_edit)
+                        .on_input_change(|s: &mut AppState, _| {
+                            s.sync_from_inspector_edits();
+                            let (a, b) = s.inspector_content_edit.range();
+                            let cb = b.min(s.canvas_content_edit.text.len());
+                            s.canvas_content_edit.set_selection(a.min(cb), cb);
+                        }),
+                ),
+        );
+    }
+
+    // 4. Photomath Multi-Page 6x4 Math Keyboard (Dark Toolbar + Shaded Zones + 2D Keycaps)
+    let page = s.formula_keypad_page;
+    let page_tag = page.tag();
+    let kp_rows = formula_math::keypad_rows(page);
+    let is_dark = theme::active_theme().is_dark();
+    let toolbar_bg = if is_dark {
+        theme::bg_canvas()
+    } else {
+        theme::hex("#2E3033")
+    };
+    let toolbar_fg = if is_dark {
+        theme::text_secondary()
+    } else {
+        theme::hex("#ECEBE6")
+    };
+    let toolbar_hover = Color::WHITE.alpha(0.10);
+
+    let mut keypad = col()
+        .key("insp_formula_keypad")
+        .w_full()
+        .radius(8.0)
+        .clip_rounded(8.0)
+        .fill(theme::bg_chrome())
+        .border(1.0, theme::border_default());
+
+    let mut top_bar = row()
+        .w_full()
+        .h(32.0)
+        .px(4.0)
+        .gap(2.0)
+        .center_y()
+        .fill(toolbar_bg);
+    for (bkey, ico, act, active) in [
+        (
+            "raw",
+            &icons::KEYBOARD,
+            formula_math::FormulaKeyAction::ToggleRawInput,
+            s.formula_show_raw_input,
+        ),
+        (
+            "nl",
+            &icons::ARROW_ELBOW_DOWN_LEFT,
+            formula_math::FormulaKeyAction::Newline,
+            false,
+        ),
+        (
+            "left",
+            &icons::CARET_LEFT,
+            formula_math::FormulaKeyAction::MoveLeft,
+            false,
+        ),
+        (
+            "right",
+            &icons::CARET_RIGHT,
+            formula_math::FormulaKeyAction::MoveRight,
+            false,
+        ),
+        (
+            "bs",
+            &icons::BACKSPACE,
+            formula_math::FormulaKeyAction::Backspace,
+            false,
+        ),
+    ] {
+        let nid_b = nid.clone();
+        top_bar = top_bar.child(
+            el()
+                .key(format!("insp_fkp_{bkey}"))
+                .grow(1.0)
+                .h(25.0)
+                .radius(4.0)
+                .fill(if active {
+                    theme::accent_claude().alpha(0.22)
+                } else {
+                    Color::TRANSPARENT
+                })
+                .hover(toolbar_hover)
+                .press(theme::press_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.apply_formula_keypad(&nid_b, act);
+                })
+                .child(icons::ph(
+                    ico,
+                    13.5,
+                    if active {
+                        theme::accent_claude()
+                    } else {
+                        toolbar_fg
+                    },
+                )),
+        );
+    }
+    keypad = keypad.child(top_bar);
+
+    let key_h = if page == formula_math::FormulaKeypadPage::Alpha {
+        28.0
+    } else {
+        32.0
+    };
+    let mut grid = col().w_full().padding(5.0).gap(3.0);
+    for row_keys in kp_rows {
+        let mut r = row().w_full().gap(3.0);
+        for k in *row_keys {
+            let nid_k = nid.clone();
+            let act = k.action;
+            let fill_c = match k.zone {
+                formula_math::FormulaKeyZone::Center => theme::bg_card(),
+                formula_math::FormulaKeyZone::Side => theme::bg_control(),
+                formula_math::FormulaKeyZone::Op => theme::bg_control(),
+                formula_math::FormulaKeyZone::PageSwitch => theme::bg_card_selected(),
+            };
+            let keycap = if let Some(expr) = k.math_keycap {
+                graph_formula::render_keycap_math(expr, 11.0)
+            } else {
+                let wt = match k.zone {
+                    formula_math::FormulaKeyZone::Center => 550.0,
+                    formula_math::FormulaKeyZone::PageSwitch => 600.0,
+                    _ => 500.0,
+                };
+                text(k.label)
+                    .font(TextStyle::new(12.5, wt))
+                    .color(match k.zone {
+                        formula_math::FormulaKeyZone::PageSwitch => theme::text_secondary(),
+                        _ => theme::text_primary(),
+                    })
+            };
+            r = r.child(
+                el()
+                    .key(format!("insp_fkp_{}_{}", page_tag, k.id))
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .h(key_h)
+                    .radius(5.0)
+                    .fill(fill_c)
+                    .hover(theme::hover_subtle())
+                    .press(theme::press_subtle())
+                    .border(1.0, theme::border_subtle())
+                    .center()
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.apply_formula_keypad(&nid_k, act);
+                    })
+                    .child(keycap),
+            );
+        }
+        grid = grid.child(r);
+    }
+    keypad = keypad.child(grid);
+    out = out.child(keypad);
+
+    // 5. Notation Mode Footer + Shorthand Format Trigger
+    let fmt_nid = nid.clone();
+    out = out.child(
+        row()
+            .w_full()
+            .center_y()
+            .child(langs)
+            .child(el().grow(1.0))
+            .child(ghost_btn(
+                "btn_inspector_formula_format",
+                "\\→∑",
+                theme::accent_claude(),
+                move |s| {
+                    s.apply_formula_keypad(&fmt_nid, formula_math::FormulaKeyAction::FormatShorthand);
+                },
+            )),
+    );
+
+    // 6. Compact Quick Formula Presets
+    let mut tpl_panel = col().w_full().gap(4.0);
+    for chunk in formula_math::FORMULA_TEMPLATES.chunks(3) {
+        let mut r = row().w_full().gap(4.0);
+        for &(name, tpl) in chunk {
+            let id_t = nid.clone();
+            r = r.child(
+                el()
+                    .key(format!("insp_tpl_{}", name))
+                    .grow(1.0)
+                    .py(4.0)
+                    .px(6.0)
+                    .radius(5.0)
+                    .fill(theme::bg_control().alpha(0.6))
+                    .hover(theme::hover_subtle())
+                    .border(1.0, theme::border_subtle())
+                    .center()
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        let selected = s.selected_nodes.contains(&id_t);
+                        if let Some(n) = s.graph.get_node_mut(&id_t) {
+                            n.content = tpl.to_string();
+                            if selected {
+                                s.canvas_content_edit = rune::TextEdit::new(&n.content);
+                                s.inspector_content_edit = rune::TextEdit::new(&n.content);
+                            }
+                        }
+                        if let Some(bundle) = &s.bundle {
+                            let _ = bundle.save_graph_atomic(&s.graph);
+                        }
+                        s.push_reader_snapshot();
+                        s.notify_toast(format!("Applied {} template", name));
+                    })
+                    .child(
+                        text(name)
+                            .font(theme::BADGE_TEXT)
+                            .color(theme::text_secondary()),
+                    ),
+            );
+        }
+        tpl_panel = tpl_panel.child(r);
+    }
+
+    out.child(tpl_panel)
 }
 
 fn render_graph_formula_inspector(s: &AppState, node: &Node) -> El {
