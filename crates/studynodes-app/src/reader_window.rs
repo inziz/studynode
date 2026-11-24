@@ -665,8 +665,8 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                             });
                         })
                         .child(
-                            text("📷")
-                                .font(theme::STATUS_TEXT)
+                            text("⊡")
+                                .font(TextStyle::new(12.0, 500.0).mono())
                                 .color(theme::text_secondary()),
                         ),
                 );
@@ -1046,7 +1046,7 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                         .border_sides([0.0, 0.0, 0.0, 2.0], theme::accent_claude().alpha(0.65))
                         .child(
                             el().grow(1.0).min_w(0.0).child(
-                                text(format!("✦ {}", summary))
+                                text(summary.clone())
                                     .font(theme::BODY_TEXT)
                                     .color(theme::text_secondary())
                                     .w_full()

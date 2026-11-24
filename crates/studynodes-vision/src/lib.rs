@@ -330,6 +330,32 @@ mod tests {
             cloud_ocr::parse_openai_vision_response(&openai_json).unwrap(),
             "Synaptic plasticity"
         );
+
+        let air_cfg = VisionConfig {
+            cloud_vision_api_key: Some("sk-air-vision-123".into()),
+            ..base_cfg.clone()
+        };
+        assert_eq!(
+            cloud_ocr::resolve_cloud_endpoint(&air_cfg).unwrap(),
+            cloud_ocr::ResolvedCloudEndpoint::OpenAiCompatible {
+                chat_url: "https://api.airforce/v1/chat/completions".into(),
+                api_key: Some("sk-air-vision-123".into()),
+                model: "gpt-4o-mini".into(),
+            }
+        );
+
+        let ant_cfg = VisionConfig {
+            cloud_vision_api_key: Some("sk-ant-vision-123".into()),
+            ..base_cfg
+        };
+        assert_eq!(
+            cloud_ocr::resolve_cloud_endpoint(&ant_cfg).unwrap(),
+            cloud_ocr::ResolvedCloudEndpoint::Anthropic {
+                url: "https://api.anthropic.com/v1/messages".into(),
+                api_key: "sk-ant-vision-123".into(),
+                model: "claude-sonnet-4-20250514".into(),
+            }
+        );
     }
 
     #[ignore = "Downloads & runs PP-OCRv5 models (~21 MB) on the local screenshot fixture"]

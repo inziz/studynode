@@ -1,5 +1,3 @@
-use std::hash::{Hash, Hasher};
-
 use rune::{
     Color, Cursor, Cx, El, FileDialogOptions, Phase, ScrollSpec, SurfaceFit, TextStyle, Tx,
     canvas, col, el, memo, row, text, text_input,
@@ -16,12 +14,6 @@ use crate::state::{ActivePdfState, AppState, DocViewTab};
 use crate::theme;
 
 const SHEET_TITLE: TextStyle = TextStyle::new(19.0, 600.0).lh(24.0);
-
-fn hash_str(s: &str) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut h);
-    h.finish()
-}
 
 #[inline]
 fn hairline() -> El {
@@ -77,7 +69,7 @@ fn extract_bold_highlight_ranges(src: &str) -> Vec<std::ops::Range<usize>> {
 }
 
 fn render_chat_markdown(key_id: &str, md_text: &str) -> El {
-    let md_hash = hash_str(md_text);
+    let md_hash = theme::hash_str(md_text);
     let theme_id = theme::active_theme();
     let md_owned = md_text.to_string();
     let key_owned = key_id.to_string();
@@ -138,10 +130,36 @@ fn render_inline_chat_key_drawer(s: &AppState) -> El {
                         .color(theme::text_primary())
                         .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
                         .placeholder(
-                            "AIza... (Gemini) or sk-... (OpenAI / OpenRouter / DeepSeek)",
+                            "sk-air-... / sk-or-... / gsk_... / AIza... / sk-ant-... / sk-...",
                             theme::text_muted(),
                         )
                         .on_edit(|s: &mut AppState| &mut s.chat_api_key_edit)
+                        .on_submit(|s: &mut AppState, _| {
+                            s.save_chat_api_settings();
+                        }),
+                ),
+        )
+        .child(
+            el()
+                .w_full()
+                .px(8.0)
+                .py(5.0)
+                .radius(6.0)
+                .fill(theme::bg_input())
+                .border(1.0, theme::border_subtle())
+                .child(
+                    text_input(&s.chat_base_url_edit, theme::STATUS_TEXT)
+                        .key("input_inline_chat_base_url")
+                        .label("Custom Chat Base URL")
+                        .single_line()
+                        .w_full()
+                        .color(theme::text_primary())
+                        .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                        .placeholder(
+                            "Base URL (optional, e.g. https://api.airforce/v1)",
+                            theme::text_muted(),
+                        )
+                        .on_edit(|s: &mut AppState| &mut s.chat_base_url_edit)
                         .on_submit(|s: &mut AppState, _| {
                             s.save_chat_api_settings();
                         }),
@@ -499,7 +517,7 @@ fn render_dedicated_ai_chat_panel(s: &AppState, panel_width: f32) -> El {
                         .fill(theme::accent_claude().alpha(0.12))
                         .border(1.0, theme::accent_claude().alpha(0.35))
                         .child(
-                            text(format!("✦ {}", summary))
+                            text(summary)
                                 .font(theme::BADGE_TEXT)
                                 .color(theme::accent_claude())
                                 .wrap(),
@@ -598,16 +616,13 @@ fn render_dedicated_ai_chat_panel(s: &AppState, panel_width: f32) -> El {
                                     s.ai_chat_canvas_actions = !s.ai_chat_canvas_actions;
                                 })
                                 .child(
-                                    text(format!(
-                                        "✦ {}",
-                                        i18n::t(TextKey::AiChatCanvasActionsToggle)
-                                    ))
-                                    .font(theme::BADGE_TEXT)
-                                    .color(if s.ai_chat_canvas_actions {
-                                        theme::accent_claude()
-                                    } else {
-                                        theme::text_muted()
-                                    }),
+                                    text(i18n::t(TextKey::AiChatCanvasActionsToggle))
+                                        .font(theme::BADGE_TEXT)
+                                        .color(if s.ai_chat_canvas_actions {
+                                            theme::accent_claude()
+                                        } else {
+                                            theme::text_muted()
+                                        }),
                                 ),
                         )
                         .child(el().grow(1.0))
@@ -633,12 +648,118 @@ fn render_dedicated_ai_chat_panel(s: &AppState, panel_width: f32) -> El {
                 ),
         );
 
+    let mut chat_tabs_strip = row()
+        .gap(4.0)
+        .center_y()
+        .shrink()
+        .min_w(0.0)
+        .grow(1.0);
+    let active_chat_id = s.graph.active_chat_id.as_deref();
+    let multi_chats = s.graph.chat_threads.len() > 1;
+    for (idx, thread) in s.graph.chat_threads.iter().enumerate() {
+        let is_active = active_chat_id == Some(thread.id.as_str());
+        let tid_switch = thread.id.clone();
+        let tid_close = thread.id.clone();
+        let mut pill = row()
+            .key(format!("ai_chat_tab_shell_{}", idx))
+            .center_y()
+            .gap(4.0)
+            .px(7.0)
+            .py(3.5)
+            .radius(6.0)
+            .fill(if is_active {
+                theme::bg_card()
+            } else {
+                Color::TRANSPARENT
+            })
+            .border(
+                1.0,
+                if is_active {
+                    theme::border_strong()
+                } else {
+                    theme::border_subtle()
+                },
+            )
+            .child(
+                el()
+                    .key(format!("ai_chat_tab_{}", idx))
+                    .max_w(116.0)
+                    .min_w(0.0)
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.switch_ai_chat_tab(&tid_switch);
+                    })
+                    .child(
+                        text(&thread.title)
+                            .font(theme::BADGE_TEXT)
+                            .color(if is_active {
+                                theme::text_primary()
+                            } else {
+                                theme::text_secondary()
+                            })
+                            .truncate(),
+                    ),
+            );
+        if multi_chats {
+            pill = pill.child(
+                el()
+                    .key(format!("btn_close_ai_chat_tab_{}", idx))
+                    .size(14.0, 14.0)
+                    .radius(4.0)
+                    .hover(theme::hover_subtle())
+                    .center()
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.close_ai_chat_tab(&tid_close);
+                    })
+                    .child(
+                        text("×")
+                            .font(theme::BADGE_TEXT)
+                            .color(theme::text_muted()),
+                    ),
+            );
+        }
+        chat_tabs_strip = chat_tabs_strip.child(pill);
+    }
+
+    let chat_tabs_bar = row()
+        .key("ai_chat_tabs_bar")
+        .w_full()
+        .h(34.0)
+        .px(12.0)
+        .gap(6.0)
+        .center_y()
+        .fill(theme::bg_canvas().alpha(0.32))
+        .border_sides([0.0, 0.0, 1.0, 0.0], theme::border_subtle())
+        .child(chat_tabs_strip)
+        .child(
+            el()
+                .key("btn_new_ai_chat_tab")
+                .size(24.0, 24.0)
+                .radius(6.0)
+                .fill(theme::bg_control())
+                .border(1.0, theme::border_subtle())
+                .hover(theme::hover_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press_tx(|s: &mut AppState, tx| {
+                    s.new_ai_chat_tab();
+                    tx.focus_when_shown("ai_chat_input", false);
+                })
+                .child(
+                    text("+")
+                        .font(theme::CONTROL_TEXT)
+                        .color(theme::text_secondary()),
+                ),
+        );
+
     let mut panel = col()
         .key("inspector_panel")
         .w(panel_width)
         .h_full()
         .fill(theme::bg_chrome())
-        .child(topbar);
+        .child(topbar)
+        .child(chat_tabs_bar);
 
     if s.ai_chat_key_drawer_open {
         panel = panel.child(render_inline_chat_key_drawer(s));
@@ -1065,32 +1186,9 @@ pub fn render_inspector(s: &AppState, _: &mut Cx<AppState>) -> El {
                         tx.focus_when_shown("ai_chat_input", false);
                     })
                     .child(
-                        text("✦")
-                            .font(theme::CONTROL_TEXT)
-                            .color(theme::accent_claude()),
-                    )
-                    .child(
                         text(i18n::t(TextKey::AiAskProjectChat))
                             .font(theme::STATUS_TEXT)
                             .color(theme::text_primary()),
-                    ),
-            )
-            .child(hairline())
-            .child(
-                col()
-                    .w_full()
-                    .gap(6.0)
-                    .child(
-                        text("GESTURES & TIPS")
-                            .font(theme::SECTION_LABEL)
-                            .color(theme::text_muted()),
-                    )
-                    .child(
-                        text("· Two-finger trackpad scroll pans X & Y\n· Pinch zooms out, expand zooms in\n· Drag left edge to resize sheet\n· Click ⧉ to open in a full window")
-                            .font(theme::STATUS_TEXT)
-                            .color(theme::text_muted())
-                            .w_full()
-                            .wrap(),
                     ),
             );
     }
@@ -1119,7 +1217,7 @@ fn render_memoized_markdown(
     md_w: f32,
     is_readonly: bool,
 ) -> El {
-    let md_hash = hash_str(&md_src);
+    let md_hash = theme::hash_str(&md_src);
     let version = (
         node_id.clone(),
         md_hash,
@@ -2184,6 +2282,27 @@ fn render_generic_node_inspector(s: &AppState, node: &Node) -> El {
                         |s| s.append_to_selected_node("> "),
                     )),
             );
+
+        if node_kind == NodeKind::Note && !node.content.trim().is_empty() {
+            let md_w = (s.inspector_width.clamp(300.0, 860.0) - 68.0).max(200.0);
+            content = content.child(
+                col()
+                    .key("note_inspector_md_preview")
+                    .w_full()
+                    .padding(10.0)
+                    .gap(6.0)
+                    .radius(8.0)
+                    .fill(theme::bg_input())
+                    .border(1.0, theme::border_subtle())
+                    .child(render_memoized_markdown(
+                        &node.id,
+                        node.content.clone(),
+                        DocFormat::Markdown,
+                        md_w,
+                        false,
+                    )),
+            );
+        }
     }
 
     content = content.child(render_specialized_node_inspector(s, node));
@@ -2933,8 +3052,8 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                                     });
                                 })
                                 .child(
-                                    text("📷")
-                                        .font(theme::STATUS_TEXT)
+                                    text("⊡")
+                                        .font(TextStyle::new(12.0, 500.0).mono())
                                         .color(theme::text_secondary()),
                                 ),
                         ),

@@ -8,7 +8,6 @@ use crate::i18n::{self, TextKey, UiLocale};
 use crate::state::AppState;
 use crate::theme::{self, ThemeId};
 
-const HERO_TITLE: TextStyle = TextStyle::new(20.0, 600.0);
 const CARD_TITLE: TextStyle = TextStyle::new(13.5, 600.0);
 
 fn settings_field(
@@ -269,6 +268,61 @@ pub fn render_settings(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 }),
         );
 
+    let mut preset_col = col().w_full().gap(5.0);
+    let cur_base = s.ai_base_url_edit.text.trim();
+    for chunk in studynodes_llm::API_PROVIDER_PRESETS.chunks(5) {
+        let mut r = row().w_full().gap(5.0);
+        for preset in chunk {
+            let is_selected = if preset.id == "auto" {
+                cur_base.is_empty()
+            } else if preset.base_url.is_empty() {
+                cur_base.is_empty() && s.ai_model_edit.text.trim() == preset.default_model
+            } else {
+                cur_base.eq_ignore_ascii_case(preset.base_url)
+            };
+            let pid = preset.id;
+            r = r.child(
+                el()
+                    .key(format!("btn_ai_preset_{}", pid))
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .px(8.0)
+                    .py(5.0)
+                    .radius(6.0)
+                    .fill(if is_selected {
+                        theme::accent_claude().alpha(0.14)
+                    } else {
+                        theme::bg_input()
+                    })
+                    .hover(theme::hover_subtle())
+                    .border(
+                        if is_selected { 1.5 } else { 1.0 },
+                        if is_selected {
+                            theme::accent_claude()
+                        } else {
+                            theme::border_subtle()
+                        },
+                    )
+                    .center()
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.apply_ai_provider_preset(pid);
+                    })
+                    .child(
+                        text(preset.name)
+                            .font(theme::BADGE_TEXT)
+                            .color(if is_selected {
+                                theme::accent_claude()
+                            } else {
+                                theme::text_secondary()
+                            })
+                            .truncate(),
+                    ),
+            );
+        }
+        preset_col = preset_col.child(r);
+    }
+
     let ai_section = section_card(
         "settings_ai_section",
         i18n::t(TextKey::SettingsAiSectionTitle),
@@ -276,11 +330,12 @@ pub fn render_settings(s: &AppState, cx: &mut Cx<AppState>) -> El {
         s.ai_provider_status_label(),
         s.ai_api_configured(),
     )
+    .child(preset_col)
     .child(settings_field(
         i18n::t(TextKey::SettingsFieldApiKey),
         "input_ai_api_key",
         &s.ai_api_key_edit,
-        "AIza... (Gemini) or sk-... (OpenAI / DeepSeek / OpenRouter)",
+        "sk-air-... / sk-or-... / gsk_... / sk-ant-... / AIza... / sk-... (or blank for local)",
         |s| &mut s.ai_api_key_edit,
         ai_clear_btn,
     ))
@@ -288,7 +343,7 @@ pub fn render_settings(s: &AppState, cx: &mut Cx<AppState>) -> El {
         i18n::t(TextKey::SettingsFieldBaseUrl),
         "input_ai_base_url",
         &s.ai_base_url_edit,
-        "Optional — blank for Gemini, or https://api.openai.com/v1",
+        "Optional — blank = auto-detect key, or e.g. https://api.airforce/v1",
         |s| &mut s.ai_base_url_edit,
         None,
     ))
@@ -296,7 +351,7 @@ pub fn render_settings(s: &AppState, cx: &mut Cx<AppState>) -> El {
         i18n::t(TextKey::SettingsFieldModel),
         "input_ai_model",
         &s.ai_model_edit,
-        "Optional — gemini-2.5-flash or gpt-4o-mini",
+        "Optional — e.g. gpt-4o-mini, claude-sonnet-4-20250514, gemini-2.5-flash",
         |s| &mut s.ai_model_edit,
         None,
     ))
@@ -696,10 +751,9 @@ pub fn render_settings(s: &AppState, cx: &mut Cx<AppState>) -> El {
         i18n::t(TextKey::SettingsAppearanceTitle),
         i18n::t(TextKey::SettingsAppearanceSubtitle),
         format!(
-            "{} · {} · {}",
+            "{} · {}",
             s.reader_prefs.ui_locale.short_label(),
             s.reader_prefs.theme.display_name(),
-            i18n::dock_position_label(cur_dock_pos)
         ),
         true,
     )
@@ -716,26 +770,12 @@ pub fn render_settings(s: &AppState, cx: &mut Cx<AppState>) -> El {
         .scroll(ScrollSpec { stick_bottom: false })
         .items_center()
         .px(24.0)
-        .py(32.0)
+        .py(24.0)
         .child(
             col()
                 .w_full()
                 .max_w(620.0)
-                .gap(18.0)
-                .child(
-                    col()
-                        .gap(4.0)
-                        .child(
-                            text(i18n::t(TextKey::SettingsHeroTitle))
-                                .font(HERO_TITLE)
-                                .color(theme::text_primary()),
-                        )
-                        .child(
-                            text(i18n::t(TextKey::SettingsHeroSubtitle))
-                                .font(theme::BODY_TEXT)
-                                .color(theme::text_secondary()),
-                        ),
-                )
+                .gap(14.0)
                 .child(appearance_section)
                 .child(ai_section)
                 .child(chat_ai_section)

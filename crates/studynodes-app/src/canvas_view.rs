@@ -2,6 +2,7 @@ use rune::{
     Color, Cursor, Cx, El, FileDialogOptions, LineCap, Phase, PointerButton, ScrollSpec, Shape,
     Spring, SurfaceFit, TextStyle, Tx, canvas, col, el, row, text, text_input,
 };
+use rune_kit::Markdown;
 
 use studynodes_graph::bezier::CubicBezier;
 use studynodes_graph::coords::{Camera, ScreenPos, WorldPos};
@@ -1756,12 +1757,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                     )
             } else {
                 let is_empty = node.content.trim().is_empty();
-                let preview = if is_empty {
-                    i18n::t(TextKey::NodeEmptyNote)
-                } else {
-                    node.content.trim()
-                };
-                col()
+                let mut body = col()
                     .key(format!("node_body_{}", node.id.as_str()))
                     .w_full()
                     .grow(1.0)
@@ -1774,18 +1770,27 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                     .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
                         s.select_node(note_click_id.clone(), false);
                         tx.focus_when_shown(format!("note_body_{}", note_click_id.as_str()), false);
-                    })
-                    .child(
-                        text(preview)
+                    });
+
+                if is_empty {
+                    body = body.child(
+                        text(i18n::t(TextKey::NodeEmptyNote))
                             .font(TextStyle::new(body_size, 400.0).lh(body_size * 1.42))
-                            .color(if is_empty {
-                                theme::text_muted()
-                            } else {
-                                theme::text_secondary()
-                            })
+                            .color(theme::text_muted())
                             .w_full()
                             .wrap(),
-                    )
+                    );
+                } else {
+                    let md_src = node.content.trim();
+                    let md_w = (w - 22.0 * zoom).max(80.0 * zoom);
+                    let md_style = theme::card_markdown_style(zoom, md_w);
+                    let md_el = col()
+                        .key(format!("note_md_{}", node.id.as_str()))
+                        .w_full()
+                        .child(Markdown::new(md_src).selectable(false).render(&md_style));
+                    body = body.child(md_el);
+                }
+                body
             }
         }
         NodeKind::Document => {
@@ -2182,10 +2187,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
     };
 
     let resize_id = node.id.clone();
-    let is_resizable_media = matches!(
-        node.kind,
-        NodeKind::Video | NodeKind::Audio | NodeKind::Drawing
-    );
+    let resize_bounds = crate::state::resizable_node_bounds(node.kind);
 
     // Assemble card shell (no outer drag/press handlers!)
     let mut shell = col()
@@ -2209,18 +2211,8 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
         .child(in_socket)
         .child(out_socket);
 
-    if is_resizable_media {
+    if let Some((min_size, max_size)) = resize_bounds {
         let grip = (14.0 * zoom).clamp(11.0, 18.0);
-        let min_size = match node.kind {
-            NodeKind::Video => (240.0, 176.0),
-            NodeKind::Drawing => (240.0, 180.0),
-            _ => (230.0, 112.0),
-        };
-        let max_size = match node.kind {
-            NodeKind::Video => (1280.0, 860.0),
-            NodeKind::Drawing => (960.0, 720.0),
-            _ => (900.0, 520.0),
-        };
         shell = shell.child(
             el()
                 .key(format!("node_resize_{}", node.id.as_str()))
@@ -2370,7 +2362,7 @@ fn card_header_meta_pill(node: &Node, badge_size: f32, zoom: f32) -> El {
                 None
             } else {
                 Some((
-                    format!("{} ✎", node.meta.drawing_strokes.len()),
+                    format!("{}", node.meta.drawing_strokes.len()),
                     theme::text_secondary(),
                 ))
             }
@@ -2438,15 +2430,15 @@ fn render_flashcard_body(
             .answer
             .as_deref()
             .filter(|a| !a.trim().is_empty())
-            .unwrap_or("No answer set — click ✎ to add answer.")
+            .unwrap_or("No answer set.")
     } else if node.content.trim().is_empty() {
-        "Click ✎ to add recall prompt..."
+        "Add recall prompt..."
     } else {
         node.content.trim()
     };
 
     let cur_mastery = node.meta.mastery.as_deref().unwrap_or("new");
-    let mut actions = row().w_full().center_y().gap(4.0 * zoom).child(
+    let mut actions = row().w_full().center_y().gap(4.0 * zoom).pr(12.0 * zoom).child(
         el()
             .key(format!("flash_flip_{}", node.id.as_str()))
             .px((7.0 * zoom).clamp(5.0, 10.0))
@@ -2720,7 +2712,7 @@ fn render_checklist_body(node: &Node, body_size: f32, badge_size: f32, zoom: f32
 
     if tasks.is_empty() {
         body = body.child(
-            text("No `- [ ]` tasks yet. Click ✎ to add.")
+            text("No tasks yet.")
                 .font(TextStyle::new(body_size, 400.0))
                 .color(theme::text_muted())
                 .w_full()
@@ -3181,8 +3173,8 @@ fn render_section_node(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f
                         });
                     })
                     .child(
-                        text("📷")
-                            .font(TextStyle::new(badge_size, 600.0))
+                        text("⊡")
+                            .font(TextStyle::new(badge_size, 600.0).mono())
                             .color(theme::accent_claude()),
                     ),
             )
@@ -4248,8 +4240,8 @@ fn render_video_card_body(
                         s.toggle_media_mute(&mute_id);
                     })
                     .child(
-                        text(if muted { "🔇" } else { "🔊" })
-                            .font(TextStyle::new(badge_size, 500.0))
+                        text(if muted { "Mute" } else { "Vol" })
+                            .font(TextStyle::new((badge_size * 0.9).max(7.5), 500.0).mono())
                             .color(theme::text_secondary()),
                     ),
             )
@@ -4586,7 +4578,7 @@ fn render_audio_card_body(
                         s.generate_audio_subtitles(&cc_auto_id);
                     })
                     .child(
-                        text(if sub_pending { "…" } else { "✦ CC" })
+                        text(if sub_pending { "…" } else { "CC" })
                             .font(TextStyle::new((badge_size * 0.88).max(7.0), 500.0).mono())
                             .color(theme::text_secondary()),
                     ),

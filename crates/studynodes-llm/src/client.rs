@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
@@ -883,7 +884,7 @@ impl LlmProvider for MockLlmProvider {
         let q = question.trim();
         if context.focus_nodes.is_empty() {
             return Ok(format!(
-                "Based on this workspace (currently empty), you asked: \"{}\". Add documents or notes to the canvas, or configure a live API key in ⚙ Settings.",
+                "Based on this workspace (currently empty), you asked: \"{}\". Add documents or notes to the canvas, or configure a live API key in Settings.",
                 q
             ));
         }
@@ -913,7 +914,7 @@ impl LlmProvider for MockLlmProvider {
         };
 
         Ok(format!(
-            "Drawing from {} ({} total focus node(s) in context):\n- **{}**: {}\n- Regarding *\"{}\"*: configure a Gemini or OpenAI-compatible API key in **⚙ Settings** for full live conversational reasoning.",
+            "Drawing from {} ({} total focus node(s) in context):\n- **{}**: {}\n- Regarding *\"{}\"*: configure a Gemini or OpenAI-compatible API key in **Settings** for full live conversational reasoning.",
             titles.join(", "),
             context.focus_nodes.len(),
             primary.title,
@@ -1489,27 +1490,16 @@ impl OpenAiCompatibleLlmProvider {
     }
 
     pub fn chat_completions_url(&self) -> String {
-        let trimmed = self.base_url.trim().trim_end_matches('/');
-        if trimmed.is_empty() {
-            "https://api.openai.com/v1/chat/completions".to_string()
-        } else if trimmed.ends_with("/chat/completions") {
-            trimmed.to_string()
-        } else {
-            format!("{}/chat/completions", trimmed)
-        }
+        normalize_openai_chat_completions_url(&self.base_url)
     }
 
-    async fn post_chat_completion(
+    async fn send_chat_request(
         &self,
+        url: &str,
         system_prompt: &str,
         user_prompt: &str,
         json_mode: bool,
-    ) -> Result<String, LlmError> {
-        if self.api_key.trim().is_empty() {
-            return Err(LlmError::MissingApiKey);
-        }
-
-        let url = self.chat_completions_url();
+    ) -> Result<reqwest::Response, LlmError> {
         let mut request_body = json!({
             "model": self.model,
             "messages": [
@@ -1521,13 +1511,35 @@ impl OpenAiCompatibleLlmProvider {
             request_body["response_format"] = json!({ "type": "json_object" });
         }
 
-        let res = self
-            .client
-            .post(&url)
-            .bearer_auth(self.api_key.trim())
-            .json(&request_body)
-            .send()
+        let mut req = self.client.post(url).json(&request_body);
+        let trimmed_key = self.api_key.trim();
+        if !trimmed_key.is_empty() {
+            req = req.bearer_auth(trimmed_key);
+        }
+        Ok(req.send().await?)
+    }
+
+    async fn post_chat_completion(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        json_mode: bool,
+    ) -> Result<String, LlmError> {
+        let url = self.chat_completions_url();
+        if self.api_key.trim().is_empty() && !is_local_unauthenticated_url(&url) {
+            return Err(LlmError::MissingApiKey);
+        }
+
+        let mut res = self
+            .send_chat_request(&url, system_prompt, user_prompt, json_mode)
             .await?;
+
+        if json_mode && matches!(res.status().as_u16(), 400 | 422) {
+            // Many third-party OpenAI-compatible gateways/models reject `response_format`; retry plain JSON prompt.
+            res = self
+                .send_chat_request(&url, system_prompt, user_prompt, false)
+                .await?;
+        }
 
         if !res.status().is_success() {
             let status = res.status();
@@ -1615,9 +1627,6 @@ impl LlmProvider for OpenAiCompatibleLlmProvider {
         &self,
         req: &AudioTranscriptionRequest,
     ) -> Result<AudioTranscriptionResult, LlmError> {
-        if self.api_key.trim().is_empty() {
-            return Err(LlmError::MissingApiKey);
-        }
         let base = self.base_url.trim().trim_end_matches('/');
         let root = if base.is_empty() {
             "https://api.openai.com/v1"
@@ -1629,6 +1638,9 @@ impl LlmProvider for OpenAiCompatibleLlmProvider {
         } else {
             format!("{}/audio/transcriptions", root)
         };
+        if self.api_key.trim().is_empty() && !is_local_unauthenticated_url(&url) {
+            return Err(LlmError::MissingApiKey);
+        }
         let model_name = if root.to_ascii_lowercase().contains("groq.com") {
             "whisper-large-v3-turbo"
         } else {
@@ -1648,13 +1660,12 @@ impl LlmProvider for OpenAiCompatibleLlmProvider {
             .text("model", model_name)
             .text("response_format", "verbose_json");
 
-        let res = self
-            .client
-            .post(&url)
-            .bearer_auth(self.api_key.trim())
-            .multipart(form)
-            .send()
-            .await?;
+        let mut http_req = self.client.post(&url).multipart(form);
+        let trimmed_key = self.api_key.trim();
+        if !trimmed_key.is_empty() {
+            http_req = http_req.bearer_auth(trimmed_key);
+        }
+        let res = http_req.send().await?;
         if !res.status().is_success() {
             let status = res.status();
             let err_txt = res.text().await.unwrap_or_default();
@@ -1663,4 +1674,392 @@ impl LlmProvider for OpenAiCompatibleLlmProvider {
         let raw_txt = res.text().await?;
         Ok(parse_transcription_json_or_text(&raw_txt))
     }
+}
+
+/// Anthropic Messages API provider (`sk-ant-...` or custom Anthropic-compatible endpoints).
+pub struct AnthropicLlmProvider {
+    client: reqwest::Client,
+    api_key: String,
+    base_url: String,
+    model: String,
+}
+
+impl AnthropicLlmProvider {
+    pub fn new(
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+        model: Option<String>,
+    ) -> Self {
+        let resolved_model = model
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+        Self {
+            client: build_http_client(),
+            api_key: api_key.into(),
+            base_url: base_url.into(),
+            model: resolved_model,
+        }
+    }
+
+    pub fn messages_url(&self) -> String {
+        let trimmed = self.base_url.trim().trim_end_matches('/');
+        if trimmed.is_empty() {
+            "https://api.anthropic.com/v1/messages".to_string()
+        } else if trimmed.ends_with("/messages") {
+            trimmed.to_string()
+        } else if trimmed.ends_with("/v1") {
+            format!("{}/messages", trimmed)
+        } else {
+            format!("{}/v1/messages", trimmed)
+        }
+    }
+
+    async fn post_message(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<String, LlmError> {
+        let key = self.api_key.trim();
+        if key.is_empty() {
+            return Err(LlmError::MissingApiKey);
+        }
+        let url = self.messages_url();
+        let body = json!({
+            "model": self.model,
+            "max_tokens": 4096,
+            "system": system_prompt,
+            "messages": [{ "role": "user", "content": user_prompt }]
+        });
+        let res = self
+            .client
+            .post(&url)
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&body)
+            .send()
+            .await?;
+        if !res.status().is_success() {
+            let status = res.status();
+            let err_txt = res.text().await.unwrap_or_default();
+            return Err(LlmError::Api(format!("Anthropic HTTP {}: {}", status, err_txt)));
+        }
+        let json_val: serde_json::Value = res.json().await?;
+        let text = json_val["content"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        if text.trim().is_empty() {
+            return Err(LlmError::Api(
+                "Invalid response structure from Anthropic API".into(),
+            ));
+        }
+        Ok(text)
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for AnthropicLlmProvider {
+    async fn generate_patch(&self, context: &LlmContext) -> Result<GraphPatch, LlmError> {
+        let context_json = serde_json::to_string_pretty(context)?;
+        let raw = self.post_message(SYSTEM_PROMPT, &context_json).await?;
+        let clean = strip_json_fences(&raw);
+        Ok(serde_json::from_str(clean)?)
+    }
+
+    async fn summarize(&self, context: &LlmContext) -> Result<String, LlmError> {
+        let prompt = build_summarize_prompt(context);
+        let raw = self.post_message(SUMMARIZE_SYSTEM_PROMPT, &prompt).await?;
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(LlmError::Api("Anthropic returned an empty summary".into()));
+        }
+        Ok(trimmed)
+    }
+
+    async fn ask_project_chat(
+        &self,
+        context: &LlmContext,
+        history: &[(String, String)],
+        question: &str,
+    ) -> Result<String, LlmError> {
+        let prompt = build_chat_prompt(context, history, question);
+        let raw = self.post_message(CHAT_SYSTEM_PROMPT, &prompt).await?;
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(LlmError::Api("Anthropic returned an empty response".into()));
+        }
+        Ok(trimmed)
+    }
+
+    async fn ask_project_chat_with_actions(
+        &self,
+        context: &LlmContext,
+        history: &[(String, String)],
+        question: &str,
+    ) -> Result<ChatActionResponse, LlmError> {
+        let prompt = build_chat_prompt(context, history, question);
+        let raw = self
+            .post_message(CANVAS_AGENT_CHAT_SYSTEM_PROMPT, &prompt)
+            .await?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(LlmError::Api("Anthropic returned an empty response".into()));
+        }
+        Ok(parse_chat_action_response(trimmed))
+    }
+}
+
+/// Quick-fill preset entry for universal API providers and OpenAI-compatible gateways.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApiProviderPreset {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub base_url: &'static str,
+    pub default_model: &'static str,
+}
+
+pub const API_PROVIDER_PRESETS: &[ApiProviderPreset] = &[
+    ApiProviderPreset {
+        id: "auto",
+        name: "Auto",
+        base_url: "",
+        default_model: "",
+    },
+    ApiProviderPreset {
+        id: "airforce",
+        name: "Airforce",
+        base_url: "https://api.airforce/v1",
+        default_model: "gpt-4o-mini",
+    },
+    ApiProviderPreset {
+        id: "openrouter",
+        name: "OpenRouter",
+        base_url: "https://openrouter.ai/api/v1",
+        default_model: "openai/gpt-4o-mini",
+    },
+    ApiProviderPreset {
+        id: "openai",
+        name: "OpenAI",
+        base_url: "https://api.openai.com/v1",
+        default_model: "gpt-4o-mini",
+    },
+    ApiProviderPreset {
+        id: "gemini",
+        name: "Gemini",
+        base_url: "",
+        default_model: "gemini-2.5-flash",
+    },
+    ApiProviderPreset {
+        id: "anthropic",
+        name: "Anthropic",
+        base_url: "https://api.anthropic.com",
+        default_model: "claude-sonnet-4-20250514",
+    },
+    ApiProviderPreset {
+        id: "groq",
+        name: "Groq",
+        base_url: "https://api.groq.com/openai/v1",
+        default_model: "llama-3.3-70b-versatile",
+    },
+    ApiProviderPreset {
+        id: "deepseek",
+        name: "DeepSeek",
+        base_url: "https://api.deepseek.com/v1",
+        default_model: "deepseek-chat",
+    },
+    ApiProviderPreset {
+        id: "local",
+        name: "Local / Ollama",
+        base_url: "http://127.0.0.1:11434/v1",
+        default_model: "qwen2.5:3b",
+    },
+];
+
+pub fn find_api_provider_preset(id: &str) -> Option<&'static ApiProviderPreset> {
+    API_PROVIDER_PRESETS.iter().find(|p| p.id == id)
+}
+
+/// Normalize an OpenAI-compatible base URL into a full `/chat/completions` endpoint.
+pub fn normalize_openai_chat_completions_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "https://api.openai.com/v1/chat/completions".to_string();
+    }
+    if trimmed.ends_with("/chat/completions") {
+        return trimmed.to_string();
+    }
+    let after_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let host_only = !after_scheme.contains('/');
+    if host_only {
+        if after_scheme.to_ascii_lowercase().contains("perplexity.ai") {
+            return format!("{}/chat/completions", trimmed);
+        }
+        return format!("{}/v1/chat/completions", trimmed);
+    }
+    format!("{}/chat/completions", trimmed)
+}
+
+pub fn is_local_unauthenticated_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    let after_scheme = lower
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(&lower);
+    let host_port = after_scheme.split('/').next().unwrap_or("");
+    let host = if let Some(h) = host_port.strip_prefix('[') {
+        h.split(']').next().unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0")
+}
+
+fn host_display_name(url: &str) -> &'static str {
+    let lower = url.to_ascii_lowercase();
+    if lower.contains("api.airforce") {
+        "Airforce"
+    } else if lower.contains("openrouter.ai") {
+        "OpenRouter"
+    } else if lower.contains("groq.com") {
+        "Groq"
+    } else if lower.contains("deepseek.com") {
+        "DeepSeek"
+    } else if lower.contains("api.x.ai") {
+        "xAI"
+    } else if lower.contains("perplexity.ai") {
+        "Perplexity"
+    } else if lower.contains("mistral.ai") {
+        "Mistral"
+    } else if lower.contains("huggingface.co") {
+        "HuggingFace"
+    } else if lower.contains("cerebras.ai") {
+        "Cerebras"
+    } else if lower.contains("api.openai.com") {
+        "OpenAI"
+    } else if is_local_unauthenticated_url(url) {
+        "Local OpenAI-Compat"
+    } else {
+        "OpenAI-Compatible"
+    }
+}
+
+/// Resolve any universal API key + optional base URL + optional model into the matching `LlmProvider`.
+pub fn resolve_universal_llm_provider(
+    api_key: &str,
+    base_url: &str,
+    model: Option<String>,
+) -> Option<(Arc<dyn LlmProvider>, String)> {
+    let key = api_key.trim();
+    let base = base_url.trim();
+    let model = model.and_then(|m| {
+        let t = m.trim().to_string();
+        (!t.is_empty()).then_some(t)
+    });
+
+    if key.is_empty() && (base.is_empty() || !is_local_unauthenticated_url(base)) {
+        return None;
+    }
+
+    if !base.is_empty() {
+        let lower_base = base.to_ascii_lowercase();
+        if lower_base.contains("anthropic.com") {
+            let label = format!(
+                "Anthropic ({})",
+                model.as_deref().unwrap_or("claude-sonnet-4-20250514")
+            );
+            return Some((Arc::new(AnthropicLlmProvider::new(key, base, model)), label));
+        }
+        if lower_base.contains("generativelanguage.googleapis.com") {
+            let label = format!("Gemini ({})", model.as_deref().unwrap_or("gemini-2.5-flash"));
+            return Some((Arc::new(GeminiLlmProvider::new(key, model)), label));
+        }
+        let host_label = host_display_name(base);
+        let label = format!("{} ({})", host_label, model.as_deref().unwrap_or("gpt-4o-mini"));
+        return Some((
+            Arc::new(OpenAiCompatibleLlmProvider::new(key, base, model)),
+            label,
+        ));
+    }
+
+    // Prefix auto-detection when Base URL is left blank.
+    if key.starts_with("AIza") {
+        let label = format!("Gemini ({})", model.as_deref().unwrap_or("gemini-2.5-flash"));
+        return Some((Arc::new(GeminiLlmProvider::new(key, model)), label));
+    }
+    if key.starts_with("sk-ant-") {
+        let label = format!(
+            "Anthropic ({})",
+            model.as_deref().unwrap_or("claude-sonnet-4-20250514")
+        );
+        return Some((
+            Arc::new(AnthropicLlmProvider::new(key, "https://api.anthropic.com", model)),
+            label,
+        ));
+    }
+
+    let prefix_routes: &[(&str, &str, &str, &str)] = &[
+        ("sk-air-", "Airforce", "https://api.airforce/v1", "gpt-4o-mini"),
+        ("sk-or-", "OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
+        ("gsk_", "Groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+        ("xai-", "xAI", "https://api.x.ai/v1", "grok-2-latest"),
+        ("pplx-", "Perplexity", "https://api.perplexity.ai", "sonar"),
+        ("hf_", "HuggingFace", "https://router.huggingface.co/v1", "Qwen/Qwen2.5-72B-Instruct"),
+        ("csk-", "Cerebras", "https://api.cerebras.ai/v1", "llama-3.3-70b"),
+        ("sk-", "OpenAI", "https://api.openai.com/v1", "gpt-4o-mini"),
+    ];
+    for &(prefix, name, default_url, default_model) in prefix_routes {
+        if key.starts_with(prefix) {
+            let resolved_model = model.or_else(|| Some(default_model.to_string()));
+            let label = format!(
+                "{} ({})",
+                name,
+                resolved_model.as_deref().unwrap_or(default_model)
+            );
+            return Some((
+                Arc::new(OpenAiCompatibleLlmProvider::new(key, default_url, resolved_model)),
+                label,
+            ));
+        }
+    }
+
+    // Model hint fallback for keys without a recognizable vendor prefix (e.g. DeepSeek/Mistral/custom keys).
+    if let Some(ref m) = model {
+        let lm = m.to_ascii_lowercase();
+        if lm.contains("claude") {
+            return Some((
+                Arc::new(AnthropicLlmProvider::new(key, "https://api.anthropic.com", model.clone())),
+                format!("Anthropic ({})", m),
+            ));
+        }
+        if lm.contains("deepseek") {
+            return Some((
+                Arc::new(OpenAiCompatibleLlmProvider::new(key, "https://api.deepseek.com/v1", model.clone())),
+                format!("DeepSeek ({})", m),
+            ));
+        }
+        if lm.contains("mistral") || lm.contains("codestral") {
+            return Some((
+                Arc::new(OpenAiCompatibleLlmProvider::new(key, "https://api.mistral.ai/v1", model.clone())),
+                format!("Mistral ({})", m),
+            ));
+        }
+        if lm.contains("gpt") || lm.starts_with("o1") || lm.starts_with("o3") || lm.starts_with("o4") {
+            return Some((
+                Arc::new(OpenAiCompatibleLlmProvider::new(key, "https://api.openai.com/v1", model.clone())),
+                format!("OpenAI ({})", m),
+            ));
+        }
+    }
+
+    let label = format!("Gemini ({})", model.as_deref().unwrap_or("gemini-2.5-flash"));
+    Some((Arc::new(GeminiLlmProvider::new(key, model)), label))
 }

@@ -5787,7 +5787,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "studynodes-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hayro",
  "pdf-extract",
@@ -5812,7 +5812,7 @@ dependencies = [
 
 [[package]]
 name = "studynodes-graph"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5824,7 +5824,7 @@ dependencies = [
 
 [[package]]
 name = "studynodes-llm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5839,7 +5839,7 @@ dependencies = [
 
 [[package]]
 name = "studynodes-vision"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "image",

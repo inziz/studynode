@@ -4,6 +4,22 @@ use serde::{Deserialize, Serialize};
 use crate::coords::{Camera, WorldPos};
 use crate::model::{Edge, EdgeId, EdgeStatus, Node, NodeId, PortId};
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String, // "user" or "assistant"
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_summary: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatThread {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub messages: Vec<ChatMessage>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StudyGraph {
     pub schema_version: u32,
@@ -14,6 +30,10 @@ pub struct StudyGraph {
     pub viewport: Camera,
     pub nodes: HashMap<NodeId, Node>,
     pub edges: HashMap<EdgeId, Edge>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chat_threads: Vec<ChatThread>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_chat_id: Option<String>,
 }
 
 impl Default for StudyGraph {
@@ -34,6 +54,8 @@ impl StudyGraph {
             viewport: Camera::default(),
             nodes: HashMap::new(),
             edges: HashMap::new(),
+            chat_threads: Vec::new(),
+            active_chat_id: None,
         }
     }
 
@@ -209,5 +231,39 @@ mod tests {
         assert_eq!(cascade_edges[0].id, edge_id);
         assert_eq!(g.edges.len(), 0);
         assert_eq!(g.nodes.len(), 1);
+    }
+
+    #[test]
+    fn test_chat_threads_serde_and_backward_compat() {
+        let mut g = StudyGraph::new("Per Project Chat");
+        g.chat_threads.push(ChatThread {
+            id: "chat-1".into(),
+            title: "Cell Cycle".into(),
+            messages: vec![
+                ChatMessage {
+                    role: "user".into(),
+                    text: "Summarize mitosis".into(),
+                    action_summary: None,
+                },
+                ChatMessage {
+                    role: "assistant".into(),
+                    text: "PMAT phases".into(),
+                    action_summary: Some("Added 1 note".into()),
+                },
+            ],
+        });
+        g.active_chat_id = Some("chat-1".into());
+        let json = serde_json::to_string(&g).unwrap();
+        let restored: StudyGraph = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.active_chat_id.as_deref(), Some("chat-1"));
+        assert_eq!(restored.chat_threads.len(), 1);
+        assert_eq!(restored.chat_threads[0].messages.len(), 2);
+
+        // Legacy graph.json without chat_threads / active_chat_id must still load
+        let legacy_json = serde_json::to_string(&StudyGraph::new("Legacy")).unwrap();
+        assert!(!legacy_json.contains("chat_threads"));
+        let legacy: StudyGraph = serde_json::from_str(&legacy_json).unwrap();
+        assert!(legacy.chat_threads.is_empty());
+        assert_eq!(legacy.active_chat_id, None);
     }
 }

@@ -109,9 +109,20 @@ impl VisionConfig {
             cloud_vision_api_key: non_empty_env(&[
                 "VISION_API_KEY",
                 "DEEPSEEK_API_KEY",
+                "UNIVERSAL_API_KEY",
+                "AI_API_KEY",
+                "AIRFORCE_API_KEY",
+                "OPENROUTER_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "GROQ_API_KEY",
                 "OPENAI_API_KEY",
             ]),
-            cloud_vision_base_url: non_empty_env(&["VISION_API_URL"]).unwrap_or_default(),
+            cloud_vision_base_url: non_empty_env(&[
+                "VISION_API_URL",
+                "UNIVERSAL_API_URL",
+                "AI_BASE_URL",
+            ])
+            .unwrap_or_default(),
             cloud_vision_model: non_empty_env(&["VISION_MODEL"]).unwrap_or_default(),
         }
     }

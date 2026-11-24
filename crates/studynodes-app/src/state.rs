@@ -13,8 +13,10 @@ use studynodes_graph::model::{
     CalendarEvent, CalendarViewMode, DrawingStroke, Edge, EdgeEndpoint, EdgeId, EdgeRelation,
     EdgeStatus, MediaTimestamp, NodeId, NodeKind, PortDirection, PortId, SubtitleCue,
 };
-use studynodes_graph::{CommandHistory, GraphCommand, ProjectBundle, StudyGraph};
-use studynodes_llm::{GeminiLlmProvider, LlmProvider, OpenAiCompatibleLlmProvider};
+use studynodes_graph::{
+    ChatMessage, ChatThread, CommandHistory, GraphCommand, ProjectBundle, StudyGraph,
+};
+use studynodes_llm::{LlmProvider, resolve_universal_llm_provider};
 use studynodes_vision::{
     LocalVisionService, NeuralModelStatus, OcrEnginePreference, OcrMode, OcrOutput,
     TranslationOutput, VisionConfig, VisionService,
@@ -201,7 +203,20 @@ pub fn node_base_size(kind: NodeKind) -> (f32, f32) {
     }
 }
 
-/// Effective world dimensions `(w, h)` for a specific node instance (honors resizable `Section`, resizable `Video`/`Audio`, and Calendar `Week` bounds).
+/// Minimum and maximum `(width, height)` in world coordinates for canvas-resizable nodes
+/// (`Section` uses its dedicated banner/frame resize logic).
+pub(crate) fn resizable_node_bounds(kind: NodeKind) -> Option<((f32, f32), (f32, f32))> {
+    match kind {
+        NodeKind::Note => Some(((200.0, 120.0), (960.0, 760.0))),
+        NodeKind::Flashcard => Some(((210.0, 140.0), (860.0, 640.0))),
+        NodeKind::Video => Some(((240.0, 176.0), (1280.0, 860.0))),
+        NodeKind::Audio => Some(((230.0, 112.0), (900.0, 520.0))),
+        NodeKind::Drawing => Some(((240.0, 180.0), (960.0, 720.0))),
+        _ => None,
+    }
+}
+
+/// Effective world dimensions `(w, h)` for a specific node instance (honors resizable cards and Calendar `Week` bounds).
 pub fn node_world_size(node: &studynodes_graph::model::Node) -> (f32, f32) {
     let is_unmodified_default = (node.size.0 - studynodes_graph::model::Node::DEFAULT_WIDTH).abs()
         < 0.5
@@ -222,15 +237,6 @@ pub fn node_world_size(node: &studynodes_graph::model::Node) -> (f32, f32) {
             44.0
         };
         (w, h)
-    } else if node.kind == NodeKind::Video {
-        if !is_unmodified_default && node.size.0 >= 200.0 && node.size.1 >= 150.0 {
-            (
-                node.size.0.clamp(240.0, 1280.0),
-                node.size.1.clamp(176.0, 860.0),
-            )
-        } else {
-            node_base_size(NodeKind::Video)
-        }
     } else if node.kind == NodeKind::Calendar
         && node.meta.calendar_view_mode == CalendarViewMode::Week
     {
@@ -254,12 +260,13 @@ pub fn node_world_size(node: &studynodes_graph::model::Node) -> (f32, f32) {
             || ((node.size.0 - 288.0).abs() < 0.5 && (node.size.1 - 124.0).abs() < 0.5)
             || ((node.size.0 - 304.0).abs() < 0.5 && (node.size.1 - 210.0).abs() < 0.5)
             || ((node.size.0 - 320.0).abs() < 0.5 && (node.size.1 - 176.0).abs() < 0.5);
+        let (min_sz, max_sz) = resizable_node_bounds(NodeKind::Audio).unwrap();
         if !is_auto_audio && node.size.0 >= 200.0 && node.size.1 >= 100.0 {
             let mut h = node.size.1;
             if has_subs && h < 190.0 {
                 h = 190.0;
             }
-            (node.size.0.clamp(230.0, 900.0), h.clamp(112.0, 520.0))
+            (node.size.0.clamp(min_sz.0, max_sz.0), h.clamp(min_sz.1, max_sz.1))
         } else if has_subs {
             (304.0, 210.0)
         } else if is_iframe {
@@ -267,14 +274,14 @@ pub fn node_world_size(node: &studynodes_graph::model::Node) -> (f32, f32) {
         } else {
             node_base_size(NodeKind::Audio)
         }
-    } else if node.kind == NodeKind::Drawing {
-        if !is_unmodified_default && node.size.0 >= 200.0 && node.size.1 >= 150.0 {
+    } else if let Some((min_sz, max_sz)) = resizable_node_bounds(node.kind) {
+        if !is_unmodified_default && node.size.0 >= 160.0 && node.size.1 >= 100.0 {
             (
-                node.size.0.clamp(240.0, 960.0),
-                node.size.1.clamp(180.0, 720.0),
+                node.size.0.clamp(min_sz.0, max_sz.0),
+                node.size.1.clamp(min_sz.1, max_sz.1),
             )
         } else {
-            node_base_size(NodeKind::Drawing)
+            node_base_size(node.kind)
         }
     } else {
         node_base_size(node.kind)
@@ -317,10 +324,14 @@ pub enum LlmJobResult {
         result: Result<studynodes_graph::patch::GraphPatch, String>,
     },
     ChatFinished {
+        project_id: String,
+        chat_id: String,
         provider_label: String,
         result: Result<String, String>,
     },
     ChatWithActionsFinished {
+        project_id: String,
+        chat_id: String,
         provider_label: String,
         result: Result<studynodes_llm::ChatActionResponse, String>,
     },
@@ -468,6 +479,7 @@ pub struct AppState {
     pub ai_chat_messages: Vec<AiChatMessage>,
     pub ai_chat_input: TextEdit,
     pub ai_chat_pending: bool,
+    pub ai_chat_pending_target: Option<(String, String)>,
     pub ai_chat_canvas_actions: bool,
 
     // Video & Music playback + HTML iframe embed + subtitles + image search buffers
@@ -770,6 +782,7 @@ impl AppState {
             ai_chat_messages: Vec::new(),
             ai_chat_input: TextEdit::new(""),
             ai_chat_pending: false,
+            ai_chat_pending_target: None,
             ai_chat_canvas_actions: true,
             media_players: HashMap::new(),
             media_url_edit: TextEdit::new(""),
@@ -978,6 +991,7 @@ impl AppState {
     pub fn save_active_into_tab(&mut self) {
         self.sync_node_edits();
         self.sync_edge_edits();
+        self.sync_ai_chat_to_graph();
         self.flush_graph_save_now();
         if let Some(idx) = self.active_tab {
             if let Some(tab) = self.tabs.get_mut(idx) {
@@ -1040,6 +1054,7 @@ impl AppState {
         self.active_image = None;
         self.card_pdf_previews.clear();
         self.card_image_previews.clear();
+        self.load_ai_chat_from_graph();
 
         self.canvas_title_edit = TextEdit::new("");
         self.canvas_content_edit = TextEdit::new("");
@@ -1352,6 +1367,9 @@ impl AppState {
             self.active_image = None;
             self.card_pdf_previews.clear();
             self.card_image_previews.clear();
+            self.ai_chat_messages.clear();
+            self.ai_chat_input = TextEdit::new("");
+            self.ai_chat_pending = false;
             self.screen = AppScreen::Dashboard;
             crate::touchpad_win32::set_canvas_bounds(None);
             self.refresh_recent_projects();
@@ -3509,7 +3527,7 @@ impl AppState {
             self.llm_pending_patches += 1;
             self.is_ai_loading = true;
             self.llm_last_error = None;
-            self.notify_toast(format!("✦ {} via {}...", task_label, label));
+            self.notify_toast(format!("{} via {}...", task_label, label));
             let tx = self.llm_tx.clone();
             let waker = self.llm_waker.clone();
             let task_owned = task_label.to_string();
@@ -3543,7 +3561,7 @@ impl AppState {
                 let res = self.graph.validate_and_stage_patch(&patch);
                 self.persist_graph_and_snapshot();
                 self.notify_toast(format!(
-                    "✦ AI proposed {} link(s) & {} node(s)",
+                    "AI proposed {} link(s) & {} node(s)",
                     res.proposed_edges.len(),
                     res.new_nodes.len()
                 ));
@@ -3658,7 +3676,7 @@ impl AppState {
             self.llm_pending_nodes.insert(id.clone());
             self.is_ai_loading = true;
             self.llm_last_error = None;
-            self.notify_toast(format!("✦ Summarizing via {}...", label));
+            self.notify_toast(format!("Summarizing via {}...", label));
             self.push_reader_snapshot();
 
             let tx = self.llm_tx.clone();
@@ -3696,7 +3714,7 @@ impl AppState {
                 }
                 self.persist_graph_and_snapshot();
                 self.notify_toast(
-                    "✦ Offline summary ready (add an API key in ⚙ Settings for live AI)",
+                    "Offline summary ready (add an API key in Settings for live AI)",
                 );
             }
         }
@@ -3743,6 +3761,7 @@ impl AppState {
     pub fn open_ai_chat_panel(&mut self) {
         self.sync_node_edits();
         self.sync_edge_edits();
+        self.ensure_active_chat_thread();
         self.chat_api_key_edit = TextEdit::new(&self.reader_prefs.chat_api_key);
         self.chat_base_url_edit = TextEdit::new(&self.reader_prefs.chat_base_url);
         self.chat_model_edit = TextEdit::new(&self.reader_prefs.chat_model);
@@ -3768,9 +3787,243 @@ impl AppState {
         self.notify_toast(crate::i18n::t(crate::i18n::TextKey::SettingsSavedToast));
     }
 
+    fn refresh_chat_pending_flag(&mut self) {
+        self.ai_chat_pending = self
+            .ai_chat_pending_target
+            .as_ref()
+            .is_some_and(|(pid, cid)| {
+                pid == &self.graph.project_id
+                    && self.graph.active_chat_id.as_deref() == Some(cid.as_str())
+            });
+    }
+
+    pub fn ensure_active_chat_thread(&mut self) -> String {
+        if self.graph.chat_threads.is_empty() {
+            let id = uuid::Uuid::new_v4().to_string();
+            self.graph.chat_threads.push(ChatThread {
+                id: id.clone(),
+                title: "Chat 1".into(),
+                messages: Vec::new(),
+            });
+            self.graph.active_chat_id = Some(id.clone());
+            return id;
+        }
+        if let Some(active) = self.graph.active_chat_id.as_ref() {
+            if self.graph.chat_threads.iter().any(|t| &t.id == active) {
+                return active.clone();
+            }
+        }
+        let fallback = self.graph.chat_threads[0].id.clone();
+        self.graph.active_chat_id = Some(fallback.clone());
+        fallback
+    }
+
+    fn load_ai_chat_from_graph(&mut self) {
+        let active_id = self.ensure_active_chat_thread();
+        let msgs = self
+            .graph
+            .chat_threads
+            .iter()
+            .find(|t| t.id == active_id)
+            .map(|t| {
+                t.messages
+                    .iter()
+                    .map(|m| AiChatMessage {
+                        role: if m.role == "user" {
+                            "user"
+                        } else {
+                            "assistant"
+                        },
+                        text: m.text.clone(),
+                        action_summary: m.action_summary.clone(),
+                        can_undo: false,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.ai_chat_messages = msgs;
+        self.ai_chat_input = TextEdit::new("");
+        self.llm_last_error = None;
+        self.refresh_chat_pending_flag();
+    }
+
+    fn sync_ai_chat_to_graph(&mut self) {
+        let active_id = self.ensure_active_chat_thread();
+        let records: Vec<ChatMessage> = self
+            .ai_chat_messages
+            .iter()
+            .map(|m| ChatMessage {
+                role: m.role.to_string(),
+                text: m.text.clone(),
+                action_summary: m.action_summary.clone(),
+            })
+            .collect();
+        if let Some(thread) = self
+            .graph
+            .chat_threads
+            .iter_mut()
+            .find(|t| t.id == active_id)
+        {
+            thread.messages = records;
+            if thread.title.starts_with("Chat ") {
+                if let Some(first_user) = thread.messages.iter().find(|m| m.role == "user") {
+                    let clean: String = first_user
+                        .text
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if !clean.is_empty() {
+                        let short: String = clean.chars().take(22).collect();
+                        thread.title = if clean.chars().count() > 22 {
+                            format!("{}…", short.trim_end())
+                        } else {
+                            short
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    fn persist_chat_change(&mut self) {
+        self.sync_ai_chat_to_graph();
+        self.persist_graph_and_snapshot();
+        if let Some(tab) = self.active_tab.and_then(|i| self.tabs.get_mut(i)) {
+            tab.graph = self.graph.clone();
+        }
+    }
+
+    pub fn new_ai_chat_tab(&mut self) -> String {
+        self.sync_ai_chat_to_graph();
+        let mut next_num = self.graph.chat_threads.len() + 1;
+        while self
+            .graph
+            .chat_threads
+            .iter()
+            .any(|t| t.title == format!("Chat {}", next_num))
+        {
+            next_num += 1;
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        self.graph.chat_threads.push(ChatThread {
+            id: id.clone(),
+            title: format!("Chat {}", next_num),
+            messages: Vec::new(),
+        });
+        self.graph.active_chat_id = Some(id.clone());
+        self.load_ai_chat_from_graph();
+        self.persist_graph_and_snapshot();
+        if let Some(tab) = self.active_tab.and_then(|i| self.tabs.get_mut(i)) {
+            tab.graph = self.graph.clone();
+        }
+        id
+    }
+
+    pub fn switch_ai_chat_tab(&mut self, chat_id: &str) {
+        if self.graph.active_chat_id.as_deref() == Some(chat_id) {
+            return;
+        }
+        if !self.graph.chat_threads.iter().any(|t| t.id == chat_id) {
+            return;
+        }
+        self.sync_ai_chat_to_graph();
+        self.graph.active_chat_id = Some(chat_id.to_string());
+        self.load_ai_chat_from_graph();
+        self.persist_graph_and_snapshot();
+        if let Some(tab) = self.active_tab.and_then(|i| self.tabs.get_mut(i)) {
+            tab.graph = self.graph.clone();
+        }
+    }
+
+    pub fn close_ai_chat_tab(&mut self, chat_id: &str) {
+        if self.graph.chat_threads.len() <= 1 {
+            if let Some(first) = self.graph.chat_threads.first_mut() {
+                first.title = "Chat 1".into();
+                first.messages.clear();
+            }
+            self.ai_chat_messages.clear();
+            self.llm_last_error = None;
+            self.persist_chat_change();
+            return;
+        }
+        let Some(idx) = self.graph.chat_threads.iter().position(|t| t.id == chat_id) else {
+            return;
+        };
+        let was_active = self.graph.active_chat_id.as_deref() == Some(chat_id);
+        self.graph.chat_threads.remove(idx);
+        if was_active {
+            let next_idx = idx.min(self.graph.chat_threads.len() - 1);
+            self.graph.active_chat_id = Some(self.graph.chat_threads[next_idx].id.clone());
+            self.load_ai_chat_from_graph();
+        }
+        self.persist_graph_and_snapshot();
+        if let Some(tab) = self.active_tab.and_then(|i| self.tabs.get_mut(i)) {
+            tab.graph = self.graph.clone();
+        }
+    }
+
+    fn append_chat_reply_for_target(
+        &mut self,
+        project_id: &str,
+        chat_id: &str,
+        reply: String,
+        action_summary: Option<String>,
+        can_undo: bool,
+    ) {
+        if project_id == self.graph.project_id {
+            if self.graph.active_chat_id.as_deref() == Some(chat_id) {
+                self.ai_chat_messages.push(AiChatMessage {
+                    role: "assistant",
+                    text: reply,
+                    action_summary,
+                    can_undo,
+                });
+                self.persist_chat_change();
+            } else if let Some(thread) = self.graph.chat_threads.iter_mut().find(|t| t.id == chat_id) {
+                thread.messages.push(ChatMessage {
+                    role: "assistant".into(),
+                    text: reply,
+                    action_summary,
+                });
+                self.persist_graph_and_snapshot();
+                if let Some(tab) = self.active_tab.and_then(|i| self.tabs.get_mut(i)) {
+                    tab.graph = self.graph.clone();
+                }
+            }
+            return;
+        }
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.graph.project_id == project_id)
+        {
+            if let Some(thread) = tab.graph.chat_threads.iter_mut().find(|t| t.id == chat_id) {
+                thread.messages.push(ChatMessage {
+                    role: "assistant".into(),
+                    text: reply,
+                    action_summary,
+                });
+                let _ = tab.bundle.save_graph_atomic(&tab.graph);
+            }
+        }
+    }
+
     pub fn clear_ai_chat(&mut self) {
         self.ai_chat_messages.clear();
         self.llm_last_error = None;
+        if let Some(active_id) = self.graph.active_chat_id.clone() {
+            if let Some((idx, thread)) = self
+                .graph
+                .chat_threads
+                .iter_mut()
+                .enumerate()
+                .find(|(_, t)| t.id == active_id)
+            {
+                thread.messages.clear();
+                thread.title = format!("Chat {}", idx + 1);
+            }
+        }
+        self.persist_chat_change();
     }
 
     fn sync_edit_buffers_from_selected(&mut self) {
@@ -3993,6 +4246,8 @@ impl AppState {
             return;
         }
         self.ai_chat_input = TextEdit::new("");
+        let target_project_id = self.graph.project_id.clone();
+        let target_chat_id = self.ensure_active_chat_thread();
 
         let history: Vec<(String, String)> = self
             .ai_chat_messages
@@ -4005,6 +4260,7 @@ impl AppState {
             action_summary: None,
             can_undo: false,
         });
+        self.persist_chat_change();
 
         let selected_ids: Vec<NodeId> = self.selected_nodes.iter().cloned().collect();
         let preferred_lang = self
@@ -4024,7 +4280,8 @@ impl AppState {
         let with_actions = self.ai_chat_canvas_actions;
 
         if let Some((provider, label)) = self.resolve_chat_ai_provider() {
-            self.ai_chat_pending = true;
+            self.ai_chat_pending_target = Some((target_project_id.clone(), target_chat_id.clone()));
+            self.refresh_chat_pending_flag();
             self.is_ai_loading = true;
             self.llm_last_error = None;
             let tx = self.llm_tx.clone();
@@ -4039,6 +4296,8 @@ impl AppState {
                             .map_err(|e| e.to_string())
                     });
                     let _ = tx.send(LlmJobResult::ChatWithActionsFinished {
+                        project_id: target_project_id,
+                        chat_id: target_chat_id,
                         provider_label: label,
                         result,
                     });
@@ -4048,6 +4307,8 @@ impl AppState {
                             .map_err(|e| e.to_string())
                     });
                     let _ = tx.send(LlmJobResult::ChatFinished {
+                        project_id: target_project_id,
+                        chat_id: target_chat_id,
                         provider_label: label,
                         result,
                     });
@@ -4070,7 +4331,7 @@ impl AppState {
                         let res = self.apply_ai_patch_with_undo(patch);
                         if res.total_changes() > 0 {
                             let line = res.summary_line();
-                            self.notify_toast(format!("⚡ Canvas updated: {}", line));
+                            self.notify_toast(format!("Canvas updated: {}", line));
                             (Some(line), true)
                         } else if res.dropped_ops_count > 0 {
                             (
@@ -4092,6 +4353,7 @@ impl AppState {
                         action_summary,
                         can_undo,
                     });
+                    self.persist_chat_change();
                 }
             } else if let Ok(reply) = rt.block_on(provider.ask_project_chat(&context, &history, &q)) {
                 self.ai_chat_messages.push(AiChatMessage {
@@ -4100,6 +4362,7 @@ impl AppState {
                     action_summary: None,
                     can_undo: false,
                 });
+                self.persist_chat_change();
             }
         }
     }
@@ -4125,9 +4388,9 @@ impl AppState {
             .unwrap_or("Project AI Note");
         let title_chars: String = question_snippet.chars().take(42).collect();
         let title = if question_snippet.chars().count() > 42 {
-            format!("✦ {}…", title_chars.trim_end())
+            format!("{}…", title_chars.trim_end())
         } else {
-            format!("✦ {}", title_chars)
+            title_chars
         };
 
         let first_selected = self
@@ -4160,7 +4423,7 @@ impl AppState {
         };
 
         if new_id.is_some() {
-            self.notify_toast("✦ Added AI answer as a Note on canvas");
+            self.notify_toast("Added AI answer as a Note on canvas");
         }
         new_id
     }
@@ -4190,7 +4453,7 @@ impl AppState {
                                 .map(|n| n.title.clone())
                                 .unwrap_or_else(|| "node".into());
                             self.notify_toast(format!(
-                                "✦ Summary ready for '{}' via {}",
+                                "Summary ready for '{}' via {}",
                                 title, provider_label
                             ));
                         }
@@ -4213,7 +4476,7 @@ impl AppState {
                             let res = self.graph.validate_and_stage_patch(&patch);
                             self.persist_graph_and_snapshot();
                             self.notify_toast(format!(
-                                "✦ {} ({}): {} node(s), {} link(s)",
+                                "{} ({}): {} node(s), {} link(s)",
                                 task_label,
                                 provider_label,
                                 res.new_nodes.len(),
@@ -4227,19 +4490,19 @@ impl AppState {
                     }
                 }
                 LlmJobResult::ChatFinished {
+                    project_id,
+                    chat_id,
                     provider_label,
                     result,
                 } => {
-                    self.ai_chat_pending = false;
+                    if self.ai_chat_pending_target.as_ref().is_some_and(|(p, c)| p == &project_id && c == &chat_id) {
+                        self.ai_chat_pending_target = None;
+                    }
+                    self.refresh_chat_pending_flag();
                     match result {
                         Ok(reply) => {
                             self.llm_last_error = None;
-                            self.ai_chat_messages.push(AiChatMessage {
-                                role: "assistant",
-                                text: reply,
-                                action_summary: None,
-                                can_undo: false,
-                            });
+                            self.append_chat_reply_for_target(&project_id, &chat_id, reply, None, false);
                             self.status_message = format!("AI answered via {}", provider_label);
                         }
                         Err(err) => {
@@ -4249,50 +4512,60 @@ impl AppState {
                     }
                 }
                 LlmJobResult::ChatWithActionsFinished {
+                    project_id,
+                    chat_id,
                     provider_label,
                     result,
                 } => {
-                    self.ai_chat_pending = false;
+                    if self.ai_chat_pending_target.as_ref().is_some_and(|(p, c)| p == &project_id && c == &chat_id) {
+                        self.ai_chat_pending_target = None;
+                    }
+                    self.refresh_chat_pending_flag();
                     match result {
                         Ok(resp) => {
                             self.llm_last_error = None;
-                            let (action_summary, can_undo) = if let Some(patch) = &resp.patch {
-                                let res = self.apply_ai_patch_with_undo(patch);
-                                if res.total_changes() > 0 {
-                                    let mut line = res.summary_line();
-                                    if res.dropped_ops_count > 0 {
-                                        line.push_str(&format!(
-                                            " ({} skipped)",
-                                            res.dropped_ops_count
+                            let (action_summary, can_undo) = if project_id == self.graph.project_id {
+                                if let Some(patch) = &resp.patch {
+                                    let res = self.apply_ai_patch_with_undo(patch);
+                                    if res.total_changes() > 0 {
+                                        let mut line = res.summary_line();
+                                        if res.dropped_ops_count > 0 {
+                                            line.push_str(&format!(
+                                                " ({} skipped)",
+                                                res.dropped_ops_count
+                                            ));
+                                        }
+                                        self.notify_toast(format!(
+                                            "{} ({}): {}",
+                                            provider_label, "Canvas", line
                                         ));
+                                        (Some(line), true)
+                                    } else if res.dropped_ops_count > 0 {
+                                        let msg = format!(
+                                            "Skipped {} action(s): target node ID/title did not match canvas",
+                                            res.dropped_ops_count
+                                        );
+                                        self.notify_toast(msg.clone());
+                                        (Some(msg), false)
+                                    } else {
+                                        (resp.parse_warning.clone(), false)
                                     }
-                                    self.notify_toast(format!(
-                                        "⚡ {} ({}): {}",
-                                        provider_label, "Canvas", line
-                                    ));
-                                    (Some(line), true)
-                                } else if res.dropped_ops_count > 0 {
-                                    let msg = format!(
-                                        "Skipped {} action(s): target node ID/title did not match canvas",
-                                        res.dropped_ops_count
-                                    );
-                                    self.notify_toast(msg.clone());
-                                    (Some(msg), false)
                                 } else {
+                                    if let Some(ref w) = resp.parse_warning {
+                                        self.notify_toast(format!("AI action parse issue: {}", w));
+                                    }
                                     (resp.parse_warning.clone(), false)
                                 }
                             } else {
-                                if let Some(ref w) = resp.parse_warning {
-                                    self.notify_toast(format!("AI action parse issue: {}", w));
-                                }
-                                (resp.parse_warning.clone(), false)
+                                (None, false)
                             };
-                            self.ai_chat_messages.push(AiChatMessage {
-                                role: "assistant",
-                                text: resp.reply,
+                            self.append_chat_reply_for_target(
+                                &project_id,
+                                &chat_id,
+                                resp.reply,
                                 action_summary,
                                 can_undo,
-                            });
+                            );
                             self.status_message = format!("AI answered via {}", provider_label);
                         }
                         Err(err) => {
@@ -4650,51 +4923,74 @@ Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
         })
     }
 
+const UNIVERSAL_API_ENV_VARS: &[&str] = &[
+    "UNIVERSAL_API_KEY",
+    "AI_API_KEY",
+    "AIRFORCE_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GROQ_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENAI_API_KEY",
+    "LLM_API_KEY",
+];
+
     fn build_vision_config(&self) -> VisionConfig {
-        let env_cloud_key = Self::first_non_empty_env(&[
-            "VISION_API_KEY",
-            "DEEPSEEK_API_KEY",
-            "OPENAI_API_KEY",
-        ]);
-        let pref_key = {
+        let vision_pref_key = {
             let trimmed = self.reader_prefs.vision_api_key.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
         };
-        let vision_pref_empty = pref_key.is_none();
-        let cloud_vision_api_key = pref_key.clone().or(env_cloud_key);
+        let vision_pref_base = {
+            let trimmed = self.reader_prefs.vision_base_url.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        };
+        let vision_pref_model = {
+            let trimmed = self.reader_prefs.vision_model.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        };
+
+        let ai_key = {
+            let trimmed = self.reader_prefs.ai_api_key.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        };
+        let ai_base = {
+            let trimmed = self.reader_prefs.ai_base_url.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        };
+        let ai_model = {
+            let trimmed = self.reader_prefs.ai_model.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        };
+
+        let vision_explicitly_set = vision_pref_key.is_some() || vision_pref_base.is_some();
+        let env_cloud_key = Self::first_non_empty_env(&["VISION_API_KEY"])
+            .or_else(|| Self::first_non_empty_env(Self::UNIVERSAL_API_ENV_VARS));
+
+        let cloud_vision_api_key = vision_pref_key
+            .clone()
+            .or_else(|| if !vision_explicitly_set { ai_key.clone() } else { None })
+            .or(env_cloud_key);
 
         let gemini_api_key = Self::first_non_empty_env(&["GEMINI_API_KEY"])
-            .or_else(|| pref_key.filter(|k| k.starts_with("AIza")))
+            .or_else(|| vision_pref_key.filter(|k| k.starts_with("AIza")))
             .or_else(|| {
-                if vision_pref_empty {
-                    let ai_key = self.reader_prefs.ai_api_key.trim();
-                    (!ai_key.is_empty() && ai_key.starts_with("AIza")).then(|| ai_key.to_string())
+                if !vision_explicitly_set {
+                    ai_key.clone().filter(|k| k.starts_with("AIza"))
                 } else {
                     None
                 }
             });
 
-        let cloud_vision_base_url = {
-            let trimmed = self.reader_prefs.vision_base_url.trim();
-            if trimmed.is_empty() {
-                Self::first_non_empty_env(&["VISION_API_URL"]).unwrap_or_default()
-            } else {
-                trimmed.to_string()
-            }
-        };
+        let cloud_vision_base_url = vision_pref_base
+            .or_else(|| if !vision_explicitly_set { ai_base } else { None })
+            .or_else(|| Self::first_non_empty_env(&["VISION_API_URL", "UNIVERSAL_API_URL", "AI_BASE_URL"]))
+            .unwrap_or_default();
 
-        let cloud_vision_model = {
-            let trimmed = self.reader_prefs.vision_model.trim();
-            if trimmed.is_empty() {
-                Self::first_non_empty_env(&["VISION_MODEL"]).unwrap_or_default()
-            } else {
-                trimmed.to_string()
-            }
-        };
+        let cloud_vision_model = vision_pref_model
+            .or_else(|| if !vision_explicitly_set { ai_model } else { None })
+            .or_else(|| Self::first_non_empty_env(&["VISION_MODEL"]))
+            .unwrap_or_default();
 
         VisionConfig {
             models_dir: self.projects_dir.join("models"),
@@ -4964,6 +5260,19 @@ Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
         self.llm_provider_override = Some(provider);
     }
 
+    pub fn apply_ai_provider_preset(&mut self, preset_id: &str) {
+        if let Some(preset) = studynodes_llm::find_api_provider_preset(preset_id) {
+            self.ai_base_url_edit = TextEdit::new(preset.base_url);
+            if !preset.default_model.is_empty() {
+                self.ai_model_edit = TextEdit::new(preset.default_model);
+            } else if preset.id == "auto" {
+                self.ai_model_edit = TextEdit::new("");
+            }
+            self.save_all_api_settings();
+            self.notify_toast(format!("AI preset: {}", preset.name));
+        }
+    }
+
     pub fn resolve_ai_provider(&self) -> Option<(Arc<dyn LlmProvider>, String)> {
         if let Some(p) = &self.llm_provider_override {
             return Some((Arc::clone(p), "Custom AI".into()));
@@ -4974,7 +5283,7 @@ Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
             if !trimmed.is_empty() {
                 trimmed.to_string()
             } else {
-                Self::first_non_empty_env(&["GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_API_KEY"])?
+                Self::first_non_empty_env(Self::UNIVERSAL_API_ENV_VARS).unwrap_or_default()
             }
         };
 
@@ -4983,7 +5292,8 @@ Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
             if !trimmed.is_empty() {
                 trimmed.to_string()
             } else {
-                Self::first_non_empty_env(&["LLM_API_URL"]).unwrap_or_default()
+                Self::first_non_empty_env(&["UNIVERSAL_API_URL", "AI_BASE_URL", "LLM_API_URL"])
+                    .unwrap_or_default()
             }
         };
 
@@ -4992,31 +5302,11 @@ Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
             if !trimmed.is_empty() {
                 Some(trimmed.to_string())
             } else {
-                Self::first_non_empty_env(&["LLM_MODEL"])
+                Self::first_non_empty_env(&["UNIVERSAL_MODEL", "AI_MODEL", "LLM_MODEL"])
             }
         };
 
-        if !base_url.is_empty() {
-            let label = format!(
-                "OpenAI-Compatible ({})",
-                model.as_deref().unwrap_or("gpt-4o-mini")
-            );
-            let provider = OpenAiCompatibleLlmProvider::new(key, base_url, model);
-            Some((Arc::new(provider), label))
-        } else if key.starts_with("AIza") {
-            let label = format!("Gemini ({})", model.as_deref().unwrap_or("gemini-2.5-flash"));
-            let provider = GeminiLlmProvider::new(key, model);
-            Some((Arc::new(provider), label))
-        } else if key.starts_with("sk-") {
-            let label = format!("OpenAI ({})", model.as_deref().unwrap_or("gpt-4o-mini"));
-            let provider =
-                OpenAiCompatibleLlmProvider::new(key, "https://api.openai.com/v1", model);
-            Some((Arc::new(provider), label))
-        } else {
-            let label = format!("Gemini ({})", model.as_deref().unwrap_or("gemini-2.5-flash"));
-            let provider = GeminiLlmProvider::new(key, model);
-            Some((Arc::new(provider), label))
-        }
+        resolve_universal_llm_provider(&key, &base_url, model)
     }
 
     pub fn ai_api_configured(&self) -> bool {
@@ -5053,7 +5343,7 @@ Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
         } else if !self.reader_prefs.ai_api_key.trim().is_empty() {
             self.reader_prefs.ai_api_key.trim().to_string()
         } else {
-            Self::first_non_empty_env(&["GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_API_KEY"])?
+            Self::first_non_empty_env(Self::UNIVERSAL_API_ENV_VARS).unwrap_or_default()
         };
 
         let base_url = if !chat_base.is_empty() {
@@ -5061,7 +5351,13 @@ Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
         } else if chat_key.is_empty() && !self.reader_prefs.ai_base_url.trim().is_empty() {
             self.reader_prefs.ai_base_url.trim().to_string()
         } else {
-            Self::first_non_empty_env(&["CHAT_API_URL", "LLM_API_URL"]).unwrap_or_default()
+            Self::first_non_empty_env(&[
+                "CHAT_API_URL",
+                "UNIVERSAL_API_URL",
+                "AI_BASE_URL",
+                "LLM_API_URL",
+            ])
+            .unwrap_or_default()
         };
 
         let model = if !chat_model.is_empty() {
@@ -5069,30 +5365,10 @@ Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
         } else if chat_key.is_empty() && !self.reader_prefs.ai_model.trim().is_empty() {
             Some(self.reader_prefs.ai_model.trim().to_string())
         } else {
-            Self::first_non_empty_env(&["CHAT_MODEL", "LLM_MODEL"])
+            Self::first_non_empty_env(&["CHAT_MODEL", "UNIVERSAL_MODEL", "AI_MODEL", "LLM_MODEL"])
         };
 
-        if !base_url.is_empty() {
-            let label = format!(
-                "OpenAI-Compatible ({})",
-                model.as_deref().unwrap_or("gpt-4o-mini")
-            );
-            let provider = OpenAiCompatibleLlmProvider::new(key, base_url, model);
-            Some((Arc::new(provider), label))
-        } else if key.starts_with("AIza") {
-            let label = format!("Gemini ({})", model.as_deref().unwrap_or("gemini-2.5-flash"));
-            let provider = GeminiLlmProvider::new(key, model);
-            Some((Arc::new(provider), label))
-        } else if key.starts_with("sk-") {
-            let label = format!("OpenAI ({})", model.as_deref().unwrap_or("gpt-4o-mini"));
-            let provider =
-                OpenAiCompatibleLlmProvider::new(key, "https://api.openai.com/v1", model);
-            Some((Arc::new(provider), label))
-        } else {
-            let label = format!("Gemini ({})", model.as_deref().unwrap_or("gemini-2.5-flash"));
-            let provider = GeminiLlmProvider::new(key, model);
-            Some((Arc::new(provider), label))
-        }
+        resolve_universal_llm_provider(&key, &base_url, model)
     }
 
     pub fn chat_api_configured(&self) -> bool {
@@ -6566,7 +6842,7 @@ Attention(Q, K, V) = softmax((Q * K^T) / sqrt(d_k)) * V
                     match result {
                         Ok(img) => {
                             self.apply_searched_image_to_node(&node_id, &query, img);
-                            self.notify_toast(format!("🖼 Found image for '{}'", query));
+                            self.notify_toast(format!("Found image for '{}'", query));
                         }
                         Err(err) => {
                             if let Some(node) = self.graph.get_node_mut(&node_id) {

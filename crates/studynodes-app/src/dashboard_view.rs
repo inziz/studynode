@@ -119,7 +119,7 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                     });
                 })
                 .child(
-                    text(format!("↓ {}", i18n::t(TextKey::DashImportBtn)))
+                    text(i18n::t(TextKey::DashImportBtn))
                         .font(theme::STATUS_TEXT)
                         .color(theme::text_secondary()),
                 ),
@@ -452,7 +452,7 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                     }
                 })
                 .child(
-                    text(format!("+ {}", i18n::t(TextKey::DashNewCollection)))
+                    text(i18n::t(TextKey::DashNewCollection))
                         .font(theme::STATUS_TEXT)
                         .color(theme::text_muted()),
                 ),
@@ -730,7 +730,7 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                                 });
                             })
                             .child(
-                                text(format!("↑ {}", i18n::t(TextKey::DashExportBtn)))
+                                text(i18n::t(TextKey::DashExportBtn))
                                     .font(theme::BADGE_TEXT)
                                     .color(theme::text_secondary()),
                             ),

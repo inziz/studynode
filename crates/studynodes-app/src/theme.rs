@@ -1,3 +1,4 @@
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use rune::{Color, Icon, TextStyle};
@@ -458,9 +459,17 @@ pub const BADGE_TEXT: TextStyle = TextStyle::new(10.0, 500.0).mono();
 pub const STATUS_TEXT: TextStyle = TextStyle::new(11.0, 400.0).mono();
 pub const CONTROL_TEXT: TextStyle = TextStyle::new(11.5, 500.0).mono();
 
-/// Rich Markdown rendering style tuned to the currently active theme.
-pub fn markdown_style() -> MarkdownStyle {
+/// Stable 64-bit hash helper used to key memoized Markdown renders.
+pub(crate) fn hash_str(s: &str) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// Rich Markdown rendering style scaled by `scale` for inspector panels and canvas cards.
+pub fn markdown_style_scaled(scale: f32) -> MarkdownStyle {
     let is_dark = active_theme().is_dark();
+    let sc = scale.clamp(0.5, 1.5);
     MarkdownStyle::neutral(is_dark)
         .text(text_primary())
         .muted(text_secondary())
@@ -471,17 +480,27 @@ pub fn markdown_style() -> MarkdownStyle {
             Color::BLACK.alpha(0.06)
         })
         .code_block(bg_input(), border_default())
-        .quote(accent_claude().alpha(0.55), 2.0, 12.0, text_secondary())
+        .quote(accent_claude().alpha(0.55), 2.0, 12.0 * sc, text_secondary())
         .rule(border_default())
         .selection(accent_claude().alpha(0.28))
         .diagram_surface(bg_card(), border_default(), bg_input())
-        .body_font(TextStyle::new(13.0, 400.0).lh(20.5))
-        .heading_font(1, TextStyle::new(17.0, 600.0).lh(24.0))
-        .heading_font(2, TextStyle::new(14.5, 600.0).lh(21.0))
-        .heading_font(3, TextStyle::new(13.0, 600.0).lh(19.0))
-        .code_block_font(TextStyle::new(11.5, 400.0).mono().lh(17.5))
+        .body_font(TextStyle::new(13.0 * sc, 400.0).lh(20.5 * sc))
+        .heading_font(1, TextStyle::new(17.0 * sc, 600.0).lh(24.0 * sc))
+        .heading_font(2, TextStyle::new(14.5 * sc, 600.0).lh(21.0 * sc))
+        .heading_font(3, TextStyle::new(13.0 * sc, 600.0).lh(19.0 * sc))
+        .code_block_font(TextStyle::new(11.5 * sc, 400.0).mono().lh(17.5 * sc))
         .strong_weight(700.0)
-        .list(24.0, 4.0)
+        .list(24.0 * sc, 4.0 * sc)
+}
+
+/// Rich Markdown rendering style tuned to the currently active theme.
+pub fn markdown_style() -> MarkdownStyle {
+    markdown_style_scaled(1.0)
+}
+
+/// Compact zoom-scaled Markdown style for canvas `Note` cards wrapped to `wrap_w`.
+pub fn card_markdown_style(zoom: f32, wrap_w: f32) -> MarkdownStyle {
+    markdown_style_scaled((zoom * 0.85).clamp(0.55, 1.35)).text_width(wrap_w.max(60.0))
 }
 
 /// Compact Markdown style tuned for Project AI Chat messages with highlighted `**bold**` spans.

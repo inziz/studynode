@@ -1916,10 +1916,16 @@ mod tests {
             if rt.state.poll_llm_jobs()
                 && rt.state.llm_pending_nodes.is_empty()
                 && rt.state.llm_pending_patches == 0
+                && !rt.state.ai_chat_pending
+                && rt.state.ai_chat_pending_target.is_none()
             {
                 break;
             }
-            if rt.state.llm_pending_nodes.is_empty() && rt.state.llm_pending_patches == 0 {
+            if rt.state.llm_pending_nodes.is_empty()
+                && rt.state.llm_pending_patches == 0
+                && !rt.state.ai_chat_pending
+                && rt.state.ai_chat_pending_target.is_none()
+            {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -3913,5 +3919,226 @@ mod tests {
             .ai_chat_messages
             .iter()
             .any(|m| m.text == "Line 1\nLine 2"));
+    }
+
+    #[test]
+    fn test_note_markdown_styling_and_note_flashcard_resizing() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Markdown Note & Resize Test");
+
+        let note_id = rt.state.add_note_node(Some(WorldPos::new(120.0, 140.0)));
+        let flash_id = rt
+            .state
+            .add_study_node(NodeKind::Flashcard, Some(WorldPos::new(460.0, 140.0)));
+        rt.state.deselect_all();
+        if let Some(n) = rt.state.graph.get_node_mut(&note_id) {
+            n.content = "# Key Idea\n- **Bold** concept\n- [ ] Practice `code`".into();
+        }
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        // Unselected Note renders Markdown headings/lists (parsed without raw `# ` prefix) + both Note & Flashcard expose resize grips
+        let els = rt.elements();
+        let keys: Vec<_> = els.iter().filter_map(|e| e.key.clone()).collect();
+        let texts: Vec<_> = els.iter().filter_map(|e| e.text.as_deref()).collect();
+        assert!(
+            texts.iter().any(|t| t.trim() == "Key Idea"),
+            "expected parsed Markdown heading 'Key Idea' on Note card, got texts={:?}",
+            texts
+        );
+        assert!(keys.contains(&format!("node_resize_{}", note_id.as_str())));
+        assert!(keys.contains(&format!("node_resize_{}", flash_id.as_str())));
+
+        // Selecting Note shows inline editor AND Inspector live Markdown preview
+        rt.state.select_node(note_id.clone(), false);
+        rt.state.inspector_open = true;
+        rt.invalidate();
+        settle_frames(rt, 8);
+        let sel_keys: Vec<_> = rt.elements().into_iter().filter_map(|e| e.key).collect();
+        assert!(sel_keys.contains(&format!("note_body_{}", note_id.as_str())));
+        assert!(sel_keys.contains(&"inspector_content".to_string()));
+        assert!(sel_keys.contains(&"note_inspector_md_preview".to_string()));
+
+        // Close inspector and resize both Note and Flashcard by dragging bottom-right grips
+        rt.state.inspector_open = false;
+        rt.state.deselect_all();
+        rt.invalidate();
+        settle_frames(rt, 6);
+
+        let (base_nw, base_nh) = state::node_world_size(rt.state.graph.get_node(&note_id).unwrap());
+        let (base_fw, base_fh) = state::node_world_size(rt.state.graph.get_node(&flash_id).unwrap());
+
+        for (nid, dx, dy) in [(&note_id, 90.0_f32, 65.0_f32), (&flash_id, 80.0_f32, 55.0_f32)] {
+            let grip_key = format!("node_resize_{}", nid.as_str());
+            let r = rt
+                .elements()
+                .into_iter()
+                .find(|e| e.key.as_deref() == Some(grip_key.as_str()))
+                .expect("resize grip present")
+                .rect;
+            let gx = r[0] + r[2] * 0.5;
+            let gy = r[1] + r[3] * 0.5;
+            rt.pointer_move(gx, gy);
+            rt.pointer_down(gx, gy);
+            rt.pointer_move(gx + dx, gy + dy);
+            rt.pointer_up(gx + dx, gy + dy);
+            settle_frames(rt, 6);
+        }
+
+        let (new_nw, new_nh) = state::node_world_size(rt.state.graph.get_node(&note_id).unwrap());
+        let (new_fw, new_fh) = state::node_world_size(rt.state.graph.get_node(&flash_id).unwrap());
+        assert!(new_nw > base_nw + 50.0 && new_nh > base_nh + 35.0);
+        assert!(new_fw > base_fw + 45.0 && new_fh > base_fh + 30.0);
+    }
+
+    #[test]
+    fn test_universal_api_key_presets_and_cross_feature_fallback() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.open_settings();
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        click_key(rt, "btn_ai_preset_airforce");
+        settle_frames(rt, 6);
+        assert_eq!(rt.state.reader_prefs.ai_base_url, "https://api.airforce/v1");
+        assert_eq!(rt.state.reader_prefs.ai_model, "gpt-4o-mini");
+
+        rt.state.ai_api_key_edit = rune::TextEdit::new("sk-air-universal-demo");
+        click_key(rt, "btn_settings_save");
+        settle_frames(rt, 6);
+
+        let (_, ai_label) = rt
+            .state
+            .resolve_ai_provider()
+            .expect("universal AI summaries provider");
+        let (_, chat_label) = rt
+            .state
+            .resolve_chat_ai_provider()
+            .expect("universal fallback chat provider");
+        assert!(ai_label.contains("Airforce"));
+        assert!(chat_label.contains("Airforce"));
+        assert!(
+            rt.state.cloud_vision_configured(),
+            "universal AI key must also power Cloud Vision when no override key is set"
+        );
+
+        // Switching to Auto clears explicit base URL while key prefix auto-routes
+        click_key(rt, "btn_ai_preset_auto");
+        settle_frames(rt, 6);
+        assert_eq!(rt.state.reader_prefs.ai_base_url, "");
+        let (_, auto_label) = rt
+            .state
+            .resolve_ai_provider()
+            .expect("prefix auto-detected Airforce provider");
+        assert!(auto_label.contains("Airforce"));
+
+        // AI Chat key drawer also exposes Base URL input
+        rt.state.create_project("Universal Chat Drawer");
+        rt.state.open_ai_chat_panel();
+        rt.state.ai_chat_key_drawer_open = true;
+        rt.invalidate();
+        settle_frames(rt, 6);
+        let keys: Vec<_> = rt.elements().into_iter().filter_map(|e| e.key).collect();
+        assert!(keys.contains(&"input_inline_chat_api_key".to_string()));
+        assert!(keys.contains(&"input_inline_chat_base_url".to_string()));
+        assert!(keys.contains(&"input_inline_chat_model".to_string()));
+    }
+
+    #[test]
+    fn test_per_project_multi_tab_ai_chat_persistence() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state
+            .set_llm_provider_override(std::sync::Arc::new(studynodes_llm::MockLlmProvider));
+
+        // Project A: 2 distinct chat tabs
+        rt.state.create_project("Project Alpha");
+        let path_a = rt.state.bundle.as_ref().unwrap().root_dir.clone();
+        rt.state.open_ai_chat_panel();
+        rt.invalidate();
+        settle_frames(rt, 6);
+
+        rt.state.ai_chat_input = rune::TextEdit::new("Alpha first chat topic");
+        rt.state.submit_ai_chat_question();
+        poll_llm_until_idle(rt);
+        assert_eq!(rt.state.ai_chat_messages.len(), 2);
+
+        rt.invalidate();
+        settle_frames(rt, 6);
+        click_key(rt, "btn_new_ai_chat_tab");
+        settle_frames(rt, 6);
+        assert_eq!(rt.state.graph.chat_threads.len(), 2);
+        assert!(rt.state.ai_chat_messages.is_empty());
+
+        rt.state.ai_chat_input = rune::TextEdit::new("Alpha second chat topic");
+        rt.state.submit_ai_chat_question();
+        poll_llm_until_idle(rt);
+        assert!(rt
+            .state
+            .ai_chat_messages
+            .iter()
+            .any(|m| m.text == "Alpha second chat topic"));
+
+        // Switch back to chat tab 0 inside Project Alpha
+        click_key(rt, "ai_chat_tab_0");
+        settle_frames(rt, 6);
+        assert!(rt
+            .state
+            .ai_chat_messages
+            .iter()
+            .any(|m| m.text == "Alpha first chat topic"));
+        assert!(!rt
+            .state
+            .ai_chat_messages
+            .iter()
+            .any(|m| m.text == "Alpha second chat topic"));
+
+        // Project B starts with its own clean isolated chat
+        rt.state.create_project("Project Beta");
+        rt.state.open_ai_chat_panel();
+        rt.invalidate();
+        settle_frames(rt, 6);
+        assert_eq!(rt.state.graph.chat_threads.len(), 1);
+        assert!(rt.state.ai_chat_messages.is_empty());
+        rt.state.ai_chat_input = rune::TextEdit::new("Beta isolated chat");
+        rt.state.submit_ai_chat_question();
+        poll_llm_until_idle(rt);
+
+        // Close all tabs and reopen Project Alpha from disk (new session persistence)
+        rt.state.close_tab(1);
+        rt.state.close_tab(0);
+        assert!(rt.state.tabs.is_empty());
+
+        rt.state.open_project(path_a);
+        rt.state.open_ai_chat_panel();
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        assert_eq!(rt.state.graph.chat_threads.len(), 2);
+        assert!(rt
+            .state
+            .ai_chat_messages
+            .iter()
+            .any(|m| m.text == "Alpha first chat topic"));
+
+        click_key(rt, "ai_chat_tab_1");
+        settle_frames(rt, 6);
+        assert!(rt
+            .state
+            .ai_chat_messages
+            .iter()
+            .any(|m| m.text == "Alpha second chat topic"));
+
+        // Close chat tab 1 via UI close button
+        click_key(rt, "btn_close_ai_chat_tab_1");
+        settle_frames(rt, 6);
+        assert_eq!(rt.state.graph.chat_threads.len(), 1);
+        assert!(rt
+            .state
+            .ai_chat_messages
+            .iter()
+            .any(|m| m.text == "Alpha first chat topic"));
     }
 }

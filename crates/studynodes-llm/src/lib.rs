@@ -3,9 +3,12 @@ pub mod context;
 pub mod prompt;
 
 pub use client::{
-    AudioTranscriptSegment, AudioTranscriptionRequest, AudioTranscriptionResult, ChatActionResponse,
-    GeminiLlmProvider, LlmError, LlmProvider, MockLlmProvider, OpenAiCompatibleLlmProvider,
-    extract_gemini_response_text, parse_chat_action_response, strip_json_fences,
+    API_PROVIDER_PRESETS, AnthropicLlmProvider, ApiProviderPreset, AudioTranscriptSegment,
+    AudioTranscriptionRequest, AudioTranscriptionResult, ChatActionResponse, GeminiLlmProvider,
+    LlmError, LlmProvider, MockLlmProvider, OpenAiCompatibleLlmProvider,
+    extract_gemini_response_text, find_api_provider_preset, is_local_unauthenticated_url,
+    normalize_openai_chat_completions_url, parse_chat_action_response,
+    resolve_universal_llm_provider, strip_json_fences,
 };
 pub use context::{ExistingEdgeContext, FocusedNodeContext, LlmContext, NeighborNodeContext};
 pub use prompt::{
@@ -349,5 +352,42 @@ mod tests {
         assert!(summary.contains("2 cards"));
         assert!(summary.contains("Glycolysis"));
         assert!(summary.contains("ATP Yield"));
+    }
+
+    #[test]
+    fn test_universal_provider_detection_and_url_normalization() {
+        assert_eq!(
+            normalize_openai_chat_completions_url("https://api.airforce"),
+            "https://api.airforce/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_openai_chat_completions_url("https://api.airforce/v1/"),
+            "https://api.airforce/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_openai_chat_completions_url("https://api.perplexity.ai"),
+            "https://api.perplexity.ai/chat/completions"
+        );
+        assert!(is_local_unauthenticated_url("http://127.0.0.1:11434/v1"));
+        assert!(!is_local_unauthenticated_url("https://api.openai.com/v1"));
+
+        let air = resolve_universal_llm_provider("sk-air-demo", "", None).unwrap();
+        assert!(air.1.contains("Airforce"));
+        let or = resolve_universal_llm_provider("sk-or-v1-demo", "", None).unwrap();
+        assert!(or.1.contains("OpenRouter"));
+        let groq = resolve_universal_llm_provider("gsk_demo", "", None).unwrap();
+        assert!(groq.1.contains("Groq"));
+        let ant = resolve_universal_llm_provider("sk-ant-demo", "", None).unwrap();
+        assert!(ant.1.contains("Anthropic"));
+        let gem = resolve_universal_llm_provider("AIzaDemoKey", "", None).unwrap();
+        assert!(gem.1.contains("Gemini"));
+        let custom_ds = resolve_universal_llm_provider("ds-custom", "", Some("deepseek-chat".into())).unwrap();
+        assert!(custom_ds.1.contains("DeepSeek"));
+        let local = resolve_universal_llm_provider("", "http://127.0.0.1:11434/v1", Some("qwen2.5:3b".into())).unwrap();
+        assert!(local.1.contains("Local"));
+        assert!(resolve_universal_llm_provider("", "https://api.airforce/v1", None).is_none());
+
+        let ant_p = AnthropicLlmProvider::new("sk-ant-demo", "https://api.anthropic.com/", None);
+        assert_eq!(ant_p.messages_url(), "https://api.anthropic.com/v1/messages");
     }
 }

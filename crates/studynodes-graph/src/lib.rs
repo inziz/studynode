@@ -10,7 +10,7 @@ pub use bezier::{point_to_segment_distance, CubicBezier};
 pub use bundle::{BundleError, ProjectBundle};
 pub use command::{CommandHistory, GraphCommand};
 pub use coords::{Camera, ScreenPos, WorldPos};
-pub use graph::StudyGraph;
+pub use graph::{ChatMessage, ChatThread, StudyGraph};
 pub use model::{
     DrawingStroke, Edge, EdgeEndpoint, EdgeId, EdgeProvenance, EdgeRelation, EdgeStatus, Node,
     NodeId, NodeKind, Port, PortDirection, PortId, PortType,
