@@ -553,7 +553,7 @@ pub fn parse_chat_action_response(raw: &str) -> ChatActionResponse {
     }
 }
 
-fn build_chat_prompt(
+pub(crate) fn build_chat_prompt(
     context: &LlmContext,
     history: &[(String, String)],
     question: &str,
@@ -586,10 +586,14 @@ fn build_chat_prompt(
     } else {
         for n in &context.focus_nodes {
             prompt.push_str(&format!(
-                "- **{}** ({}, id: `{}`)\n",
+                "- **{}** ({}, id: `{}`, pos: [{:.0}, {:.0}], size: [{:.0}, {:.0}])\n",
                 n.title.trim(),
                 n.kind,
-                n.node_id
+                n.node_id,
+                n.pos[0],
+                n.pos[1],
+                n.size[0],
+                n.size[1]
             ));
             if let Some(sum) = n.summary.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                 prompt.push_str(&format!("  Summary: {}\n", sum));
@@ -604,12 +608,25 @@ fn build_chat_prompt(
             for nbr in &context.neighbor_nodes {
                 match nbr.summary.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                     Some(sum) => prompt.push_str(&format!(
-                        "- **{}** ({}, id: `{}`): {}\n",
-                        nbr.title, nbr.kind, nbr.node_id, sum
+                        "- **{}** ({}, id: `{}`, pos: [{:.0}, {:.0}], size: [{:.0}, {:.0}]): {}\n",
+                        nbr.title,
+                        nbr.kind,
+                        nbr.node_id,
+                        nbr.pos[0],
+                        nbr.pos[1],
+                        nbr.size[0],
+                        nbr.size[1],
+                        sum
                     )),
                     None => prompt.push_str(&format!(
-                        "- **{}** ({}, id: `{}`)\n",
-                        nbr.title, nbr.kind, nbr.node_id
+                        "- **{}** ({}, id: `{}`, pos: [{:.0}, {:.0}], size: [{:.0}, {:.0}])\n",
+                        nbr.title,
+                        nbr.kind,
+                        nbr.node_id,
+                        nbr.pos[0],
+                        nbr.pos[1],
+                        nbr.size[0],
+                        nbr.size[1]
                     )),
                 }
             }
@@ -617,9 +634,14 @@ fn build_chat_prompt(
         if !context.existing_edges.is_empty() {
             prompt.push_str("\nConnections:\n");
             for e in context.existing_edges.iter().take(20) {
+                let color_tag = match (&e.color, &e.color_category) {
+                    (Some(c), Some(cat)) => format!(" [color: {} ({})]", c, cat),
+                    (Some(c), None) => format!(" [color: {}]", c),
+                    _ => String::new(),
+                };
                 prompt.push_str(&format!(
-                    "- `{}` --[{} · {}]--> `{}` ({})\n",
-                    e.from, e.relation, e.label, e.to, e.note
+                    "- edge_id: `{}` | `{}` --[{} · {}]--> `{}`{} ({})\n",
+                    e.edge_id, e.from, e.relation, e.label, e.to, color_tag, e.note
                 ));
             }
         }
@@ -708,6 +730,14 @@ impl LlmProvider for MockLlmProvider {
                     answer: Some(answer_text),
                     media_url: None,
                     source_nodes: vec![primary.node_id.clone()],
+                    quiz_questions: vec![],
+                    text_font: None,
+                    text_size: None,
+                    x: None,
+                    y: None,
+                    pos: None,
+                    width: None,
+                    height: None,
                 });
 
                 ops.push(PatchOp::CreateStudyNode {
@@ -721,6 +751,14 @@ impl LlmProvider for MockLlmProvider {
                     answer: None,
                     media_url: None,
                     source_nodes: vec![primary.node_id.clone()],
+                    quiz_questions: vec![],
+                    text_font: None,
+                    text_size: None,
+                    x: None,
+                    y: None,
+                    pos: None,
+                    width: None,
+                    height: None,
                 });
 
                 ops.push(PatchOp::ProposeConnection {
@@ -731,6 +769,8 @@ impl LlmProvider for MockLlmProvider {
                     note: "Auto-generated active recall prompt.".into(),
                     evidence: vec![],
                     confidence: 0.91,
+                    color: Some("example".into()),
+                    color_category: Some("Recall Practice".into()),
                 });
 
                 return Ok(GraphPatch {
@@ -756,6 +796,8 @@ impl LlmProvider for MockLlmProvider {
                 ),
                 evidence: vec![format!("Overlap identified between {} and {}", n1.title, n2.title)],
                 confidence: 0.88,
+                color: Some("supporting".into()),
+                color_category: Some("Core Evidence".into()),
             });
 
             // 2. Propose a synthesis node
@@ -770,6 +812,11 @@ impl LlmProvider for MockLlmProvider {
                     n2.summary.as_deref().unwrap_or("Related document")
                 ),
                 source_nodes: vec![n1.node_id.clone(), n2.node_id.clone()],
+                x: None,
+                y: None,
+                pos: None,
+                width: None,
+                height: None,
             });
 
             ops.push(PatchOp::ProposeConnection {
@@ -780,6 +827,8 @@ impl LlmProvider for MockLlmProvider {
                 note: "Synthesized source input.".into(),
                 evidence: vec![],
                 confidence: 0.95,
+                color: Some("synthesis".into()),
+                color_category: Some("Synthesis".into()),
             });
         } else if let Some(n1) = context.focus_nodes.first() {
             // Single focused node: generate summary if missing
@@ -800,6 +849,8 @@ impl LlmProvider for MockLlmProvider {
                     note: format!("{} deepens the discussion initiated in {}.", nbr.title, n1.title),
                     evidence: vec![],
                     confidence: 0.78,
+                    color: Some("theory".into()),
+                    color_category: Some("Concept Extension".into()),
                 });
             }
         }
@@ -1052,6 +1103,9 @@ impl LlmProvider for MockLlmProvider {
                     title: Some(format!("Image: {}", q.chars().take(36).collect::<String>())),
                     count: 1,
                     source_nodes: source_ids,
+                    x: None,
+                    y: None,
+                    pos: None,
                 }],
             };
             return Ok(ChatActionResponse {
@@ -1059,6 +1113,74 @@ impl LlmProvider for MockLlmProvider {
                 patch: Some(patch),
                 parse_warning: None,
             });
+        }
+
+        if ql.contains("arrange")
+            || ql.contains("organize")
+            || ql.contains("layout")
+            || ql.contains("scheme")
+            || ql.contains("mindmap")
+            || ql.contains("flowchart")
+            || ql.contains("hierarchy")
+            || ql.contains("organiza")
+            || ql.contains("esquema")
+            || ql.contains("ordena")
+        {
+            let layout = if ql.contains("radial") || ql.contains("mindmap") {
+                "radial"
+            } else if ql.contains("flow") || ql.contains("flowchart") || ql.contains("horizontal") {
+                "flow"
+            } else if ql.contains("grid") {
+                "grid"
+            } else {
+                "hierarchy"
+            };
+            let root = context.focus_nodes.first().map(|n| n.node_id.clone());
+            let patch = GraphPatch {
+                summary: format!("Arranged canvas into {} scheme", layout),
+                ops: vec![PatchOp::ArrangeNodes {
+                    positions: Vec::new(),
+                    layout: Some(layout.to_string()),
+                    node_ids: Vec::new(),
+                    root_node: root,
+                    origin_x: Some(120.0),
+                    origin_y: Some(100.0),
+                    spacing_x: None,
+                    spacing_y: None,
+                    columns: None,
+                }],
+            };
+            return Ok(ChatActionResponse {
+                reply: format!("Organized the canvas nodes into a clean **{}** scheme.", layout),
+                patch: Some(patch),
+                parse_warning: None,
+            });
+        }
+
+        if ql.contains("move") || ql.contains("reposition") || ql.contains("mover") || ql.contains("ubicar") {
+            if let Some(target) = context.focus_nodes.first() {
+                let patch = GraphPatch {
+                    summary: format!("Moved {}", target.title),
+                    ops: vec![PatchOp::MoveNode {
+                        node_id: target.node_id.clone(),
+                        x: Some(target.pos[0] + 180.0),
+                        y: Some(target.pos[1] + 90.0),
+                        pos: None,
+                        dx: None,
+                        dy: None,
+                        relative_to: None,
+                        placement: None,
+                        gap: None,
+                        width: None,
+                        height: None,
+                    }],
+                };
+                return Ok(ChatActionResponse {
+                    reply: format!("Repositioned **{}** on the canvas.", target.title),
+                    patch: Some(patch),
+                    parse_warning: None,
+                });
+            }
         }
 
         if ql.contains("create") || ql.contains("add") || ql.contains("flashcard") || ql.contains("note") {
@@ -1088,6 +1210,14 @@ impl LlmProvider for MockLlmProvider {
                     answer: is_fc.then(|| "Review key concepts from the selected study nodes.".into()),
                     media_url: None,
                     source_nodes: source_ids,
+                    quiz_questions: vec![],
+                    text_font: None,
+                    text_size: None,
+                    x: None,
+                    y: None,
+                    pos: None,
+                    width: None,
+                    height: None,
                 }],
             };
             return Ok(ChatActionResponse {

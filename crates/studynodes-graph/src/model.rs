@@ -98,6 +98,10 @@ pub enum NodeKind {
     Calendar,
     /// Freehand canvas drawing / sketch card for handwritten notes, schemes & formulas
     Drawing,
+    /// Frameless floating canvas text annotation with customizable font and size
+    Text,
+    /// Interactive multi-question quiz node with choices, answers, and hints
+    Quiz,
 }
 
 impl NodeKind {
@@ -118,6 +122,8 @@ impl NodeKind {
             Self::Audio => "Audio",
             Self::Calendar => "Calendar",
             Self::Drawing => "Drawing",
+            Self::Text => "Text",
+            Self::Quiz => "Quiz",
         }
     }
 
@@ -138,6 +144,8 @@ impl NodeKind {
             Self::Audio => "#7fa99b",        // Muted sage audio/music
             Self::Calendar => "#c8a46d",     // Muted warm ochre schedule
             Self::Drawing => "#8fa8c8",      // Cool steel-blue freehand sketch
+            Self::Text => "#e5e5e0",         // Frameless floating typography
+            Self::Quiz => "#d9a74a",         // Interactive quiz amber
         }
     }
 }
@@ -206,7 +214,24 @@ pub struct DrawingStroke {
     pub width: f32,
 }
 
-/// Optional metadata extending specialized study nodes (`Flashcard`, `Excerpt`, `Formula`, `Sequence`, `Section`, `Video`, `Audio`, `Calendar`, `Drawing`).
+/// Interactive question item stored on a `Quiz` node.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuizQuestion {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, alias = "prompt", alias = "q")]
+    pub question: String,
+    #[serde(default, alias = "choices", alias = "answers")]
+    pub options: Vec<String>,
+    #[serde(default, alias = "correct", alias = "answer_index")]
+    pub correct_index: Option<usize>,
+    #[serde(default, alias = "explanation", alias = "solution")]
+    pub answer: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
+}
+
+/// Optional metadata extending specialized study nodes (`Flashcard`, `Excerpt`, `Formula`, `Sequence`, `Section`, `Video`, `Audio`, `Calendar`, `Drawing`, `Image`, `Text`, `Quiz`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct NodeMeta {
     /// Answer / back face for `Flashcard` cards.
@@ -278,6 +303,21 @@ pub struct NodeMeta {
     /// Freehand vector strokes for `Drawing` nodes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drawing_strokes: Vec<DrawingStroke>,
+    /// When true, `Image` cards render without card frame/header/controls (image-only).
+    #[serde(default)]
+    pub image_frameless: bool,
+    /// Font preset for `Text` nodes (`"sans"`, `"serif"`, `"mono"`, `"display"`, `"hand"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_font: Option<String>,
+    /// World-space base font size in points for `Text` nodes (defaults to 18.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_size: Option<f32>,
+    /// When true, `Text` nodes automatically resize their frame to fit their content.
+    #[serde(default)]
+    pub text_auto_fit: bool,
+    /// Question deck for `Quiz` nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quiz_questions: Vec<QuizQuestion>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -335,6 +375,46 @@ impl Node {
             tags: Vec::new(),
             ports,
             meta: NodeMeta::default(),
+        }
+    }
+
+    /// Effective world-space bounding box dimensions accounting for kind-specific defaults.
+    pub fn effective_size(&self) -> (f32, f32) {
+        if self.kind == NodeKind::Section {
+            let w = if self.size.0 >= 180.0 {
+                self.size.0
+            } else {
+                640.0
+            };
+            let h = if self.meta.section_framed {
+                if self.size.1 >= 120.0 {
+                    self.size.1
+                } else {
+                    400.0
+                }
+            } else {
+                44.0
+            };
+            (w, h)
+        } else if self.kind == NodeKind::Calendar {
+            match self.meta.calendar_view_mode {
+                CalendarViewMode::Week => (680.0, 200.0),
+                CalendarViewMode::Month => {
+                    if self.size.0 > 1.0
+                        && self.size.1 > 1.0
+                        && ((self.size.0 - Self::DEFAULT_WIDTH).abs() > 0.5
+                            || (self.size.1 - Self::DEFAULT_HEIGHT).abs() > 0.5)
+                    {
+                        self.size
+                    } else {
+                        (312.0, 286.0)
+                    }
+                }
+            }
+        } else if self.size.0 > 1.0 && self.size.1 > 1.0 {
+            self.size
+        } else {
+            (Self::DEFAULT_WIDTH, Self::DEFAULT_HEIGHT)
         }
     }
 
@@ -422,6 +502,94 @@ pub enum EdgeProvenance {
     Llm,
 }
 
+/// Semantic trace color presets grouped by relevance & study topic: `(id, label, hex)`.
+pub const TRACE_COLOR_PRESETS: &[(&str, &str, &str)] = &[
+    // Relevance
+    ("critical", "Critical", "#E06C75"),
+    ("core", "Core", "#D97757"),
+    ("supporting", "Supporting", "#6AB07A"),
+    ("reference", "Reference", "#7A8A9E"),
+    // Topics
+    ("theory", "Theory", "#5B9BD5"),
+    ("synthesis", "Synthesis", "#A37CE0"),
+    ("example", "Example", "#D9A74A"),
+    ("method", "Method", "#4DB6AC"),
+];
+
+/// Resolve a semantic preset name, alias, or `#RRGGBB` string into a normalized uppercase `#RRGGBB` hex color.
+pub fn resolve_trace_color_hex(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(hex_body) = trimmed.strip_prefix('#') {
+        if (hex_body.len() == 6 || hex_body.len() == 8)
+            && hex_body.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return Some(format!("#{}", hex_body.to_ascii_uppercase()));
+        }
+        if hex_body.len() == 3 && hex_body.chars().all(|c| c.is_ascii_hexdigit()) {
+            let mut full = String::with_capacity(7);
+            full.push('#');
+            for c in hex_body.chars() {
+                let u = c.to_ascii_uppercase();
+                full.push(u);
+                full.push(u);
+            }
+            return Some(full);
+        }
+        return None;
+    }
+
+    let norm = trimmed.to_ascii_lowercase().replace(['-', ' '], "_");
+    for &(id, _, hex) in TRACE_COLOR_PRESETS {
+        if norm == id {
+            return Some(hex.to_string());
+        }
+    }
+
+    let mapped = match norm.as_str() {
+        "high" | "important" | "urgent" | "warning" | "contradict" | "contradicts" | "red"
+        | "rose" => "#E06C75",
+        "key" | "main" | "primary" | "orange" | "terracotta" => "#D97757",
+        "medium" | "support" | "validates" | "proof" | "green" | "emerald" => "#6AB07A",
+        "low" | "minor" | "context" | "background" | "slate" | "gray" | "grey" => "#7A8A9E",
+        "concept" | "definition" | "explains" | "explanation" | "science" | "physics" | "blue" => {
+            "#5B9BD5"
+        }
+        "derived" | "summary" | "connection" | "abstract" | "purple" | "violet" => "#A37CE0",
+        "case" | "practice" | "quiz" | "application" | "history" | "amber" | "yellow" | "gold" => {
+            "#D9A74A"
+        }
+        "math" | "formula" | "code" | "algorithm" | "biology" | "teal" | "cyan" => "#4DB6AC",
+        _ => return None,
+    };
+    Some(mapped.to_string())
+}
+
+/// Optional semantic preset label matching `input` (used to populate `color_category`).
+pub fn resolve_trace_color_label(input: &str) -> Option<&'static str> {
+    let norm = input.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    for &(id, label, _) in TRACE_COLOR_PRESETS {
+        if norm == id {
+            return Some(label);
+        }
+    }
+    None
+}
+
+/// Default semantic trace color derived from `EdgeRelation` when trace colors are enabled and no override was set.
+pub fn default_relation_color_hex(rel: &EdgeRelation) -> Option<&'static str> {
+    match rel {
+        EdgeRelation::Supports => Some("#6AB07A"),
+        EdgeRelation::Contradicts => Some("#E06C75"),
+        EdgeRelation::Explains => Some("#5B9BD5"),
+        EdgeRelation::DerivedFrom => Some("#A37CE0"),
+        EdgeRelation::ExampleOf => Some("#D9A74A"),
+        EdgeRelation::RelatesTo | EdgeRelation::Custom(_) => None,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Edge {
     pub id: EdgeId,
@@ -435,6 +603,12 @@ pub struct Edge {
     /// When true, the edge text label pill is hidden on canvas to keep diagrams uncluttered.
     #[serde(default)]
     pub hide_label: bool,
+    /// Optional explicit `#RRGGBB` trace color assigned by user or AI (relevance / topic).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_hex: Option<String>,
+    /// Optional semantic tag explaining why the trace color was chosen (e.g. `"Critical"`, `"Theory"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_category: Option<String>,
 }
 
 impl Edge {
@@ -449,6 +623,8 @@ impl Edge {
             provenance: EdgeProvenance::User,
             status: EdgeStatus::Accepted,
             hide_label: false,
+            color_hex: None,
+            color_category: None,
         }
     }
 
@@ -469,6 +645,8 @@ impl Edge {
             provenance: EdgeProvenance::Llm,
             status: EdgeStatus::Proposed,
             hide_label: false,
+            color_hex: None,
+            color_category: None,
         }
     }
 }
@@ -491,6 +669,13 @@ mod tests {
         }"#;
         let edge: Edge = serde_json::from_str(legacy_edge_json).expect("legacy edge json");
         assert!(!edge.hide_label);
+        assert!(edge.color_hex.is_none());
+        assert!(edge.color_category.is_none());
+
+        assert_eq!(resolve_trace_color_hex("critical").as_deref(), Some("#E06C75"));
+        assert_eq!(resolve_trace_color_hex("Theory").as_deref(), Some("#5B9BD5"));
+        assert_eq!(resolve_trace_color_hex("#a1b2c3").as_deref(), Some("#A1B2C3"));
+        assert_eq!(default_relation_color_hex(&EdgeRelation::Supports), Some("#6AB07A"));
     }
 
     #[test]

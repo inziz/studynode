@@ -6,6 +6,7 @@ mod doc_reader;
 mod embed_webview;
 mod formula_math;
 mod i18n;
+mod icons;
 mod inspector_view;
 mod media_helper;
 mod project_io;
@@ -227,7 +228,25 @@ fn handle_app_key(s: &mut AppState, ev: &rune::KeyEvent, tx: &mut rune::Tx) -> b
         tx.toggle_full_screen();
         return true;
     }
+    if ev.key == rune::Key::Escape {
+        let had_menu = s.show_block_menu || s.show_ai_menu;
+        if had_menu {
+            s.show_block_menu = false;
+            s.show_ai_menu = false;
+            s.block_menu_anchor = None;
+            s.block_menu_spawn_world = None;
+            return true;
+        }
+        if tx.focused().is_some() {
+            tx.blur();
+            return true;
+        }
+    }
     if tx.focused().is_none() {
+        if ev.key == rune::Key::Delete && s.screen == AppScreen::Workspace {
+            s.delete_selected_or_empty_nodes();
+            return true;
+        }
         if ev.is_command('z') {
             if ev.mods.shift {
                 s.redo_graph();
@@ -2796,6 +2815,7 @@ mod tests {
                 answer: None,
                 summary: None,
                 media_url: None,
+                quiz_questions: None,
             }],
         };
         let res = rt.state.apply_ai_patch_with_undo(&patch);
@@ -2820,6 +2840,14 @@ mod tests {
                 answer: None,
                 media_url: None,
                 source_nodes: vec![],
+                quiz_questions: vec![],
+                text_font: None,
+                text_size: None,
+                x: None,
+                y: None,
+                pos: None,
+                width: None,
+                height: None,
             }],
         };
         let res2 = rt.state.apply_ai_patch_with_undo(&spawn_patch);
@@ -4140,5 +4168,1113 @@ mod tests {
             .ai_chat_messages
             .iter()
             .any(|m| m.text == "Alpha first chat topic"));
+    }
+
+    #[test]
+    fn test_zoom_text_and_markdown_scale_proportionally() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Zoom Text Scaling");
+
+        let note_id = rt.state.add_note_node(Some(WorldPos::new(140.0, 120.0)));
+        if let Some(n) = rt.state.graph.get_node_mut(&note_id) {
+            n.title = "Scale Note".into();
+            n.content = "# Zoom Heading\n\nBody paragraph text for zoom scaling check.".into();
+        }
+        rt.state.sync_edit_buffers_from_selected();
+
+        let text_id = rt
+            .state
+            .add_study_node(NodeKind::Text, Some(WorldPos::new(500.0, 120.0)));
+        if let Some(n) = rt.state.graph.get_node_mut(&text_id) {
+            n.content = "Line one\nLine two\nLine three".into();
+            n.meta.text_size = Some(18.0);
+        }
+        rt.state.sync_edit_buffers_from_selected();
+
+        rt.state.inspector_open = false;
+        rt.state.ai_panel_open = false;
+        rt.state.deselect_all();
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        let header_h_1 = element_rect(rt, &format!("node_header_{}", note_id.as_str()))[3];
+        let note_inner_1 = element_rect(rt, &format!("note_md_{}", note_id.as_str()))[3];
+        let text_inner_1 = element_rect(rt, &format!("text_body_{}", text_id.as_str()))[3];
+        assert!(note_inner_1 > 8.0 && text_inner_1 > 12.0);
+
+        // Live wheel zoom in past 2.5x using Ctrl+wheel
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::default()
+        };
+        for _ in 0..8 {
+            rt.wheel_event(WheelEvent::new(0.0, 120.0).at(400.0, 220.0).mods(ctrl));
+            rt.frame(1.0 / 60.0);
+        }
+        let live_z = rt.state.graph.viewport.zoom;
+        assert!(live_z > 2.0, "expected zoom > 2.0 after Ctrl+wheel in, got {live_z}");
+
+        let note_inner_live = element_rect(rt, &format!("note_md_{}", note_id.as_str()))[3];
+        let text_inner_live = element_rect(rt, &format!("text_body_{}", text_id.as_str()))[3];
+        assert!(
+            note_inner_live > note_inner_1 * 1.6,
+            "markdown text height must scale during live zoom ({note_inner_1} -> {note_inner_live})"
+        );
+        assert!(
+            text_inner_live > text_inner_1 * 1.6,
+            "free text height must scale during live zoom ({text_inner_1} -> {text_inner_live})"
+        );
+
+        // Commit / settle camera (3.0x explicit): text must keep scaling proportionally and NOT shrink
+        rt.state.flush_live_camera();
+        rt.state.cancel_smooth_zoom();
+        rt.state.graph.viewport.zoom = 3.0;
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        let header_h_3 = element_rect(rt, &format!("node_header_{}", note_id.as_str()))[3];
+        let note_inner_3 = element_rect(rt, &format!("note_md_{}", note_id.as_str()))[3];
+        let text_inner_3 = element_rect(rt, &format!("text_body_{}", text_id.as_str()))[3];
+        assert!(
+            header_h_3 > header_h_1 * 2.5,
+            "card header font/height must scale near 3x ({header_h_1} -> {header_h_3})"
+        );
+        assert!(
+            note_inner_3 > note_inner_1 * 2.2,
+            "settled markdown text at 3x must scale proportionally without capping ({note_inner_1} -> {note_inner_3})"
+        );
+        assert!(
+            text_inner_3 > text_inner_1 * 2.3,
+            "settled free text at 3x must scale proportionally ({text_inner_1} -> {text_inner_3})"
+        );
+    }
+
+    #[test]
+    fn test_scrollable_note_and_markdown_document_cards() {
+        let mut th = make_test_runtime();
+        let md_path = th._dir.path().join("long_notes.md");
+        let long_md = (0..40)
+            .map(|i| format!("- Scrollable bullet point entry number {i:02} with extra study detail"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&md_path, &long_md).expect("write long_notes.md");
+
+        let rt = &mut th.rt;
+        rt.state.create_project("Scrollable Cards");
+
+        let note_id = rt.state.add_note_node(Some(WorldPos::new(80.0, 80.0)));
+        if let Some(n) = rt.state.graph.get_node_mut(&note_id) {
+            n.title = "Long Note".into();
+            n.content = long_md.clone();
+        }
+        rt.state.sync_edit_buffers_from_selected();
+        let doc_id = rt
+            .state
+            .add_document_node(Some(WorldPos::new(420.0, 80.0)));
+        rt.state.ingest_file_into_node(&doc_id, &md_path);
+        rt.state.sync_edit_buffers_from_selected();
+        rt.state.deselect_all();
+        rt.state.inspector_open = false;
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        let scrolled_content_y = |rt: &Runtime<AppState>, key: &str| -> f32 {
+            let cr = element_rect(rt, key);
+            rt.elements()
+                .into_iter()
+                .filter(|e| {
+                    !e.exiting
+                        && e.key.as_deref() != Some(key)
+                        && e.rect[2] > 20.0
+                        && e.rect[3] > cr[3]
+                        && e.rect[0] >= cr[0] - 2.0
+                        && e.rect[0] + e.rect[2] <= cr[0] + cr[2] + 2.0
+                })
+                .map(|e| e.rect[1])
+                .fold(f32::INFINITY, f32::min)
+        };
+
+        // Unselected Note card scrolls cleanly via wheel without panning or zooming canvas
+        let note_key = format!("node_body_{}", note_id.as_str());
+        let note_md_key = format!("note_md_{}", note_id.as_str());
+        let nr = element_rect(rt, &note_key);
+        let (nx, ny) = (nr[0] + nr[2] * 0.5, nr[1] + nr[3] * 0.5);
+        let offset_before = rt.state.graph.viewport.offset;
+        let zoom_before_wheel = rt.state.graph.viewport.zoom;
+        let note_y_before = element_rect(rt, &note_md_key)[1];
+
+        rt.pointer_move(nx, ny);
+        rt.wheel_event(WheelEvent::new(0.0, -240.0).at(nx, ny).precise(true));
+        settle_frames(rt, 4);
+
+        assert_eq!(
+            rt.state.graph.viewport.offset, offset_before,
+            "plain wheel over Note card must scroll Note instead of panning canvas"
+        );
+        assert!(
+            (rt.state.graph.viewport.zoom - zoom_before_wheel).abs() < 1e-4,
+            "plain wheel over Note card must not zoom canvas"
+        );
+        let note_y_after = element_rect(rt, &note_md_key)[1];
+        assert!(
+            note_y_after < note_y_before - 20.0,
+            "Note content should scroll downward on wheel ({note_y_before} -> {note_y_after})"
+        );
+
+        // Selected Note keeps scrolling via wheel, while Ctrl+wheel still zooms canvas
+        rt.pointer_down(nx, ny);
+        rt.pointer_up(nx, ny);
+        settle_frames(rt, 4);
+        let zoom_before = rt.state.graph.viewport.zoom;
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::default()
+        };
+        rt.wheel_event(WheelEvent::new(0.0, 120.0).at(nx, ny).mods(ctrl));
+        settle_frames(rt, 4);
+        assert!(
+            rt.state.graph.viewport.zoom > zoom_before,
+            "Ctrl+wheel over scrollable card must still zoom canvas"
+        );
+
+        // Reset zoom and verify .md Document card also scrolls without panning canvas
+        rt.state.cancel_smooth_zoom();
+        rt.state.graph.viewport.zoom = 1.0;
+        rt.state.deselect_all();
+        rt.invalidate();
+        settle_frames(rt, 6);
+
+        let doc_key = format!("doc_md_scroll_{}", doc_id.as_str());
+        let dr = element_rect(rt, &doc_key);
+        let (dx, dy) = (dr[0] + dr[2] * 0.5, dr[1] + dr[3] * 0.5);
+        let doc_off_before = rt.state.graph.viewport.offset;
+        let doc_y_before = scrolled_content_y(rt, &doc_key);
+
+        rt.pointer_move(dx, dy);
+        rt.wheel_event(WheelEvent::new(0.0, -240.0).at(dx, dy).precise(true));
+        settle_frames(rt, 4);
+
+        assert_eq!(
+            rt.state.graph.viewport.offset, doc_off_before,
+            "plain wheel over .md Document card must not pan canvas"
+        );
+        let doc_y_after = scrolled_content_y(rt, &doc_key);
+        assert!(
+            doc_y_after < doc_y_before - 20.0,
+            ".md Document content should scroll downward on wheel ({doc_y_before} -> {doc_y_after})"
+        );
+    }
+
+    #[test]
+    fn test_compact_add_menu_and_right_click_canvas_spawn() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Add Menu Layout");
+        let existing_id = rt.state.add_note_node(Some(WorldPos::new(120.0, 120.0)));
+        rt.state.deselect_all();
+        rt.state.inspector_open = false;
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        // Dock toggle opens a wider-than-tall compact menu
+        click_key(rt, "btn_toggle_block_menu");
+        settle_frames(rt, 6);
+        assert!(rt.state.show_block_menu);
+        let menu_rect = element_rect(rt, "block_create_menu");
+        assert!(
+            menu_rect[2] > menu_rect[3],
+            "revamped add menu must be wider than tall: {:?}",
+            menu_rect
+        );
+        click_key(rt, "btn_toggle_block_menu");
+        settle_frames(rt, 4);
+        assert!(!rt.state.show_block_menu);
+
+        // Right-clicking over an existing Note node must NOT open the canvas add menu
+        let nr = element_rect(rt, &format!("node_body_{}", existing_id.as_str()));
+        let (nx, ny) = (nr[0] + nr[2] * 0.5, nr[1] + nr[3] * 0.5);
+        rt.pointer_move(nx, ny);
+        rt.secondary_down(nx, ny);
+        rt.secondary_up(nx, ny);
+        settle_frames(rt, 6);
+        assert!(
+            !rt.state.show_block_menu,
+            "right-clicking directly over a node card must not open the empty-canvas add menu"
+        );
+
+        // Right-clicking empty canvas space opens the menu anchored to the clicked point
+        let (rx, ry) = (860.0_f32, 460.0_f32);
+        rt.pointer_move(rx, ry);
+        rt.secondary_down(rx, ry);
+        rt.secondary_up(rx, ry);
+        settle_frames(rt, 6);
+        assert!(
+            rt.state.show_block_menu,
+            "right-clicking empty canvas space should open add menu"
+        );
+        let expected_world = rt.state.graph.viewport.screen_to_world(ScreenPos::new(rx, ry));
+
+        click_key(rt, "btn_add_text");
+        settle_frames(rt, 6);
+        assert!(!rt.state.show_block_menu);
+        let spawned = rt
+            .state
+            .graph
+            .nodes
+            .values()
+            .find(|n| n.kind == NodeKind::Text)
+            .expect("Text node spawned via context add menu");
+        assert!(
+            (spawned.pos.x - expected_world.x).abs() < 220.0
+                && (spawned.pos.y - expected_world.y).abs() < 160.0,
+            "spawned node {:?} should be near right-click world position {:?}",
+            spawned.pos,
+            expected_world
+        );
+    }
+
+    #[test]
+    fn test_delete_key_deletes_selected_or_empty_nodes() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Delete Key Behavior");
+
+        let pop_id = rt.state.add_note_node(Some(WorldPos::new(80.0, 80.0)));
+        if let Some(n) = rt.state.graph.get_node_mut(&pop_id) {
+            n.content = "Keep until selected".into();
+        }
+        let empty_note = rt.state.add_note_node(Some(WorldPos::new(400.0, 80.0)));
+        let empty_quiz = rt
+            .state
+            .add_study_node(NodeKind::Quiz, Some(WorldPos::new(720.0, 80.0)));
+        if let Some(n) = rt.state.graph.get_node_mut(&empty_quiz) {
+            n.meta.quiz_questions.clear();
+        }
+        let empty_sec = rt
+            .state
+            .add_study_node(NodeKind::Section, Some(WorldPos::new(80.0, 360.0)));
+        rt.state.sync_edit_buffers_from_selected();
+        rt.invalidate();
+        settle_frames(rt, 6);
+
+        // 1. Selected populated node is deleted on Supr/Delete without touching empty nodes
+        rt.state.select_node(pop_id.clone(), false);
+        rt.state.editing_node_id = None;
+        rt.invalidate();
+        settle_frames(rt, 4);
+        rt.key(KeyEvent {
+            key: Key::Delete,
+            mods: Mods::default(),
+        });
+        settle_frames(rt, 6);
+
+        assert!(rt.state.graph.get_node(&pop_id).is_none());
+        assert!(rt.state.graph.get_node(&empty_note).is_some());
+        assert!(rt.state.graph.get_node(&empty_quiz).is_some());
+        assert!(rt.state.graph.get_node(&empty_sec).is_some());
+
+        // 2. With nothing selected, Supr/Delete clears empty nodes while preserving populated ones
+        let keep_id = rt.state.add_note_node(Some(WorldPos::new(100.0, 100.0)));
+        if let Some(n) = rt.state.graph.get_node_mut(&keep_id) {
+            n.content = "Do not prune populated note".into();
+        }
+        rt.state.sync_edit_buffers_from_selected();
+        rt.state.deselect_all();
+        rt.invalidate();
+        settle_frames(rt, 4);
+        rt.key(KeyEvent {
+            key: Key::Delete,
+            mods: Mods::default(),
+        });
+        settle_frames(rt, 6);
+
+        assert!(rt.state.graph.get_node(&keep_id).is_some());
+        assert!(rt.state.graph.get_node(&empty_note).is_none());
+        assert!(rt.state.graph.get_node(&empty_quiz).is_none());
+        assert!(rt.state.graph.get_node(&empty_sec).is_none());
+    }
+
+    #[test]
+    fn test_trace_colors_toggle_inspector_and_ai_tool() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Trace Color Project");
+
+        let n1 = rt.state.add_note_node(Some(WorldPos::new(100.0, 120.0)));
+        let n2 = rt.state.add_note_node(Some(WorldPos::new(480.0, 120.0)));
+        rt.state.connect_nodes(&n1, &n2);
+        let eid = rt
+            .state
+            .graph
+            .edges
+            .values()
+            .next()
+            .expect("edge created")
+            .id
+            .clone();
+        rt.state.select_edge(eid.clone());
+        rt.state.inspector_open = true;
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        assert!(rt.state.reader_prefs.enable_trace_colors);
+        click_key(rt, "btn_edge_color_critical");
+        settle_frames(rt, 6);
+
+        let edge = rt.state.graph.get_edge(&eid).unwrap();
+        assert_eq!(edge.color_category.as_deref(), Some("Critical"));
+        assert!(edge.color_hex.is_some());
+
+        // Toggle off in Inspector, then toggle back on in Settings
+        click_key(rt, "btn_inspector_toggle_trace_colors");
+        settle_frames(rt, 6);
+        assert!(!rt.state.reader_prefs.enable_trace_colors);
+
+        rt.state.open_settings();
+        rt.invalidate();
+        settle_frames(rt, 6);
+        click_key(rt, "btn_toggle_trace_colors");
+        settle_frames(rt, 6);
+        assert!(rt.state.reader_prefs.enable_trace_colors);
+        rt.state.screen = AppScreen::Workspace;
+        rt.invalidate();
+        settle_frames(rt, 6);
+
+        // AI tool SetEdgeColor updates color + category cleanly
+        let patch_json = serde_json::json!({
+            "rationale": "Color trace by synthesis topic",
+            "ops": [{
+                "op": "set_edge_color",
+                "edge_id": eid.as_str(),
+                "color": "synthesis",
+                "color_category": "Synthesis"
+            }]
+        });
+        let patch: studynodes_graph::patch::GraphPatch =
+            serde_json::from_value(patch_json).expect("valid SetEdgeColor patch");
+        let res = rt.state.apply_ai_patch_with_undo(&patch);
+        assert_eq!(res.edges_colored, 1);
+        let updated = rt.state.graph.get_edge(&eid).unwrap();
+        assert_eq!(updated.color_category.as_deref(), Some("Synthesis"));
+        assert_eq!(
+            updated.color_hex.as_deref(),
+            studynodes_graph::model::resolve_trace_color_hex("synthesis").as_deref()
+        );
+    }
+
+    #[test]
+    fn test_frameless_and_resizable_image_node() {
+        const ONE_PX_PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let mut th = make_test_runtime();
+        let png_path = th._dir.path().join("diagram.png");
+        std::fs::write(&png_path, ONE_PX_PNG).expect("write diagram.png");
+
+        let rt = &mut th.rt;
+        rt.state.create_project("Frameless Image");
+        let img_id = rt
+            .state
+            .add_study_node(NodeKind::Image, Some(WorldPos::new(120.0, 100.0)));
+        rt.state.ingest_file_into_node(&img_id, &png_path);
+        rt.state.select_node(img_id.clone(), false);
+        rt.state.inspector_open = true;
+        rt.invalidate();
+        settle_frames(rt, 12);
+
+        let (w0, h0) = crate::state::node_world_size(rt.state.graph.get_node(&img_id).unwrap());
+        let grip = element_rect(rt, &format!("node_resize_{}", img_id.as_str()));
+        let (gx, gy) = (grip[0] + grip[2] * 0.5, grip[1] + grip[3] * 0.5);
+        let z = rt.state.graph.viewport.zoom;
+        rt.pointer_move(gx, gy);
+        rt.pointer_down(gx, gy);
+        rt.pointer_move(gx + 140.0 * z, gy + 90.0 * z);
+        rt.pointer_up(gx + 140.0 * z, gy + 90.0 * z);
+        settle_frames(rt, 8);
+
+        let (w1, h1) = crate::state::node_world_size(rt.state.graph.get_node(&img_id).unwrap());
+        assert!(
+            w1 > w0 + 90.0 && h1 > h0 + 50.0,
+            "Image node resize grip must enlarge image box: ({w0},{h0}) -> ({w1},{h1})"
+        );
+
+        let header_key = format!("node_header_{}", img_id.as_str());
+        assert!(rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some(header_key.as_str()) && !e.exiting));
+
+        click_key(rt, "btn_toggle_image_frame");
+        settle_frames(rt, 10);
+        assert!(rt.state.graph.get_node(&img_id).unwrap().meta.image_frameless);
+        assert!(
+            !rt.elements()
+                .iter()
+                .any(|e| e.key.as_deref() == Some(header_key.as_str()) && !e.exiting),
+            "frameless image mode must hide the card header chrome when image is loaded"
+        );
+    }
+
+    #[test]
+    fn test_frameless_text_node_font_and_size() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Frameless Text Test");
+        rt.state.inspector_open = true;
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        click_key(rt, "btn_toggle_block_menu");
+        settle_frames(rt, 6);
+        click_key(rt, "btn_add_text");
+        settle_frames(rt, 8);
+
+        let txt_id = rt
+            .state
+            .graph
+            .nodes
+            .values()
+            .find(|n| n.kind == NodeKind::Text)
+            .expect("Text node added")
+            .id
+            .clone();
+
+        // Frameless text node must never expose a card header chrome (selected or deselected)
+        assert!(!rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some(&format!("node_header_{}", txt_id.as_str()))));
+
+        if let Some(n) = rt.state.graph.get_node_mut(&txt_id) {
+            n.content = "Typography Heading".into();
+        }
+        rt.state.sync_edit_buffers_from_selected();
+        rt.state.select_node(txt_id.clone(), false);
+        rt.invalidate();
+        settle_frames(rt, 6);
+
+        click_key(rt, "btn_text_font_serif");
+        click_key(rt, "btn_text_size_36");
+        settle_frames(rt, 6);
+
+        let node = rt.state.graph.get_node(&txt_id).unwrap();
+        assert_eq!(node.meta.text_font.as_deref(), Some("serif"));
+        assert_eq!(node.meta.text_size, Some(36.0));
+        rt.state.deselect_all();
+        rt.invalidate();
+        settle_frames(rt, 4);
+        assert!(!rt
+            .elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some(&format!("node_header_{}", txt_id.as_str()))));
+    }
+
+    #[test]
+    fn test_quiz_node_interactive_hints_and_ai_ops() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Quiz Node Test");
+        rt.state.inspector_open = true;
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        click_key(rt, "btn_toggle_block_menu");
+        settle_frames(rt, 6);
+        click_key(rt, "btn_add_quiz");
+        settle_frames(rt, 8);
+
+        let quiz_id = rt
+            .state
+            .graph
+            .nodes
+            .values()
+            .find(|n| n.kind == NodeKind::Quiz)
+            .expect("Quiz node added")
+            .id
+            .clone();
+        assert_eq!(rt.state.graph.get_node(&quiz_id).unwrap().meta.quiz_questions.len(), 1);
+
+        // Add Q2 (index 1) and Q3 (index 2) via Inspector
+        rt.state.select_node(quiz_id.clone(), false);
+        rt.state.quiz_q_edit = rune::TextEdit::new("What is the powerhouse of the cell?");
+        rt.state.quiz_opts_edit = rune::TextEdit::new("Nucleus | Mitochondria | Ribosome");
+        rt.state.quiz_ans_edit = rune::TextEdit::new("Mitochondria produce ATP.");
+        rt.state.quiz_hint_edit = rune::TextEdit::new("Starts with M\nGenerates ATP");
+        rt.invalidate();
+        settle_frames(rt, 4);
+        click_key(rt, "quiz_new_correct_1");
+        click_key(rt, "btn_quiz_add_q");
+        settle_frames(rt, 6);
+
+        rt.state.quiz_q_edit = rune::TextEdit::new("Which ion triggers vesicle fusion?");
+        rt.state.quiz_opts_edit = rune::TextEdit::new("Calcium | Sodium");
+        rt.state.quiz_ans_edit = rune::TextEdit::new("Ca2+ influx.");
+        rt.invalidate();
+        settle_frames(rt, 4);
+        click_key(rt, "btn_quiz_add_q");
+        settle_frames(rt, 6);
+
+        assert_eq!(rt.state.graph.get_node(&quiz_id).unwrap().meta.quiz_questions.len(), 3);
+
+        // Append extra hint onto Q2 (index 1) via +H button
+        rt.state.quiz_hint_edit = rune::TextEdit::new("Double membrane");
+        rt.invalidate();
+        settle_frames(rt, 4);
+        click_key(rt, "quiz_add_hint_1");
+        settle_frames(rt, 6);
+        assert_eq!(
+            rt.state.graph.get_node(&quiz_id).unwrap().meta.quiz_questions[1]
+                .hints
+                .len(),
+            3
+        );
+
+        // Step from Q3 (index 2) back to Q2 (index 1), reveal hint, select option, reveal explanation
+        click_key(rt, &format!("quiz_prev_{}", quiz_id.as_str()));
+        click_key(rt, &format!("quiz_hint_btn_{}", quiz_id.as_str()));
+        click_key(rt, &format!("quiz_opt_{}_1_1", quiz_id.as_str()));
+        click_key(rt, &format!("quiz_ans_btn_{}", quiz_id.as_str()));
+        settle_frames(rt, 6);
+
+        let sess = rt.state.quiz_sessions.get(&quiz_id).unwrap();
+        assert_eq!(sess.active_index, 1);
+        assert_eq!(sess.revealed_hints.get(&1), Some(&1));
+        assert_eq!(sess.selected_options.get(&1), Some(&1));
+        assert!(sess.revealed_answers.contains(&1));
+
+        // AI ops create & remove Quiz questions cleanly (3 + 1 - 1 = 3)
+        let ai_patch: studynodes_graph::patch::GraphPatch = serde_json::from_value(serde_json::json!({
+            "rationale": "Update quiz deck",
+            "ops": [
+                {
+                    "op": "add_quiz_question",
+                    "node_id": quiz_id.as_str(),
+                    "question": "Fourth question?",
+                    "options": ["Yes", "No"],
+                    "correct_index": 0,
+                    "answer": "Yes.",
+                    "hints": ["Hint 1"]
+                },
+                {
+                    "op": "remove_quiz_question",
+                    "node_id": quiz_id.as_str(),
+                    "question_index": 0
+                }
+            ]
+        }))
+        .expect("valid quiz ops patch");
+        let res = rt.state.apply_ai_patch_with_undo(&ai_patch);
+        assert!(res.quiz_questions_changed >= 2);
+        assert_eq!(rt.state.graph.get_node(&quiz_id).unwrap().meta.quiz_questions.len(), 3);
+    }
+
+    #[test]
+    fn test_draggable_dock_and_vertical_icon_only_mode() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Draggable Dock");
+        rt.state.inspector_open = false;
+        rt.state.ai_panel_open = false;
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        let handle = element_rect(rt, "dock_drag_handle");
+        let (hx, hy) = (handle[0] + handle[2] * 0.5, handle[1] + handle[3] * 0.5);
+
+        // Drag dock to left edge -> auto-snaps vertical DockPosition::Left and removes labels (narrow width)
+        rt.pointer_move(hx, hy);
+        rt.pointer_down(hx, hy);
+        rt.pointer_move(20.0, 360.0);
+        rt.pointer_up(20.0, 360.0);
+        settle_frames(rt, 10);
+
+        assert_eq!(rt.state.reader_prefs.dock_position, doc_reader::DockPosition::Left);
+        let vert_dock = element_rect(rt, "canvas_floating_dock");
+        assert!(
+            vert_dock[2] < 72.0,
+            "vertical dock must drop icon labels so it stays narrow (<72px), got {:?}",
+            vert_dock
+        );
+
+        // Drag vertical dock back toward middle of canvas -> custom floating horizontal bar
+        let vhandle = element_rect(rt, "dock_drag_handle");
+        let (vx, vy) = (vhandle[0] + vhandle[2] * 0.5, vhandle[1] + vhandle[3] * 0.5);
+        rt.pointer_move(vx, vy);
+        rt.pointer_down(vx, vy);
+        rt.pointer_move(480.0, 220.0);
+        rt.pointer_up(480.0, 220.0);
+        settle_frames(rt, 10);
+
+        assert!(
+            rt.state.reader_prefs.dock_custom_pos.is_some(),
+            "dropping dock away from edges must retain custom floating coordinates"
+        );
+        let custom_dock = element_rect(rt, "canvas_floating_dock");
+        assert!(
+            custom_dock[0] > 200.0 && custom_dock[1] < 400.0 && custom_dock[2] > custom_dock[3],
+            "custom middle placement should render horizontal dock near drop target: {:?}",
+            custom_dock
+        );
+    }
+
+    #[test]
+    fn test_frameless_text_auto_fit_and_fit_button() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Text Auto-Fit");
+        let txt_id = rt
+            .state
+            .add_study_node(NodeKind::Text, Some(WorldPos::new(180.0, 140.0)));
+        rt.state.select_node(txt_id.clone(), false);
+        rt.state.inspector_open = true;
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        let (w0, h0) = crate::state::node_world_size(rt.state.graph.get_node(&txt_id).unwrap());
+
+        if let Some(n) = rt.state.graph.get_node_mut(&txt_id) {
+            n.content = "Frameless Heading\nA much longer second line for fit measurement\nThird line".into();
+        }
+        rt.state.sync_edit_buffers_from_selected();
+        rt.invalidate();
+        settle_frames(rt, 6);
+
+        click_key(rt, "btn_text_fit_now");
+        settle_frames(rt, 6);
+        let (w_fit, h_fit) =
+            crate::state::node_world_size(rt.state.graph.get_node(&txt_id).unwrap());
+        assert!(
+            w_fit > w0 + 40.0 || h_fit > h0 + 20.0,
+            "Fit-to-content should resize text bounds to content: ({w0},{h0}) -> ({w_fit},{h_fit})"
+        );
+
+        click_key(rt, "btn_text_auto_fit");
+        settle_frames(rt, 6);
+        assert!(rt.state.graph.get_node(&txt_id).unwrap().meta.text_auto_fit);
+
+        click_key(rt, "btn_text_size_36");
+        settle_frames(rt, 8);
+        let (w_big, h_big) =
+            crate::state::node_world_size(rt.state.graph.get_node(&txt_id).unwrap());
+        assert!(
+            w_big > w_fit + 20.0 || h_big > h_fit + 15.0,
+            "Auto-fit should expand text bounds when font size increases: ({w_fit},{h_fit}) -> ({w_big},{h_big})"
+        );
+
+        if let Some(n) = rt.state.graph.get_node_mut(&txt_id) {
+            n.content = "Hi".into();
+        }
+        rt.state.sync_edit_buffers_from_selected();
+        rt.invalidate();
+        settle_frames(rt, 6);
+        click_key(rt, &format!("text_fit_{}", txt_id.as_str()));
+        settle_frames(rt, 6);
+        let (w_short, _) =
+            crate::state::node_world_size(rt.state.graph.get_node(&txt_id).unwrap());
+        assert!(
+            w_short < w_big - 40.0,
+            "Canvas Fit pill should shrink bounds to short text: {w_big} -> {w_short}"
+        );
+
+        // Manual corner resize turns auto-fit off so user sizing sticks
+        let grip = element_rect(rt, &format!("node_resize_{}", txt_id.as_str()));
+        let (gx, gy) = (grip[0] + grip[2] * 0.5, grip[1] + grip[3] * 0.5);
+        let z = rt.state.graph.viewport.zoom;
+        rt.pointer_move(gx, gy);
+        rt.pointer_down(gx, gy);
+        rt.pointer_move(gx + 100.0 * z, gy + 50.0 * z);
+        rt.pointer_up(gx + 100.0 * z, gy + 50.0 * z);
+        settle_frames(rt, 6);
+        assert!(
+            !rt.state.graph.get_node(&txt_id).unwrap().meta.text_auto_fit,
+            "manual resize must turn off text_auto_fit"
+        );
+    }
+
+    #[test]
+    fn test_block_menu_square_tiles_and_phosphor_icons() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Square Menu");
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        click_key(rt, "btn_toggle_block_menu");
+        settle_frames(rt, 6);
+
+        let menu = element_rect(rt, "block_create_menu");
+        assert!(
+            menu[2] > menu[3],
+            "block menu must remain wider than tall: {:?}",
+            menu
+        );
+
+        for key in [
+            "btn_add_menu_note",
+            "btn_add_text",
+            "btn_add_menu_doc",
+            "btn_add_image",
+            "btn_add_section",
+            "btn_add_drawing",
+            "btn_add_flashcard",
+            "btn_add_quiz",
+            "btn_add_excerpt",
+            "btn_add_checklist",
+            "btn_add_formula",
+            "btn_add_sequence",
+            "btn_add_video",
+            "btn_add_audio",
+            "btn_add_calendar",
+        ] {
+            let r = rt
+                .elements()
+                .into_iter()
+                .rev()
+                .find(|e| {
+                    e.key.as_deref() == Some(key)
+                        && !e.exiting
+                        && e.rect[0] >= menu[0] - 1.0
+                        && e.rect[1] >= menu[1] - 1.0
+                        && e.rect[0] + e.rect[2] <= menu[0] + menu[2] + 1.0
+                        && e.rect[1] + e.rect[3] <= menu[1] + menu[3] + 1.0
+                })
+                .unwrap_or_else(|| panic!("missing menu tile '{key}' inside block_create_menu"))
+                .rect;
+            assert!(
+                r[2] >= 68.0 && r[3] >= 68.0 && (r[2] - r[3]).abs() <= 24.0,
+                "tile '{key}' should be near-square icon-above-label card, got {:?}",
+                r
+            );
+        }
+    }
+
+    #[test]
+    fn test_dock_auto_orient_toggle_and_corner_behavior() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Dock Corner & Toggle");
+        rt.state.inspector_open = false;
+        rt.state.ai_panel_open = false;
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        let dock0 = element_rect(rt, "canvas_floating_dock");
+        assert!(
+            dock0[2] < 430.0,
+            "horizontal dock must remain compact (<430px), got {:?}",
+            dock0
+        );
+
+        // Dragging into top-left corner must NOT flip vertical
+        let h0 = element_rect(rt, "dock_drag_handle");
+        rt.pointer_move(h0[0] + h0[2] * 0.5, h0[1] + h0[3] * 0.5);
+        rt.pointer_down(h0[0] + h0[2] * 0.5, h0[1] + h0[3] * 0.5);
+        rt.pointer_move(20.0, 48.0);
+        rt.pointer_up(20.0, 48.0);
+        settle_frames(rt, 8);
+        let corner_dock = element_rect(rt, "canvas_floating_dock");
+        assert!(
+            corner_dock[2] > corner_dock[3],
+            "dropping dock in corner band must stay horizontal, got {:?}",
+            corner_dock
+        );
+
+        // Toggle off automatic vertical orientation via dock button -> mid-left stays horizontal
+        click_key(rt, "btn_dock_auto_orient");
+        settle_frames(rt, 4);
+        assert!(!rt.state.reader_prefs.dock_auto_orient);
+
+        let h1 = element_rect(rt, "dock_drag_handle");
+        rt.pointer_move(h1[0] + h1[2] * 0.5, h1[1] + h1[3] * 0.5);
+        rt.pointer_down(h1[0] + h1[2] * 0.5, h1[1] + h1[3] * 0.5);
+        rt.pointer_move(20.0, 360.0);
+        rt.pointer_up(20.0, 360.0);
+        settle_frames(rt, 8);
+        let manual_edge = element_rect(rt, "canvas_floating_dock");
+        assert!(
+            manual_edge[2] > manual_edge[3],
+            "when dock_auto_orient is off, dragging to side edge must keep horizontal bar: {:?}",
+            manual_edge
+        );
+
+        // Re-enable in Settings -> dragging to mid-left snaps vertical again
+        click_key(rt, "btn_open_settings");
+        settle_frames(rt, 6);
+        click_key(rt, "btn_toggle_dock_auto_orient");
+        settle_frames(rt, 6);
+        assert!(rt.state.reader_prefs.dock_auto_orient);
+        rt.state.close_settings();
+        rt.invalidate();
+        settle_frames(rt, 6);
+
+        let h2 = element_rect(rt, "dock_drag_handle");
+        rt.pointer_move(h2[0] + h2[2] * 0.5, h2[1] + h2[3] * 0.5);
+        rt.pointer_down(h2[0] + h2[2] * 0.5, h2[1] + h2[3] * 0.5);
+        rt.pointer_move(20.0, 360.0);
+        rt.pointer_up(20.0, 360.0);
+        settle_frames(rt, 8);
+        assert_eq!(
+            rt.state.reader_prefs.dock_position,
+            doc_reader::DockPosition::Left
+        );
+        let vert_dock = element_rect(rt, "canvas_floating_dock");
+        assert!(vert_dock[2] < 72.0);
+    }
+
+    #[test]
+    fn test_ai_chat_tabs_project_style_and_autogrow_composer() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("AI Chat Composer");
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        click_key(rt, "btn_ai_open_chat");
+        settle_frames(rt, 8);
+
+        let tabs_bar = element_rect(rt, "ai_chat_tabs_bar");
+        assert!(
+            (tabs_bar[3] - 35.0).abs() <= 2.5,
+            "AI chat tab strip must match 35px project tab bar height: {:?}",
+            tabs_bar
+        );
+
+        click_key(rt, "btn_new_ai_chat_tab");
+        settle_frames(rt, 8);
+        assert_eq!(rt.state.graph.chat_threads.len(), 2);
+        let tab0 = element_rect(rt, "ai_chat_tab_shell_0");
+        let tab1 = element_rect(rt, "ai_chat_tab_shell_1");
+        assert!((tab0[3] - 35.0).abs() <= 2.5 && (tab1[3] - 35.0).abs() <= 2.5);
+        click_key(rt, "ai_chat_tab_0");
+        settle_frames(rt, 4);
+        assert_eq!(
+            rt.state.graph.active_chat_id.as_deref(),
+            Some(rt.state.graph.chat_threads[0].id.as_str())
+        );
+
+        let bar_before = element_rect(rt, "ai_chat_prompt_bar");
+        click_key(rt, "ai_chat_input");
+        rt.paste("Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6");
+        settle_frames(rt, 18);
+        let bar_grown = element_rect(rt, "ai_chat_prompt_bar");
+        assert!(
+            bar_grown[3] > bar_before[3] + 20.0,
+            "adding newlines to AI composer should make prompt bar taller: {:?} -> {:?}",
+            bar_before,
+            bar_grown
+        );
+
+        rt.paste("\nL7\nL8\nL9\nL10\nL11\nL12\nL13\nL14\nL15\nL16\nL17\nL18\nL19\nL20");
+        settle_frames(rt, 18);
+        let bar_capped = element_rect(rt, "ai_chat_prompt_bar");
+        assert!(
+            bar_capped[3] <= 240.0,
+            "AI composer height growth must cap cleanly instead of growing unbounded: {:?}",
+            bar_capped
+        );
+    }
+
+    #[test]
+    fn test_quiz_add_question_real_click_and_typing() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Quiz Real Click Test");
+        let quiz_id = rt
+            .state
+            .add_study_node(NodeKind::Quiz, Some(WorldPos::new(160.0, 140.0)));
+        if let Some(n) = rt.state.graph.get_node_mut(&quiz_id) {
+            n.meta.quiz_questions.clear();
+        }
+        rt.state.select_node(quiz_id.clone(), false);
+        rt.state.inspector_open = true;
+        rt.state.ai_panel_open = false;
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        // Empty submit warns cleanly instead of doing nothing silently
+        click_key(rt, "btn_quiz_add_q");
+        settle_frames(rt, 4);
+        assert!(
+            rt.state
+                .graph
+                .get_node(&quiz_id)
+                .unwrap()
+                .meta
+                .quiz_questions
+                .is_empty()
+        );
+        assert!(rt.state.toast_text.is_some());
+
+        // Real pointer clicks + text entry into the 4 bordered Quiz inputs
+        click_key(rt, "quiz_q_edit");
+        rt.paste("What stores genetic information?");
+        settle_frames(rt, 3);
+
+        click_key(rt, "quiz_opts_edit");
+        rt.paste("DNA | Lipid | Glucose");
+        settle_frames(rt, 3);
+
+        click_key(rt, "quiz_new_correct_0");
+
+        click_key(rt, "quiz_ans_edit");
+        rt.paste("DNA encodes hereditary info.");
+        settle_frames(rt, 3);
+
+        click_key(rt, "quiz_hint_edit");
+        rt.paste("Double helix");
+        settle_frames(rt, 3);
+
+        // Re-selecting the same Quiz node preserves active form drafts
+        rt.state.select_node(quiz_id.clone(), false);
+        assert_eq!(rt.state.quiz_q_edit.text, "What stores genetic information?");
+
+        click_key(rt, "btn_quiz_add_q");
+        settle_frames(rt, 6);
+
+        let qs = &rt
+            .state
+            .graph
+            .get_node(&quiz_id)
+            .unwrap()
+            .meta
+            .quiz_questions;
+        assert_eq!(qs.len(), 1);
+        assert_eq!(qs[0].question, "What stores genetic information?");
+        assert_eq!(
+            qs[0].options,
+            vec!["DNA".to_string(), "Lipid".to_string(), "Glucose".to_string()]
+        );
+        assert_eq!(qs[0].correct_index, Some(0));
+        assert_eq!(qs[0].answer, "DNA encodes hereditary info.");
+        assert_eq!(qs[0].hints, vec!["Double helix".to_string()]);
+        assert!(rt.state.quiz_q_edit.text.is_empty());
+    }
+
+    #[test]
+    fn test_ai_move_and_arrange_scheme_with_undo() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("AI Spatial Scheme");
+
+        let a_id = rt.state.add_note_node(Some(WorldPos::new(100.0, 100.0)));
+        let b_id = rt.state.add_note_node(Some(WorldPos::new(100.0, 100.0)));
+        if let Some(n) = rt.state.graph.get_node_mut(&a_id) {
+            n.title = "Core Theory".into();
+        }
+        if let Some(n) = rt.state.graph.get_node_mut(&b_id) {
+            n.title = "Supporting Evidence".into();
+        }
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        // 1. Create a node at explicit pos, move existing node A, move B relative to A, and link them
+        let patch_json = serde_json::json!({
+            "summary": "Build clean scheme layout",
+            "ops": [
+                {
+                    "op": "create_study_node",
+                    "temp_id": "tmp_quiz",
+                    "kind": "Quiz",
+                    "title": "Practice Check",
+                    "x": 460.0,
+                    "y": 100.0
+                },
+                {
+                    "op": "move_node",
+                    "node_id": a_id.as_str(),
+                    "x": 120.0,
+                    "y": 100.0
+                },
+                {
+                    "op": "move_node",
+                    "node_id": b_id.as_str(),
+                    "relative_to": a_id.as_str(),
+                    "placement": "below",
+                    "gap": 80.0
+                },
+                {
+                    "op": "propose_connection",
+                    "from_node": a_id.as_str(),
+                    "to_node": b_id.as_str(),
+                    "relation": "supports",
+                    "label": "Evidence"
+                },
+                {
+                    "op": "propose_connection",
+                    "from_node": a_id.as_str(),
+                    "to_node": "tmp_quiz",
+                    "relation": "derived_from",
+                    "label": "Test"
+                }
+            ]
+        });
+        let patch1: studynodes_graph::patch::GraphPatch = serde_json::from_value(patch_json).unwrap();
+        let res1 = rt.state.apply_ai_patch_with_undo(&patch1);
+        assert_eq!(res1.dropped_ops_count, 0);
+        assert_eq!(res1.new_nodes.len(), 1);
+        assert_eq!(res1.nodes_moved, 2);
+        let q_id = res1.new_nodes[0].id.clone();
+
+        rt.invalidate();
+        settle_frames(rt, 6);
+        let ra = element_rect(rt, a_id.as_str());
+        let rb = element_rect(rt, b_id.as_str());
+        let rq = element_rect(rt, q_id.as_str());
+        assert!(rb[1] > ra[1] + ra[3], "B should render below A: A={ra:?}, B={rb:?}");
+        assert!(rq[0] > ra[0] + ra[2], "Quiz should render right of A: A={ra:?}, Q={rq:?}");
+
+        let pos_b_before_arrange = rt.state.graph.get_node(&b_id).unwrap().pos;
+
+        // 2. Arrange into hierarchy scheme
+        let arrange_json = serde_json::json!({
+            "summary": "Arrange as hierarchy",
+            "ops": [{
+                "op": "arrange_nodes",
+                "layout": "hierarchy",
+                "root_node": a_id.as_str(),
+                "origin_x": 140.0,
+                "origin_y": 90.0
+            }]
+        });
+        let patch2: studynodes_graph::patch::GraphPatch = serde_json::from_value(arrange_json).unwrap();
+        let res2 = rt.state.apply_ai_patch_with_undo(&patch2);
+        assert_eq!(res2.dropped_ops_count, 0);
+        assert_eq!(res2.nodes_moved, 3);
+        rt.invalidate();
+        settle_frames(rt, 6);
+
+        let all_ids = [a_id.clone(), b_id.clone(), q_id.clone()];
+        let rects: Vec<[f32; 4]> = all_ids
+            .iter()
+            .map(|id| element_rect(rt, id.as_str()))
+            .collect();
+        for i in 0..rects.len() {
+            for j in (i + 1)..rects.len() {
+                let r1 = rects[i];
+                let r2 = rects[j];
+                let overlap = r1[0] < r2[0] + r2[2] - 1.0
+                    && r1[0] + r1[2] > r2[0] + 1.0
+                    && r1[1] < r2[1] + r2[3] - 1.0
+                    && r1[1] + r1[3] > r2[1] + 1.0;
+                assert!(!overlap, "arranged canvas cards overlapped: {:?} vs {:?}", r1, r2);
+            }
+        }
+
+        // 3. Undo restores exact pre-arrange and pre-patch states
+        assert!(rt.state.undo_graph());
+        rt.invalidate();
+        settle_frames(rt, 4);
+        assert_eq!(rt.state.graph.get_node(&b_id).unwrap().pos, pos_b_before_arrange);
+
+        assert!(rt.state.undo_graph());
+        rt.invalidate();
+        settle_frames(rt, 4);
+        assert_eq!(rt.state.graph.nodes.len(), 2);
+        assert_eq!(rt.state.graph.get_node(&b_id).unwrap().pos, WorldPos::new(100.0, 100.0));
     }
 }

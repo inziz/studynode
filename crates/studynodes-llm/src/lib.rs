@@ -390,4 +390,117 @@ mod tests {
         let ant_p = AnthropicLlmProvider::new("sk-ant-demo", "https://api.anthropic.com/", None);
         assert_eq!(ant_p.messages_url(), "https://api.anthropic.com/v1/messages");
     }
+
+    #[test]
+    fn test_parse_trace_color_and_quiz_canvas_actions() {
+        let raw = r#"Added a quiz and highlighted the critical link.
+
+```canvas_actions
+{
+  "summary": "Create quiz & set trace color",
+  "ops": [
+    {
+      "op": "set_edge_color",
+      "edge_id": "edge_1",
+      "color": "critical",
+      "category": "Relevance: High"
+    },
+    {
+      "op": "create_study_node",
+      "temp_id": "quiz_1",
+      "kind": "Quiz",
+      "title": "Neurotransmitter Quiz",
+      "quiz_questions": [
+        {
+          "question": "Primary excitatory CNS neurotransmitter?",
+          "options": ["Glutamate", "GABA", "Glycine"],
+          "correct_index": 0,
+          "answer": "Glutamate depolarizes postsynaptic membranes.",
+          "hints": ["Think NMDA & AMPA receptor agonist."]
+        }
+      ]
+    },
+    {
+      "op": "add_quiz_question",
+      "node_id": "quiz_1",
+      "question": "Primary inhibitory neurotransmitter?",
+      "options": ["GABA", "Acetylcholine"],
+      "correct_index": 0,
+      "answer": "GABA opens Cl- channels.",
+      "hint": "Derived from glutamate via GAD"
+    }
+  ]
+}
+```"#;
+        let parsed = parse_chat_action_response(raw);
+        assert!(parsed.parse_warning.is_none());
+        let patch = parsed.patch.expect("expected trace color & quiz patch");
+        assert_eq!(patch.ops.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_llm_spatial_context_and_layout_actions() {
+        let mut graph = StudyGraph::new("Spatial Context");
+        let n1 = Node::new(NodeKind::Concept, "Hub Node", WorldPos::new(120.0, 80.0));
+        let mut n2 = Node::new(NodeKind::Section, "Group Section", WorldPos::new(50.0, 40.0));
+        n2.meta.section_framed = true;
+        n2.size = (640.0, 420.0);
+        let id1 = n1.id.clone();
+        let id2 = n2.id.clone();
+        graph.add_node(n1);
+        graph.add_node(n2);
+
+        let ctx = LlmContext::build_project_context(&graph, &[id1.clone(), id2.clone()], "Project Chat");
+        assert_eq!(ctx.focus_nodes[0].pos, [120.0, 80.0]);
+        assert_eq!(ctx.focus_nodes[0].size, [280.0, 180.0]);
+        assert_eq!(ctx.focus_nodes[1].pos, [50.0, 40.0]);
+        assert_eq!(ctx.focus_nodes[1].size, [640.0, 420.0]);
+
+        let prompt_txt = client::build_chat_prompt(&ctx, &[], "Arrange these");
+        assert!(prompt_txt.contains("pos: [120, 80], size: [280, 180]"));
+        assert!(prompt_txt.contains("pos: [50, 40], size: [640, 420]"));
+
+        // Mock provider handles organize/arrange and move requests
+        let arr_resp = MockLlmProvider
+            .ask_project_chat_with_actions(&ctx, &[], "Organize these into a mindmap scheme")
+            .await
+            .unwrap();
+        let arr_patch = arr_resp.patch.expect("expected arrange patch");
+        assert!(matches!(
+            arr_patch.ops.first(),
+            Some(studynodes_graph::patch::PatchOp::ArrangeNodes { layout: Some(l), .. }) if l == "radial"
+        ));
+
+        let mv_resp = MockLlmProvider
+            .ask_project_chat_with_actions(&ctx, &[], "Move Hub Node to a cleaner spot")
+            .await
+            .unwrap();
+        let mv_patch = mv_resp.patch.expect("expected move patch");
+        assert!(matches!(
+            mv_patch.ops.first(),
+            Some(studynodes_graph::patch::PatchOp::MoveNode { .. })
+        ));
+
+        // Parse real LLM JSON containing explicit pos, move_node, and move_nodes map
+        let raw = format!(
+            r#"Organized the diagram cleanly.
+
+```canvas_actions
+{{
+  "summary": "Arrange scheme",
+  "ops": [
+    {{ "op": "create_study_node", "temp_id": "tmp_c", "kind": "Note", "title": "Leaf", "x": 420.0, "y": 280.0 }},
+    {{ "op": "move_node", "node_id": "{}", "x": 100.0, "y": 100.0 }},
+    {{ "op": "move_nodes", "positions": {{ "{}": [500.0, 100.0], "tmp_c": {{ "x": 500.0, "y": 360.0 }} }} }}
+  ]
+}}
+```"#,
+            id1.as_str(),
+            id2.as_str()
+        );
+        let parsed = parse_chat_action_response(&raw);
+        assert!(parsed.parse_warning.is_none());
+        let p = parsed.patch.expect("spatial ops parsed");
+        assert_eq!(p.ops.len(), 3);
+    }
 }

@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use studynodes_graph::coords::{Camera, ScreenPos, WorldPos};
 use studynodes_graph::model::{
     CalendarEvent, CalendarViewMode, DrawingStroke, Edge, EdgeEndpoint, EdgeId, EdgeRelation,
-    EdgeStatus, MediaTimestamp, NodeId, NodeKind, PortDirection, PortId, SubtitleCue,
+    EdgeStatus, MediaTimestamp, Node, NodeId, NodeKind, PortDirection, PortId, QuizQuestion,
+    SubtitleCue, resolve_trace_color_hex, resolve_trace_color_label,
 };
 use studynodes_graph::{
     ChatMessage, ChatThread, CommandHistory, GraphCommand, ProjectBundle, StudyGraph,
@@ -156,6 +157,9 @@ pub enum CanvasMode {
         start_screen: ScreenPos,
         start_offset: WorldPos,
     },
+    DraggingDock {
+        start_pos: [f32; 2],
+    },
     DraggingNode {
         node_id: NodeId,
         start_pos: WorldPos,
@@ -182,6 +186,14 @@ pub enum CanvasMode {
     },
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QuizSessionState {
+    pub active_index: usize,
+    pub selected_options: HashMap<usize, usize>,
+    pub revealed_hints: HashMap<usize, usize>,
+    pub revealed_answers: HashSet<usize>,
+}
+
 /// Canonical canvas dimensions `(base_w, base_h)` per node kind so rendered cards and wire sockets match.
 pub fn node_base_size(kind: NodeKind) -> (f32, f32) {
     match kind {
@@ -200,6 +212,8 @@ pub fn node_base_size(kind: NodeKind) -> (f32, f32) {
         NodeKind::Audio => (288.0, 124.0),
         NodeKind::Calendar => (312.0, 286.0),
         NodeKind::Drawing => (320.0, 240.0),
+        NodeKind::Text => (240.0, 64.0),
+        NodeKind::Quiz => (320.0, 260.0),
     }
 }
 
@@ -208,10 +222,14 @@ pub fn node_base_size(kind: NodeKind) -> (f32, f32) {
 pub(crate) fn resizable_node_bounds(kind: NodeKind) -> Option<((f32, f32), (f32, f32))> {
     match kind {
         NodeKind::Note => Some(((200.0, 120.0), (960.0, 760.0))),
+        NodeKind::Document => Some(((220.0, 160.0), (960.0, 820.0))),
+        NodeKind::Image => Some(((120.0, 90.0), (1400.0, 1100.0))),
         NodeKind::Flashcard => Some(((210.0, 140.0), (860.0, 640.0))),
         NodeKind::Video => Some(((240.0, 176.0), (1280.0, 860.0))),
         NodeKind::Audio => Some(((230.0, 112.0), (900.0, 520.0))),
         NodeKind::Drawing => Some(((240.0, 180.0), (960.0, 720.0))),
+        NodeKind::Text => Some(((64.0, 28.0), (1200.0, 900.0))),
+        NodeKind::Quiz => Some(((250.0, 200.0), (960.0, 780.0))),
         _ => None,
     }
 }
@@ -275,17 +293,57 @@ pub fn node_world_size(node: &studynodes_graph::model::Node) -> (f32, f32) {
             node_base_size(NodeKind::Audio)
         }
     } else if let Some((min_sz, max_sz)) = resizable_node_bounds(node.kind) {
-        if !is_unmodified_default && node.size.0 >= 160.0 && node.size.1 >= 100.0 {
+        if !is_unmodified_default
+            && node.size.0 >= min_sz.0 - 0.5
+            && node.size.1 >= min_sz.1 - 0.5
+        {
             (
                 node.size.0.clamp(min_sz.0, max_sz.0),
                 node.size.1.clamp(min_sz.1, max_sz.1),
             )
+        } else if node.kind == NodeKind::Text && node.meta.text_auto_fit {
+            compute_text_node_fit_size(node)
         } else {
             node_base_size(node.kind)
         }
     } else {
         node_base_size(node.kind)
     }
+}
+
+/// Compute tight world `(width, height)` fitting a frameless `Text` node's content, font, and size.
+pub fn compute_text_node_fit_size(node: &studynodes_graph::model::Node) -> (f32, f32) {
+    let pt = node.meta.text_size.unwrap_or(18.0).clamp(10.0, 96.0);
+    let advance = match node.meta.text_font.as_deref().unwrap_or("sans") {
+        "mono" => 0.62_f32,
+        "serif" => 0.54,
+        "display" | "hand" => 0.58,
+        _ => 0.55,
+    };
+    let text_src = if node.content.trim().is_empty() {
+        "Text"
+    } else {
+        node.content.as_str()
+    };
+    let ((min_w, min_h), (max_w, max_h)) =
+        resizable_node_bounds(NodeKind::Text).unwrap_or(((64.0, 28.0), (1200.0, 900.0)));
+    let max_line_chars = text_src
+        .lines()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(4)
+        .max(2) as f32;
+    let ideal_w = (max_line_chars * pt * advance + 18.0).clamp(min_w, max_w);
+    let usable_w = (ideal_w - 10.0).max(16.0);
+    let chars_per_line = (usable_w / (pt * advance).max(1.0)).floor().max(1.0);
+    let mut wrapped_lines = 0_usize;
+    for raw_line in text_src.split('\n') {
+        let len = raw_line.chars().count();
+        wrapped_lines += ((len as f32) / chars_per_line).ceil().max(1.0) as usize;
+    }
+    let wrapped_lines = wrapped_lines.max(1) as f32;
+    let ideal_h = (wrapped_lines * pt * 1.28 + 10.0).clamp(min_h, max_h);
+    (ideal_w, ideal_h)
 }
 
 pub enum VisionJobResult {
@@ -433,6 +491,8 @@ pub struct AppState {
     #[allow(dead_code)]
     pub wire_draft: Option<ActiveWireDraft>,
     pub show_block_menu: bool,
+    pub block_menu_anchor: Option<ScreenPos>,
+    pub block_menu_spawn_world: Option<WorldPos>,
     pub show_ai_menu: bool,
     pub inspector_more_menu_open: bool,
     pub copied_feedback: Option<(&'static str, Instant)>,
@@ -510,6 +570,14 @@ pub struct AppState {
     pub drawing_stroke_width: f32,
     pub drawing_eraser: bool,
     pub dock_measured_size: Option<[f32; 2]>,
+
+    // Interactive Quiz card sessions & question composer buffers
+    pub quiz_sessions: HashMap<NodeId, QuizSessionState>,
+    pub quiz_q_edit: TextEdit,
+    pub quiz_opts_edit: TextEdit,
+    pub quiz_ans_edit: TextEdit,
+    pub quiz_hint_edit: TextEdit,
+    pub quiz_correct_idx: usize,
 
     // Performance caches & non-blocking background IO workers
     pub asset_path_cache: HashMap<String, PathBuf>,
@@ -740,6 +808,8 @@ impl AppState {
             card_image_previews: HashMap::new(),
             wire_draft: None,
             show_block_menu: false,
+            block_menu_anchor: None,
+            block_menu_spawn_world: None,
             show_ai_menu: false,
             inspector_more_menu_open: false,
             copied_feedback: None,
@@ -807,6 +877,12 @@ impl AppState {
             drawing_stroke_width: 2.6,
             drawing_eraser: false,
             dock_measured_size: None,
+            quiz_sessions: HashMap::new(),
+            quiz_q_edit: TextEdit::new(""),
+            quiz_opts_edit: TextEdit::new(""),
+            quiz_ans_edit: TextEdit::new(""),
+            quiz_hint_edit: TextEdit::new(""),
+            quiz_correct_idx: 0,
             asset_path_cache: HashMap::new(),
             doc_preview_cache: RefCell::new(HashMap::new()),
             pdf_dimensions_cache: HashMap::new(),
@@ -1484,6 +1560,9 @@ impl AppState {
                 let changed = node.title != title || node.content != content;
                 node.title = title;
                 node.content = content;
+                if changed && node.kind == NodeKind::Text && node.meta.text_auto_fit {
+                    node.size = compute_text_node_fit_size(node);
+                }
                 if self.inspector_title_edit.text != node.title {
                     self.inspector_title_edit = TextEdit::new(&node.title);
                 }
@@ -1516,6 +1595,9 @@ impl AppState {
                 let changed = node.title != title || node.content != content || answer_changed;
                 node.title = title;
                 node.content = content;
+                if changed && node.kind == NodeKind::Text && node.meta.text_auto_fit {
+                    node.size = compute_text_node_fit_size(node);
+                }
                 if node.kind == NodeKind::Flashcard && answer_changed {
                     node.meta.answer = if answer.trim().is_empty() {
                         None
@@ -2821,7 +2903,10 @@ impl AppState {
     /// Select a node and populate edit buffers (preserving active edits/caret when already singly selected).
     pub fn select_node(&mut self, id: NodeId, additive: bool) {
         self.flush_live_camera();
-        if !additive && self.selected_nodes.len() == 1 && self.selected_nodes.contains(&id) {
+        let same_single =
+            !additive && self.selected_nodes.len() == 1 && self.selected_nodes.contains(&id);
+        let was_selected = self.selected_nodes.contains(&id);
+        if same_single {
             let mut open_doc = false;
             let mut popout_sync = false;
             if let Some(n) = self.graph.get_node(&id) {
@@ -2849,6 +2934,8 @@ impl AppState {
         self.sync_node_edits();
         self.sync_edge_edits();
         self.show_block_menu = false;
+        self.block_menu_anchor = None;
+        self.block_menu_spawn_world = None;
         self.show_ai_menu = false;
         self.inspector_more_menu_open = false;
         if !additive {
@@ -2867,6 +2954,13 @@ impl AppState {
             self.media_url_edit = TextEdit::new(n.meta.media_url.as_deref().unwrap_or(""));
             self.media_ts_time_edit = TextEdit::new("");
             self.media_ts_label_edit = TextEdit::new("");
+            if !was_selected {
+                self.quiz_q_edit = TextEdit::new("");
+                self.quiz_opts_edit = TextEdit::new("");
+                self.quiz_ans_edit = TextEdit::new("");
+                self.quiz_hint_edit = TextEdit::new("");
+                self.quiz_correct_idx = 0;
+            }
             node_kind = Some(n.kind);
             if matches!(n.kind, NodeKind::Document | NodeKind::Image) {
                 if !self.inspector_popped_out {
@@ -2874,7 +2968,7 @@ impl AppState {
                 }
                 self.ai_panel_open = false;
                 self.editing_node_id = None;
-            } else if matches!(n.kind, NodeKind::Note | NodeKind::Formula) {
+            } else if matches!(n.kind, NodeKind::Note | NodeKind::Formula | NodeKind::Text) {
                 self.editing_node_id = Some(id.clone());
             } else {
                 self.editing_node_id = None;
@@ -2931,6 +3025,8 @@ impl AppState {
         self.sync_node_edits();
         self.sync_edge_edits();
         self.show_block_menu = false;
+        self.block_menu_anchor = None;
+        self.block_menu_spawn_world = None;
         self.show_ai_menu = false;
         self.inspector_more_menu_open = false;
         self.selected_nodes.clear();
@@ -3159,6 +3255,8 @@ impl AppState {
     /// Spawn a specialized Phase 2 study node with clean monochrome defaults.
     pub fn add_study_node(&mut self, kind: NodeKind, pos_opt: Option<WorldPos>) -> NodeId {
         self.show_block_menu = false;
+        self.block_menu_anchor = None;
+        self.block_menu_spawn_world = None;
         if kind == NodeKind::Excerpt && pos_opt.is_none() {
             if let Some(created) = self.create_excerpt_from_selected_doc(None) {
                 return created;
@@ -3217,6 +3315,22 @@ impl AppState {
                 let (ty, tm, _td) = media_helper::today_ymd();
                 node.meta.calendar_year = Some(ty);
                 node.meta.calendar_month = Some(tm);
+            }
+            NodeKind::Text => {
+                node.content.clear();
+                node.meta.text_font = Some("sans".into());
+                node.meta.text_size = Some(18.0);
+            }
+            NodeKind::Quiz => {
+                node.content.clear();
+                node.meta.quiz_questions = vec![QuizQuestion {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    question: "Which mechanism explains this concept best?".into(),
+                    options: vec!["Option A".into(), "Option B".into(), "Option C".into()],
+                    correct_index: Some(0),
+                    answer: "Option A captures the primary mechanism.".into(),
+                    hints: vec!["Review the key definition in your notes.".into()],
+                }];
             }
             _ => {}
         }
@@ -3558,13 +3672,17 @@ impl AppState {
             .build()
         {
             if let Ok(patch) = rt.block_on(provider.generate_patch(&context)) {
-                let res = self.graph.validate_and_stage_patch(&patch);
-                self.persist_graph_and_snapshot();
-                self.notify_toast(format!(
-                    "AI proposed {} link(s) & {} node(s)",
-                    res.proposed_edges.len(),
-                    res.new_nodes.len()
-                ));
+                let res = self.apply_ai_patch_with_undo(&patch);
+                let line = res.summary_line();
+                if line.is_empty() {
+                    self.notify_toast(format!(
+                        "AI proposed {} link(s) & {} node(s)",
+                        res.proposed_edges.len(),
+                        res.new_nodes.len()
+                    ));
+                } else {
+                    self.notify_toast(format!("{}: {}", task_label, line));
+                }
             }
         }
     }
@@ -3601,6 +3719,7 @@ impl AppState {
         self.audio_subtitle_pending.remove(id);
         self.audio_subtitle_errors.remove(id);
         self.selected_calendar_date.remove(id);
+        self.quiz_sessions.remove(id);
         if let Some((removed, edges)) = self.graph.remove_node(id) {
             self.selected_nodes.remove(id);
             if self.popped_out_node_id.as_ref() == Some(id) {
@@ -4026,7 +4145,7 @@ impl AppState {
         self.persist_chat_change();
     }
 
-    fn sync_edit_buffers_from_selected(&mut self) {
+    pub(crate) fn sync_edit_buffers_from_selected(&mut self) {
         let Some(nid) = self.selected_nodes.iter().next().cloned() else {
             return;
         };
@@ -4128,6 +4247,14 @@ impl AppState {
                 focus_target = Some(nid.clone());
             }
             touched_ids.push(nid.clone());
+        }
+        for nid in &res.moved_nodes {
+            if focus_target.is_none() {
+                focus_target = Some(nid.clone());
+            }
+            if !touched_ids.contains(nid) {
+                touched_ids.push(nid.clone());
+            }
         }
         if let Some((cal_id, cal_date)) = res.last_calendar_target.clone() {
             self.calendar_select_date(&cal_id, cal_date);
@@ -4473,15 +4600,22 @@ impl AppState {
                     match result {
                         Ok(patch) => {
                             self.llm_last_error = None;
-                            let res = self.graph.validate_and_stage_patch(&patch);
-                            self.persist_graph_and_snapshot();
-                            self.notify_toast(format!(
-                                "{} ({}): {} node(s), {} link(s)",
-                                task_label,
-                                provider_label,
-                                res.new_nodes.len(),
-                                res.proposed_edges.len()
-                            ));
+                            let res = self.apply_ai_patch_with_undo(&patch);
+                            let line = res.summary_line();
+                            if line.is_empty() {
+                                self.notify_toast(format!(
+                                    "{} ({}): {} node(s), {} link(s)",
+                                    task_label,
+                                    provider_label,
+                                    res.new_nodes.len(),
+                                    res.proposed_edges.len()
+                                ));
+                            } else {
+                                self.notify_toast(format!(
+                                    "{} ({}): {}",
+                                    task_label, provider_label, line
+                                ));
+                            }
                         }
                         Err(err) => {
                             self.llm_last_error = Some(err.clone());
@@ -5099,6 +5233,7 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
 
     pub fn set_dock_position(&mut self, pos: DockPosition) {
         self.reader_prefs.dock_position = pos;
+        self.reader_prefs.dock_custom_pos = None;
         self.dock_measured_size = None;
         let _ = doc_reader::save_preferences(&self.projects_dir, &self.reader_prefs);
         self.notify_toast(format!(
@@ -5113,6 +5248,16 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
         self.set_dock_position(next);
     }
 
+    pub fn toggle_dock_auto_orient(&mut self) {
+        self.reader_prefs.dock_auto_orient = !self.reader_prefs.dock_auto_orient;
+        let _ = doc_reader::save_preferences(&self.projects_dir, &self.reader_prefs);
+        self.notify_toast(if self.reader_prefs.dock_auto_orient {
+            crate::i18n::t(crate::i18n::TextKey::SettingsDockAutoOrientOn)
+        } else {
+            crate::i18n::t(crate::i18n::TextKey::SettingsDockAutoOrientOff)
+        });
+    }
+
     pub fn toggle_animate_wires(&mut self) {
         self.reader_prefs.animate_wires = !self.reader_prefs.animate_wires;
         let _ = doc_reader::save_preferences(&self.projects_dir, &self.reader_prefs);
@@ -5121,6 +5266,397 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
         } else {
             crate::i18n::t(crate::i18n::TextKey::SettingsWireAnimOff)
         });
+    }
+
+    pub fn toggle_trace_colors(&mut self) {
+        self.reader_prefs.enable_trace_colors = !self.reader_prefs.enable_trace_colors;
+        let _ = doc_reader::save_preferences(&self.projects_dir, &self.reader_prefs);
+        self.notify_toast(if self.reader_prefs.enable_trace_colors {
+            crate::i18n::t(crate::i18n::TextKey::SettingsTraceColorsOn)
+        } else {
+            crate::i18n::t(crate::i18n::TextKey::SettingsTraceColorsOff)
+        });
+    }
+
+    pub fn set_edge_color(
+        &mut self,
+        edge_id: &EdgeId,
+        color: Option<&str>,
+        category: Option<&str>,
+    ) {
+        let Some(edge) = self.graph.get_edge_mut(edge_id) else {
+            return;
+        };
+        let mut toast = "Trace color updated".to_string();
+        if let Some(raw) = color.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(hex) = resolve_trace_color_hex(raw) {
+                edge.color_hex = Some(hex);
+                edge.color_category = category
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned)
+                    .or_else(|| resolve_trace_color_label(raw).map(ToOwned::to_owned));
+                if let Some(cat) = &edge.color_category {
+                    toast = format!("Trace color: {}", cat);
+                }
+            }
+        } else {
+            edge.color_hex = None;
+            edge.color_category = None;
+            toast = "Trace color: Auto".to_string();
+        }
+        self.persist_graph_and_snapshot();
+        self.notify_toast(toast);
+    }
+
+    pub fn toggle_image_frameless(&mut self, id: &NodeId) {
+        let mut msg = "Image frame updated";
+        if let Some(n) = self.graph.get_node_mut(id) {
+            if n.kind == NodeKind::Image {
+                n.meta.image_frameless = !n.meta.image_frameless;
+                msg = if n.meta.image_frameless {
+                    "Image: Frameless"
+                } else {
+                    "Image: Framed"
+                };
+            }
+        }
+        self.persist_graph_and_snapshot();
+        self.notify_toast(msg);
+    }
+
+    pub fn set_text_node_font(&mut self, id: &NodeId, font: &str) {
+        if let Some(n) = self.graph.get_node_mut(id) {
+            if n.kind == NodeKind::Text {
+                n.meta.text_font = Some(font.trim().to_string());
+                if n.meta.text_auto_fit {
+                    n.size = compute_text_node_fit_size(n);
+                }
+            }
+        }
+        self.persist_graph_and_snapshot();
+        self.status_message = format!("Text font: {}", font);
+    }
+
+    pub fn set_text_node_size(&mut self, id: &NodeId, size: f32) {
+        let clamped = size.clamp(10.0, 96.0);
+        if let Some(n) = self.graph.get_node_mut(id) {
+            if n.kind == NodeKind::Text {
+                n.meta.text_size = Some(clamped);
+                if n.meta.text_auto_fit {
+                    n.size = compute_text_node_fit_size(n);
+                }
+            }
+        }
+        self.persist_graph_and_snapshot();
+        self.status_message = format!("Text size: {}pt", clamped.round() as i32);
+    }
+
+    pub fn fit_text_node_to_content(&mut self, id: &NodeId) {
+        self.sync_node_edits();
+        if let Some(n) = self.graph.get_node_mut(id) {
+            if n.kind == NodeKind::Text {
+                n.size = compute_text_node_fit_size(n);
+            }
+        }
+        self.persist_graph_and_snapshot();
+        self.notify_toast(crate::i18n::t(crate::i18n::TextKey::TextFitToContent));
+    }
+
+    pub fn toggle_text_auto_fit(&mut self, id: &NodeId) {
+        self.sync_node_edits();
+        let mut now_on = false;
+        if let Some(n) = self.graph.get_node_mut(id) {
+            if n.kind == NodeKind::Text {
+                n.meta.text_auto_fit = !n.meta.text_auto_fit;
+                now_on = n.meta.text_auto_fit;
+                if now_on {
+                    n.size = compute_text_node_fit_size(n);
+                }
+            }
+        }
+        self.persist_graph_and_snapshot();
+        self.notify_toast(if now_on {
+            crate::i18n::t(crate::i18n::TextKey::TextAutoFitOn)
+        } else {
+            crate::i18n::t(crate::i18n::TextKey::TextAutoFitOff)
+        });
+    }
+
+    pub fn quiz_step_question(&mut self, id: &NodeId, delta: isize) {
+        let total = self
+            .graph
+            .get_node(id)
+            .map(|n| n.meta.quiz_questions.len())
+            .unwrap_or(0);
+        if total == 0 {
+            return;
+        }
+        let sess = self.quiz_sessions.entry(id.clone()).or_default();
+        let next = (sess.active_index as isize + delta).clamp(0, (total - 1) as isize) as usize;
+        sess.active_index = next;
+    }
+
+    pub fn quiz_select_option(&mut self, id: &NodeId, q_idx: usize, opt_idx: usize) {
+        let sess = self.quiz_sessions.entry(id.clone()).or_default();
+        sess.selected_options.insert(q_idx, opt_idx);
+    }
+
+    pub fn quiz_reveal_next_hint(&mut self, id: &NodeId, q_idx: usize) {
+        let total_hints = self
+            .graph
+            .get_node(id)
+            .and_then(|n| n.meta.quiz_questions.get(q_idx))
+            .map(|q| q.hints.len())
+            .unwrap_or(0);
+        if total_hints == 0 {
+            return;
+        }
+        let sess = self.quiz_sessions.entry(id.clone()).or_default();
+        let cur = sess.revealed_hints.get(&q_idx).copied().unwrap_or(0);
+        if cur < total_hints {
+            sess.revealed_hints.insert(q_idx, cur + 1);
+        }
+    }
+
+    pub fn quiz_reveal_answer(&mut self, id: &NodeId, q_idx: usize) {
+        let sess = self.quiz_sessions.entry(id.clone()).or_default();
+        if sess.revealed_answers.contains(&q_idx) {
+            sess.revealed_answers.remove(&q_idx);
+        } else {
+            sess.revealed_answers.insert(q_idx);
+        }
+    }
+
+    pub fn quiz_reset_session(&mut self, id: &NodeId) {
+        self.quiz_sessions.remove(id);
+    }
+
+    pub fn quiz_add_question_from_inspector(&mut self, id: &NodeId) -> bool {
+        let q_text = self.quiz_q_edit.text.trim().to_string();
+        if q_text.is_empty() {
+            self.notify_toast("Enter a question prompt first");
+            return false;
+        }
+        let options: Vec<String> = self
+            .quiz_opts_edit
+            .text
+            .lines()
+            .flat_map(|line| line.split('|'))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let correct_index = if options.is_empty() {
+            None
+        } else {
+            Some(self.quiz_correct_idx.min(options.len() - 1))
+        };
+        let answer = self.quiz_ans_edit.text.trim().to_string();
+        let hints: Vec<String> = self
+            .quiz_hint_edit
+            .text
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut added_idx = None;
+        if let Some(n) = self.graph.get_node_mut(id) {
+            if n.kind == NodeKind::Quiz {
+                n.meta.quiz_questions.push(QuizQuestion {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    question: q_text,
+                    options,
+                    correct_index,
+                    answer,
+                    hints,
+                });
+                added_idx = Some(n.meta.quiz_questions.len() - 1);
+            }
+        }
+        if let Some(idx) = added_idx {
+            self.quiz_q_edit = TextEdit::new("");
+            self.quiz_opts_edit = TextEdit::new("");
+            self.quiz_ans_edit = TextEdit::new("");
+            self.quiz_hint_edit = TextEdit::new("");
+            self.quiz_correct_idx = 0;
+            self.quiz_sessions.entry(id.clone()).or_default().active_index = idx;
+            self.persist_graph_and_snapshot();
+            self.notify_toast(format!("Added quiz Q{}", idx + 1));
+            return true;
+        }
+        false
+    }
+
+    pub fn quiz_delete_question(&mut self, id: &NodeId, q_idx: usize) {
+        let mut removed = false;
+        let mut new_len = 0;
+        if let Some(n) = self.graph.get_node_mut(id) {
+            if n.kind == NodeKind::Quiz && q_idx < n.meta.quiz_questions.len() {
+                n.meta.quiz_questions.remove(q_idx);
+                new_len = n.meta.quiz_questions.len();
+                removed = true;
+            }
+        }
+        if removed {
+            if let Some(sess) = self.quiz_sessions.get_mut(id) {
+                sess.active_index = if new_len == 0 {
+                    0
+                } else {
+                    sess.active_index.min(new_len - 1)
+                };
+                sess.selected_options.clear();
+                sess.revealed_hints.clear();
+                sess.revealed_answers.clear();
+            }
+            self.persist_graph_and_snapshot();
+            self.status_message = format!("Deleted quiz Q{}", q_idx + 1);
+        }
+    }
+
+    pub fn quiz_append_hint(&mut self, id: &NodeId, q_idx: usize, hint: &str) {
+        let clean = hint.trim();
+        if clean.is_empty() {
+            return;
+        }
+        if let Some(n) = self.graph.get_node_mut(id) {
+            if let Some(q) = n.meta.quiz_questions.get_mut(q_idx) {
+                q.hints.push(clean.to_string());
+                self.persist_graph_and_snapshot();
+            }
+        }
+    }
+
+    /// True if a node holds no authored content, media assets, strokes, events, or quiz items.
+    pub fn is_node_empty(node: &Node) -> bool {
+        match node.kind {
+            NodeKind::Document | NodeKind::Image => {
+                node.asset_hash.is_none()
+                    && node.content.trim().is_empty()
+                    && node
+                        .meta
+                        .extracted_text
+                        .as_deref()
+                        .is_none_or(|s| s.trim().is_empty())
+            }
+            NodeKind::Drawing => {
+                node.meta.drawing_strokes.is_empty()
+                    && node.content.trim().is_empty()
+                    && node.asset_hash.is_none()
+            }
+            NodeKind::Video => {
+                node.asset_hash.is_none()
+                    && node
+                        .meta
+                        .media_url
+                        .as_deref()
+                        .is_none_or(|s| s.trim().is_empty())
+                    && node.content.trim().is_empty()
+                    && node.meta.timestamps.is_empty()
+            }
+            NodeKind::Audio => {
+                let c = node.content.trim();
+                node.asset_hash.is_none()
+                    && node
+                        .meta
+                        .media_url
+                        .as_deref()
+                        .is_none_or(|s| s.trim().is_empty())
+                    && node.meta.timestamps.is_empty()
+                    && node.meta.subtitles.is_empty()
+                    && (c.is_empty() || c == i18n::default_node_hint(NodeKind::Audio))
+            }
+            NodeKind::Calendar => {
+                node.meta.calendar_events.is_empty()
+                    && node.meta.calendar_day_notes.is_empty()
+                    && node.content.trim().is_empty()
+            }
+            NodeKind::Quiz => {
+                node.meta.quiz_questions.is_empty() && node.content.trim().is_empty()
+            }
+            NodeKind::Flashcard => {
+                node.content.trim().is_empty()
+                    && node
+                        .meta
+                        .answer
+                        .as_deref()
+                        .is_none_or(|a| a.trim().is_empty())
+            }
+            NodeKind::Section => {
+                let t = node.title.trim();
+                node.content.trim().is_empty()
+                    && (t.is_empty() || t == i18n::default_node_title(NodeKind::Section, 1))
+            }
+            NodeKind::Note
+            | NodeKind::Text
+            | NodeKind::LlmSynthesis
+            | NodeKind::Concept
+            | NodeKind::Excerpt
+            | NodeKind::Formula
+            | NodeKind::Checklist
+            | NodeKind::Sequence => node.content.trim().is_empty(),
+        }
+    }
+
+    /// Delete selected nodes (or selected edge), or when nothing is selected, remove all empty nodes.
+    pub fn delete_selected_or_empty_nodes(&mut self) -> usize {
+        if !self.selected_nodes.is_empty() {
+            let ids: Vec<NodeId> = self.selected_nodes.iter().cloned().collect();
+            let count = ids.len();
+            for id in &ids {
+                self.delete_node(id);
+            }
+            self.selected_nodes.clear();
+            self.editing_node_id = None;
+            self.notify_toast(if count == 1 {
+                "Deleted selected node".into()
+            } else {
+                format!("Deleted {} selected nodes", count)
+            });
+            return count;
+        }
+        if let Some(eid) = self.selected_edge.take() {
+            self.graph.remove_edge(&eid);
+            self.persist_graph_and_snapshot();
+            self.notify_toast("Deleted selected link");
+            return 1;
+        }
+        let empty_ids: Vec<NodeId> = self
+            .graph
+            .nodes
+            .values()
+            .filter(|n| {
+                Self::is_node_empty(n)
+                    && (n.kind != NodeKind::Section
+                        || self.capture_section_children(&n.id).is_empty())
+            })
+            .map(|n| n.id.clone())
+            .collect();
+        let count = empty_ids.len();
+        for id in &empty_ids {
+            self.delete_node(id);
+        }
+        if count > 0 {
+            self.notify_toast(format!("Deleted {} empty node(s)", count));
+        } else {
+            self.notify_toast("No empty nodes");
+        }
+        count
+    }
+
+    /// Returns true if a world-space point hits any non-Section study node bounding rectangle.
+    pub fn is_world_point_over_node(&self, wp: WorldPos) -> bool {
+        self.graph
+            .nodes
+            .values()
+            .filter(|n| n.kind != NodeKind::Section)
+            .any(|n| {
+                let (w, h) = node_world_size(n);
+                wp.x >= n.pos.x
+                    && wp.x <= n.pos.x + w
+                    && wp.y >= n.pos.y
+                    && wp.y <= n.pos.y + h
+            })
     }
 
     pub fn toggle_ai_summary_language_mode(&mut self) {

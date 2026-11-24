@@ -166,6 +166,15 @@ pub struct ReaderPreferences {
     /// Placement of the canvas floating dock bar (`Bottom`, `Top`, `Left`, or `Right`).
     #[serde(default)]
     pub dock_position: DockPosition,
+    /// Render semantic/topic trace colors on canvas edge wires and pills (`true` by default; toggleable to monochrome).
+    #[serde(default = "default_true")]
+    pub enable_trace_colors: bool,
+    /// Custom dragged screen coordinates `[x, y]` for the floating canvas dock bar (`None` = auto-centered edge anchor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dock_custom_pos: Option<[f32; 2]>,
+    /// Automatically switch floating dock between horizontal and vertical when dragged near left/right edges.
+    #[serde(default = "default_true")]
+    pub dock_auto_orient: bool,
 }
 
 impl Default for ReaderPreferences {
@@ -197,6 +206,9 @@ impl Default for ReaderPreferences {
             collections: Vec::new(),
             auto_transcribe_audio: true,
             dock_position: DockPosition::default(),
+            enable_trace_colors: true,
+            dock_custom_pos: None,
+            dock_auto_orient: true,
         }
     }
 }

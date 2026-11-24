@@ -5,6 +5,7 @@ use rune::{
 
 use crate::doc_reader::DockPosition;
 use crate::i18n::{self, TextKey, UiLocale};
+use crate::icons;
 use crate::state::AppState;
 use crate::theme::{self, ThemeId};
 
@@ -159,11 +160,11 @@ pub fn render_settings(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 .on_press(|s: &mut AppState| {
                     s.close_settings();
                 })
-                .child(
-                    text("←")
-                        .font(theme::CONTROL_TEXT)
-                        .color(theme::text_secondary()),
-                ),
+                .child(icons::ph(
+                    &icons::ARROW_LEFT,
+                    15.0,
+                    theme::text_secondary(),
+                )),
         )
         .child(icon(&theme::STUDYNODES_LOGO_ICON, 17.0).color(theme::accent_claude()))
         .child(
@@ -604,6 +605,7 @@ pub fn render_settings(s: &AppState, cx: &mut Cx<AppState>) -> El {
 
     let dm_active = s.reader_prefs.use_direct_manipulation;
     let wire_anim_active = s.reader_prefs.animate_wires;
+    let trace_colors_active = s.reader_prefs.enable_trace_colors;
     let controls_row = row()
         .w_full()
         .gap(8.0)
@@ -654,6 +656,33 @@ pub fn render_settings(s: &AppState, cx: &mut Cx<AppState>) -> El {
                     })
                     .font(theme::STATUS_TEXT)
                     .color(if wire_anim_active {
+                        theme::text_primary()
+                    } else {
+                        theme::text_muted()
+                    }),
+                ),
+        )
+        .child(
+            el()
+                .key("btn_toggle_trace_colors")
+                .px(10.0)
+                .py(7.0)
+                .radius(7.0)
+                .fill(theme::bg_input())
+                .hover(theme::hover_subtle())
+                .border(1.0, theme::border_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut AppState| {
+                    s.toggle_trace_colors();
+                })
+                .child(
+                    text(if trace_colors_active {
+                        i18n::t(TextKey::SettingsTraceColorsOn)
+                    } else {
+                        i18n::t(TextKey::SettingsTraceColorsOff)
+                    })
+                    .font(theme::STATUS_TEXT)
+                    .color(if trace_colors_active {
                         theme::text_primary()
                     } else {
                         theme::text_muted()
@@ -746,6 +775,67 @@ pub fn render_settings(s: &AppState, cx: &mut Cx<AppState>) -> El {
         )
         .child(dock_pos_pills);
 
+    let dock_auto_on = s.reader_prefs.dock_auto_orient;
+    let dock_auto_row = row()
+        .w_full()
+        .gap(10.0)
+        .center_y()
+        .child(
+            el().w(128.0).child(
+                text(i18n::t(TextKey::SettingsDockAutoOrient))
+                    .font(theme::STATUS_TEXT)
+                    .color(theme::text_secondary()),
+            ),
+        )
+        .child(
+            el()
+                .key("btn_toggle_dock_auto_orient")
+                .px(10.0)
+                .py(7.0)
+                .radius(7.0)
+                .fill(theme::bg_input())
+                .hover(theme::hover_subtle())
+                .border(
+                    1.0,
+                    if dock_auto_on {
+                        theme::accent_claude().alpha(0.55)
+                    } else {
+                        theme::border_subtle()
+                    },
+                )
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut AppState| {
+                    s.toggle_dock_auto_orient();
+                })
+                .child(
+                    row()
+                        .center_y()
+                        .gap(6.0)
+                        .child(icons::ph(
+                            &icons::MAGNET,
+                            13.0,
+                            if dock_auto_on {
+                                theme::accent_claude()
+                            } else {
+                                theme::text_muted()
+                            },
+                        ))
+                        .child(
+                            text(if dock_auto_on {
+                                i18n::t(TextKey::SettingsDockAutoOrientOn)
+                            } else {
+                                i18n::t(TextKey::SettingsDockAutoOrientOff)
+                            })
+                            .font(theme::STATUS_TEXT)
+                            .color(if dock_auto_on {
+                                theme::text_primary()
+                            } else {
+                                theme::text_muted()
+                            }),
+                        ),
+                ),
+        );
+
     let appearance_section = section_card(
         "settings_appearance_section",
         i18n::t(TextKey::SettingsAppearanceTitle),
@@ -760,6 +850,7 @@ pub fn render_settings(s: &AppState, cx: &mut Cx<AppState>) -> El {
     .child(locale_row)
     .child(theme_row)
     .child(dock_pos_row)
+    .child(dock_auto_row)
     .child(controls_row);
 
     let body = col()

@@ -1,6 +1,6 @@
 use rune::{
-    Color, Cursor, Cx, El, FileDialogOptions, Phase, ScrollSpec, SurfaceFit, TextStyle, Tx,
-    canvas, col, el, memo, row, text, text_input,
+    Color, Cursor, Cx, El, FileDialogOptions, Icon, Phase, ScrollSpec, SurfaceFit, TextStyle, Tx,
+    auto_grow, canvas, col, el, memo, row, text, text_input,
 };
 use rune_kit::Markdown;
 use studynodes_graph::model::{CalendarViewMode, EdgeRelation, Node, NodeId, NodeKind};
@@ -9,6 +9,7 @@ use studynodes_vision::{OcrEnginePreference, OcrMode, SUPPORTED_LANGUAGES};
 use crate::doc_reader::{self, DocFormat, PdfLayoutMode, ReaderMode};
 use crate::formula_math;
 use crate::i18n::{self, TextKey};
+use crate::icons;
 use crate::media_helper;
 use crate::state::{ActivePdfState, AppState, DocViewTab};
 use crate::theme;
@@ -279,20 +280,16 @@ fn render_dedicated_ai_chat_panel(s: &AppState, panel_width: f32) -> El {
                 .on_press(|s: &mut AppState| {
                     s.ai_panel_open = false;
                 })
-                .child(
-                    text("←")
-                        .font(theme::CONTROL_TEXT)
-                        .color(theme::text_secondary()),
-                ),
+                .child(icons::ph(
+                    &icons::ARROW_LEFT,
+                    14.0,
+                    theme::text_secondary(),
+                )),
         );
     }
 
     topbar = topbar
-        .child(
-            text("✦")
-                .font(theme::CONTROL_TEXT)
-                .color(theme::accent_claude()),
-        )
+        .child(icons::ph(&icons::SPARKLE, 14.0, theme::accent_claude()))
         .child(
             text(i18n::t(TextKey::AiChatPanelTitle))
                 .font(theme::PANEL_TITLE)
@@ -376,11 +373,7 @@ fn render_dedicated_ai_chat_panel(s: &AppState, panel_width: f32) -> El {
                 s.inspector_open = false;
                 s.ai_panel_open = false;
             })
-            .child(
-                text("×")
-                    .font(theme::CONTROL_TEXT)
-                    .color(theme::text_muted()),
-            ),
+            .child(icons::ph(&icons::X, 13.0, theme::text_muted())),
     );
 
     // 2. Scrollable Messages Feed
@@ -556,7 +549,7 @@ fn render_dedicated_ai_chat_panel(s: &AppState, panel_width: f32) -> El {
         .child(
             col()
                 .w_full()
-                .min_h(92.0)
+                .min_h(76.0)
                 .padding(12.0)
                 .gap(8.0)
                 .radius(14.0)
@@ -564,27 +557,23 @@ fn render_dedicated_ai_chat_panel(s: &AppState, panel_width: f32) -> El {
                 .fill(theme::bg_card())
                 .border(1.0, theme::border_default())
                 .child(
-                    el()
-                        .w_full()
-                        .grow(1.0)
-                        .min_h(36.0)
-                        .max_h(140.0)
-                        .scroll(ScrollSpec {
-                            stick_bottom: false,
-                        })
-                        .child(
-                            text_input(&s.ai_chat_input, theme::BODY_TEXT)
-                                .key("ai_chat_input")
-                                .label("Project AI question")
-                                .w_full()
-                                .color(theme::text_primary())
-                                .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
-                                .placeholder(i18n::t(TextKey::AiChatPlaceholder), theme::text_muted())
-                                .on_edit(|s: &mut AppState| &mut s.ai_chat_input)
-                                .on_submit(|s: &mut AppState, _| {
-                                    s.submit_ai_chat_question();
-                                }),
-                        ),
+                    auto_grow(
+                        text_input(&s.ai_chat_input, theme::BODY_TEXT)
+                            .key("ai_chat_input")
+                            .label("Project AI question")
+                            .w_full()
+                            .color(theme::text_primary())
+                            .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                            .placeholder(i18n::t(TextKey::AiChatPlaceholder), theme::text_muted())
+                            .on_edit(|s: &mut AppState| &mut s.ai_chat_input)
+                            .on_submit(|s: &mut AppState, _| {
+                                s.submit_ai_chat_question();
+                            }),
+                        2,
+                        7,
+                    )
+                    .w_full()
+                    .max_h(156.0),
                 )
                 .child(
                     row()
@@ -639,72 +628,83 @@ fn render_dedicated_ai_chat_panel(s: &AppState, panel_width: f32) -> El {
                                 .on_press(|s: &mut AppState| {
                                     s.submit_ai_chat_question();
                                 })
-                                .child(
-                                    text("↑")
-                                        .font(theme::CONTROL_TEXT)
-                                        .color(Color::WHITE),
-                                ),
+                                .child(icons::ph(&icons::ARROW_UP, 14.0, Color::WHITE)),
                         ),
                 ),
         );
 
     let mut chat_tabs_strip = row()
-        .gap(4.0)
+        .key("ai_chat_tabs_strip")
+        .gap(2.0)
         .center_y()
-        .shrink()
-        .min_w(0.0)
-        .grow(1.0);
+        .grow(1.0)
+        .min_w(0.0);
     let active_chat_id = s.graph.active_chat_id.as_deref();
     let multi_chats = s.graph.chat_threads.len() > 1;
     for (idx, thread) in s.graph.chat_threads.iter().enumerate() {
         let is_active = active_chat_id == Some(thread.id.as_str());
         let tid_switch = thread.id.clone();
         let tid_close = thread.id.clone();
-        let mut pill = row()
+        let mut tab_shell = row()
             .key(format!("ai_chat_tab_shell_{}", idx))
-            .center_y()
-            .gap(4.0)
-            .px(7.0)
-            .py(3.5)
-            .radius(6.0)
+            .h(35.0)
+            .shrink()
+            .min_w(52.0)
+            .max_w(156.0)
             .fill(if is_active {
-                theme::bg_card()
+                theme::bg_chrome()
             } else {
                 Color::TRANSPARENT
             })
-            .border(
-                1.0,
+            .border_sides(
+                [0.0, 0.0, 1.5, 0.0],
                 if is_active {
-                    theme::border_strong()
+                    theme::accent_claude()
                 } else {
-                    theme::border_subtle()
+                    Color::TRANSPARENT
                 },
             )
+            .hover(theme::hover_subtle())
+            .center_y()
             .child(
-                el()
+                row()
                     .key(format!("ai_chat_tab_{}", idx))
-                    .max_w(116.0)
+                    .grow(1.0)
                     .min_w(0.0)
+                    .h_full()
+                    .pl(9.0)
+                    .pr(if multi_chats { 3.0 } else { 9.0 })
+                    .gap(5.0)
+                    .center_y()
                     .cursor(Cursor::Pointer)
                     .on_press(move |s: &mut AppState| {
                         s.switch_ai_chat_tab(&tid_switch);
                     })
+                    .child(icons::ph(
+                        &icons::CHAT_CIRCLE,
+                        11.5,
+                        if is_active {
+                            theme::accent_claude()
+                        } else {
+                            theme::text_muted()
+                        },
+                    ))
                     .child(
                         text(&thread.title)
-                            .font(theme::BADGE_TEXT)
+                            .font(theme::STATUS_TEXT)
                             .color(if is_active {
                                 theme::text_primary()
                             } else {
-                                theme::text_secondary()
+                                theme::text_muted()
                             })
                             .truncate(),
                     ),
             );
         if multi_chats {
-            pill = pill.child(
+            tab_shell = tab_shell.child(
                 el()
                     .key(format!("btn_close_ai_chat_tab_{}", idx))
-                    .size(14.0, 14.0)
+                    .size(20.0, 22.0)
                     .radius(4.0)
                     .hover(theme::hover_subtle())
                     .center()
@@ -712,45 +712,44 @@ fn render_dedicated_ai_chat_panel(s: &AppState, panel_width: f32) -> El {
                     .on_press(move |s: &mut AppState| {
                         s.close_ai_chat_tab(&tid_close);
                     })
-                    .child(
-                        text("×")
-                            .font(theme::BADGE_TEXT)
-                            .color(theme::text_muted()),
-                    ),
+                    .child(icons::ph(
+                        &icons::X,
+                        10.5,
+                        if is_active {
+                            theme::text_secondary()
+                        } else {
+                            theme::text_muted().alpha(0.6)
+                        },
+                    )),
             );
         }
-        chat_tabs_strip = chat_tabs_strip.child(pill);
+        chat_tabs_strip = chat_tabs_strip.child(tab_shell);
     }
 
     let chat_tabs_bar = row()
         .key("ai_chat_tabs_bar")
         .w_full()
-        .h(34.0)
-        .px(12.0)
-        .gap(6.0)
+        .h(35.0)
+        .px(10.0)
+        .gap(4.0)
         .center_y()
-        .fill(theme::bg_canvas().alpha(0.32))
+        .fill(theme::bg_canvas().alpha(0.55))
         .border_sides([0.0, 0.0, 1.0, 0.0], theme::border_subtle())
         .child(chat_tabs_strip)
         .child(
             el()
                 .key("btn_new_ai_chat_tab")
-                .size(24.0, 24.0)
+                .size(26.0, 26.0)
                 .radius(6.0)
-                .fill(theme::bg_control())
-                .border(1.0, theme::border_subtle())
                 .hover(theme::hover_subtle())
+                .press(theme::press_subtle())
                 .center()
                 .cursor(Cursor::Pointer)
                 .on_press_tx(|s: &mut AppState, tx| {
                     s.new_ai_chat_tab();
                     tx.focus_when_shown("ai_chat_input", false);
                 })
-                .child(
-                    text("+")
-                        .font(theme::CONTROL_TEXT)
-                        .color(theme::text_secondary()),
-                ),
+                .child(icons::ph(&icons::PLUS, 13.0, theme::text_muted())),
         );
 
     let mut panel = col()
@@ -807,11 +806,7 @@ fn render_dedicated_ai_chat_panel(s: &AppState, panel_width: f32) -> El {
                         .on_press(|s: &mut AppState| {
                             s.llm_last_error = None;
                         })
-                        .child(
-                            text("×")
-                                .font(theme::CONTROL_TEXT)
-                                .color(theme::text_muted()),
-                        ),
+                        .child(icons::ph(&icons::X, 12.0, theme::text_muted())),
                 ),
         );
     }
@@ -883,11 +878,7 @@ fn render_ai_summary_callout(s: &AppState, node: &Node) -> Option<El> {
                         .on_press(|s: &mut AppState| {
                             s.llm_last_error = None;
                         })
-                        .child(
-                            text("×")
-                                .font(theme::CONTROL_TEXT)
-                                .color(theme::text_muted()),
-                        ),
+                        .child(icons::ph(&icons::X, 12.0, theme::text_muted())),
                 ),
         );
     }
@@ -952,11 +943,7 @@ fn render_ai_summary_callout(s: &AppState, node: &Node) -> Option<El> {
                                 .on_press(move |s: &mut AppState| {
                                     s.clear_node_summary(&nid_clear);
                                 })
-                                .child(
-                                    text("×")
-                                        .font(theme::BADGE_TEXT)
-                                        .color(theme::text_muted()),
-                                ),
+                                .child(icons::ph(&icons::X, 11.0, theme::text_muted())),
                         ),
                 )
                 .child(
@@ -993,14 +980,14 @@ fn ghost_btn(
 }
 
 fn ghost_icon_btn(
-    key: &'static str,
-    glyph: &'static str,
+    key: impl Into<String>,
+    ico: &'static Icon,
     fg: Color,
     active: bool,
     action: impl Fn(&mut AppState) + 'static,
 ) -> El {
     el()
-        .key(key)
+        .key(key.into())
         .size(26.0, 26.0)
         .radius(6.0)
         .fill(if active {
@@ -1013,11 +1000,7 @@ fn ghost_icon_btn(
         .center()
         .cursor(Cursor::Pointer)
         .on_press(action)
-        .child(
-            text(glyph)
-                .font(TextStyle::new(13.0, 500.0).mono())
-                .color(fg),
-        )
+        .child(icons::ph(ico, 14.0, fg))
 }
 
 fn underline_tab(key: &'static str, label: &str, active: bool) -> El {
@@ -1048,13 +1031,19 @@ fn underline_tab(key: &'static str, label: &str, active: bool) -> El {
 }
 
 fn popout_panel_btn() -> El {
-    ghost_icon_btn("btn_popout_reader", "⧉", theme::text_secondary(), false, |s| {
-        s.pop_out_reader();
-    })
+    ghost_icon_btn(
+        "btn_popout_reader",
+        &icons::ARROW_SQUARE_OUT,
+        theme::text_secondary(),
+        false,
+        |s| {
+            s.pop_out_reader();
+        },
+    )
 }
 
 fn close_panel_btn() -> El {
-    ghost_icon_btn("btn_close_inspector", "×", theme::text_muted(), false, |s| {
+    ghost_icon_btn("btn_close_inspector", &icons::X, theme::text_muted(), false, |s| {
         s.sync_node_edits();
         s.sync_edge_edits();
         s.inspector_open = false;
@@ -1413,11 +1402,7 @@ fn render_pdf_reader_panel(
         let mut prev_pg: Option<usize> = None;
         for pg in jump_pages {
             if prev_pg.is_some_and(|p| pg > p + 1) {
-                mode_row = mode_row.child(
-                    text("…")
-                        .font(theme::BADGE_TEXT)
-                        .color(theme::text_muted()),
-                );
+                mode_row = mode_row.child(icons::ph(&icons::DOTS_THREE, 12.0, theme::text_muted()));
             }
             let is_cur = pg == cur_page;
             mode_row = mode_row.child(
@@ -1733,11 +1718,11 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
         .w_full()
         .center_y()
         .gap(6.0)
-        .child(
-            text(theme::kind_glyph(node_kind))
-                .font(theme::CONTROL_TEXT)
-                .color(theme::kind_accent(node_kind)),
-        )
+        .child(icons::ph(
+            icons::kind_icon(node_kind),
+            15.0,
+            theme::kind_accent(node_kind),
+        ))
         .child(subtle_tag(fmt_badge, theme::text_muted()))
         .child(el().grow(1.0))
         .child(ghost_btn(
@@ -1751,7 +1736,7 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
         .child(popout_panel_btn())
         .child(ghost_icon_btn(
             "btn_inspector_more",
-            "⋯",
+            &icons::DOTS_THREE,
             theme::text_secondary(),
             s.inspector_more_menu_open,
             |s| {
@@ -1871,6 +1856,22 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
                 s.create_excerpt_from_selected_doc(None);
             },
         ));
+    if is_img_kind {
+        let nid_frame = node.id.clone();
+        let frameless = node.meta.image_frameless;
+        actions_strip = actions_strip.child(ghost_btn(
+            "btn_toggle_image_frame",
+            if frameless { "Framed" } else { "Frameless" },
+            if frameless {
+                theme::accent_claude()
+            } else {
+                theme::text_secondary()
+            },
+            move |s| {
+                s.toggle_image_frameless(&nid_frame);
+            },
+        ));
+    }
 
     content = content
         .child(
@@ -2119,11 +2120,11 @@ fn render_generic_node_inspector(s: &AppState, node: &Node) -> El {
         .w_full()
         .center_y()
         .gap(6.0)
-        .child(
-            text(theme::kind_glyph(node_kind))
-                .font(theme::CONTROL_TEXT)
-                .color(theme::kind_accent(node_kind)),
-        )
+        .child(icons::ph(
+            icons::kind_icon(node_kind),
+            15.0,
+            theme::kind_accent(node_kind),
+        ))
         .child(subtle_tag(theme::kind_label(node_kind), theme::text_muted()))
         .child(el().grow(1.0));
     if crate::reader_window::can_pop_out(node_kind) {
@@ -2132,7 +2133,7 @@ fn render_generic_node_inspector(s: &AppState, node: &Node) -> El {
     hdr = hdr
         .child(ghost_icon_btn(
             "btn_inspector_more",
-            "⋯",
+            &icons::DOTS_THREE,
             theme::text_secondary(),
             s.inspector_more_menu_open,
             |s| {
@@ -2223,7 +2224,7 @@ fn render_generic_node_inspector(s: &AppState, node: &Node) -> El {
             .child(hairline());
     }
 
-    if !matches!(node_kind, NodeKind::Video | NodeKind::Drawing) {
+    if !matches!(node_kind, NodeKind::Video | NodeKind::Drawing | NodeKind::Quiz) {
         content = content
             .child(
                 col()
@@ -2498,6 +2499,145 @@ fn render_edge_inspector(s: &AppState, edge: &studynodes_graph::model::Edge) -> 
                 )),
         )
         .child(hairline())
+        .child({
+            let eid_auto = edge.id.clone();
+            let active_hex = edge.color_hex.as_deref().unwrap_or("");
+            let trace_on = s.reader_prefs.enable_trace_colors;
+
+            let mut swatch_rows = col().w_full().gap(6.0);
+            let mut hdr_row = row()
+                .w_full()
+                .center_y()
+                .gap(8.0)
+                .child(subtle_tag("TRACE COLOR", theme::text_muted()))
+                .child(el().grow(1.0));
+            if let Some(cat) = edge.color_category.as_deref().filter(|c| !c.is_empty()) {
+                hdr_row = hdr_row.child(subtle_tag(cat, theme::text_secondary()));
+            }
+            hdr_row = hdr_row.child(ghost_btn(
+                "btn_inspector_toggle_trace_colors",
+                if trace_on { "On" } else { "Off" },
+                if trace_on {
+                    theme::accent_claude()
+                } else {
+                    theme::text_muted()
+                },
+                |s| s.toggle_trace_colors(),
+            ));
+            swatch_rows = swatch_rows.child(hdr_row);
+
+            let mut r1 = row().w_full().gap(5.0).center_y();
+            let auto_selected = edge.color_hex.is_none();
+            r1 = r1.child(
+                el()
+                    .key("btn_edge_color_auto")
+                    .px(7.0)
+                    .py(4.0)
+                    .radius(5.0)
+                    .fill(if auto_selected {
+                        theme::bg_control()
+                    } else {
+                        theme::bg_input()
+                    })
+                    .hover(theme::hover_subtle())
+                    .border(
+                        if auto_selected { 1.5 } else { 1.0 },
+                        if auto_selected {
+                            theme::border_strong()
+                        } else {
+                            theme::border_subtle()
+                        },
+                    )
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.set_edge_color(&eid_auto, None, None);
+                    })
+                    .child(
+                        text("Auto")
+                            .font(theme::BADGE_TEXT)
+                            .color(theme::text_secondary()),
+                    ),
+            );
+            for (preset_id, preset_label, preset_hex) in studynodes_graph::model::TRACE_COLOR_PRESETS.iter().take(4) {
+                let eid_p = edge.id.clone();
+                let col_v = theme::hex(preset_hex);
+                let is_sel = active_hex.eq_ignore_ascii_case(preset_hex);
+                r1 = r1.child(
+                    row()
+                        .key(format!("btn_edge_color_{}", preset_id))
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .px(6.0)
+                        .py(4.0)
+                        .gap(4.0)
+                        .center_y()
+                        .radius(5.0)
+                        .fill(if is_sel {
+                            col_v.alpha(0.18)
+                        } else {
+                            theme::bg_input()
+                        })
+                        .hover(theme::hover_subtle())
+                        .border(
+                            if is_sel { 1.5 } else { 1.0 },
+                            if is_sel { col_v } else { theme::border_subtle() },
+                        )
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.set_edge_color(&eid_p, Some(preset_hex), Some(preset_label));
+                        })
+                        .child(el().size(7.0, 7.0).radius(3.5).fill(col_v))
+                        .child(
+                            text(*preset_label)
+                                .font(theme::BADGE_TEXT)
+                                .color(theme::text_primary())
+                                .truncate(),
+                        ),
+                );
+            }
+            swatch_rows = swatch_rows.child(r1);
+
+            let mut r2 = row().w_full().gap(5.0).center_y();
+            for (preset_id, preset_label, preset_hex) in studynodes_graph::model::TRACE_COLOR_PRESETS.iter().skip(4) {
+                let eid_p = edge.id.clone();
+                let col_v = theme::hex(preset_hex);
+                let is_sel = active_hex.eq_ignore_ascii_case(preset_hex);
+                r2 = r2.child(
+                    row()
+                        .key(format!("btn_edge_color_{}", preset_id))
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .px(6.0)
+                        .py(4.0)
+                        .gap(4.0)
+                        .center_y()
+                        .radius(5.0)
+                        .fill(if is_sel {
+                            col_v.alpha(0.18)
+                        } else {
+                            theme::bg_input()
+                        })
+                        .hover(theme::hover_subtle())
+                        .border(
+                            if is_sel { 1.5 } else { 1.0 },
+                            if is_sel { col_v } else { theme::border_subtle() },
+                        )
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.set_edge_color(&eid_p, Some(preset_hex), Some(preset_label));
+                        })
+                        .child(el().size(7.0, 7.0).radius(3.5).fill(col_v))
+                        .child(
+                            text(*preset_label)
+                                .font(theme::BADGE_TEXT)
+                                .color(theme::text_primary())
+                                .truncate(),
+                        ),
+                );
+            }
+            swatch_rows.child(r2)
+        })
+        .child(hairline())
         .child(
             col()
                 .w_full()
@@ -2569,20 +2709,38 @@ fn render_readonly_doc_panel(s: &AppState, node: &Node, panel_width: f32) -> El 
     let is_summarizing = s.llm_pending_nodes.contains(&node.id);
     let nid_ext = node.id.clone();
     let nid_sum = node.id.clone();
+    let is_img_kind = node.kind == NodeKind::Image;
+    let frameless_img = node.meta.image_frameless;
 
     // Minimal 4-control editorial header (key("reader_readonly_toolbar") preserved)
-    let small_toolbar = row()
+    let mut small_toolbar = row()
         .key("reader_readonly_toolbar")
         .w_full()
         .center_y()
         .gap(6.0)
-        .child(
-            text(theme::kind_glyph(node.kind))
-                .font(theme::CONTROL_TEXT)
-                .color(theme::kind_accent(node.kind)),
-        )
+        .child(icons::ph(
+            icons::kind_icon(node.kind),
+            15.0,
+            theme::kind_accent(node.kind),
+        ))
         .child(subtle_tag(fmt_badge, theme::text_muted()))
-        .child(el().grow(1.0))
+        .child(el().grow(1.0));
+    if is_img_kind {
+        let nid_frame = node.id.clone();
+        small_toolbar = small_toolbar.child(ghost_btn(
+            "btn_toggle_image_frame",
+            if frameless_img { "Framed" } else { "Frameless" },
+            if frameless_img {
+                theme::accent_claude()
+            } else {
+                theme::text_secondary()
+            },
+            move |s| {
+                s.toggle_image_frameless(&nid_frame);
+            },
+        ));
+    }
+    let small_toolbar = small_toolbar
         .child(ghost_btn(
             "btn_toggle_readonly",
             i18n::t(TextKey::ReaderEdit),
@@ -2594,7 +2752,7 @@ fn render_readonly_doc_panel(s: &AppState, node: &Node, panel_width: f32) -> El 
         .child(popout_panel_btn())
         .child(ghost_icon_btn(
             "btn_inspector_more",
-            "⋯",
+            &icons::DOTS_THREE,
             theme::text_secondary(),
             s.inspector_more_menu_open,
             |s| {
@@ -3051,11 +3209,7 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                                         }
                                     });
                                 })
-                                .child(
-                                    text("⊡")
-                                        .font(TextStyle::new(12.0, 500.0).mono())
-                                        .color(theme::text_secondary()),
-                                ),
+                                .child(icons::ph(&icons::CAMERA, 13.5, theme::text_secondary())),
                         ),
                 )
         }
@@ -3067,13 +3221,37 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                         .get_node(src_id)
                         .map(|d| d.title.as_str())
                         .unwrap_or("Source Document");
-                    format!("▤ {} · p.{} ↗", doc_title, page_opt.unwrap_or(0) + 1)
+                    format!("{} · p.{}", doc_title, page_opt.unwrap_or(0) + 1)
                 }
                 _ => i18n::t(TextKey::ExcerptNoSource).into(),
             };
-            ghost_btn("btn_inspector_excerpt_jump", &jump_label, theme::accent_claude(), move |s| {
-                s.jump_to_excerpt_source(&nid);
-            })
+            el()
+                .key("btn_inspector_excerpt_jump")
+                .px(7.0)
+                .py(4.0)
+                .radius(6.0)
+                .hover(theme::hover_subtle())
+                .press(theme::press_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.jump_to_excerpt_source(&nid);
+                })
+                .child(
+                    row()
+                        .center_y()
+                        .gap(5.0)
+                        .child(icons::ph(&icons::FILE_TEXT, 12.5, theme::accent_claude()))
+                        .child(
+                            text(&jump_label)
+                                .font(theme::STATUS_TEXT)
+                                .color(theme::accent_claude()),
+                        )
+                        .child(icons::ph(
+                            &icons::ARROW_SQUARE_OUT,
+                            11.5,
+                            theme::accent_claude(),
+                        )),
+                )
         }
         NodeKind::Sequence => ghost_btn(
             "btn_inspector_seq_next",
@@ -3089,6 +3267,428 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
             text(i18n::fmt_tasks_progress(done, tasks.len()))
                 .font(theme::STATUS_TEXT)
                 .color(theme::text_muted())
+        }
+        NodeKind::Text => {
+            let cur_font = node.meta.text_font.as_deref().unwrap_or("sans");
+            let cur_size = node.meta.text_size.unwrap_or(18.0).clamp(10.0, 96.0);
+            let mut font_row = row().w_full().gap(8.0);
+            for (key, label, val) in [
+                ("btn_text_font_sans", "Sans", "sans"),
+                ("btn_text_font_serif", "Serif", "serif"),
+                ("btn_text_font_mono", "Mono", "mono"),
+                ("btn_text_font_display", "Display", "display"),
+                ("btn_text_font_hand", "Hand", "hand"),
+            ] {
+                let id_c = nid.clone();
+                font_row = font_row.child(
+                    underline_tab(key, label, cur_font.eq_ignore_ascii_case(val)).on_press(
+                        move |s: &mut AppState| {
+                            s.set_text_node_font(&id_c, val);
+                        },
+                    ),
+                );
+            }
+
+            let id_dec = nid.clone();
+            let id_inc = nid.clone();
+            let mut size_row = row()
+                .w_full()
+                .center_y()
+                .gap(6.0)
+                .child(ghost_icon_btn(
+                    "btn_text_size_dec",
+                    &icons::MINUS,
+                    theme::text_secondary(),
+                    false,
+                    move |s| {
+                        s.set_text_node_size(&id_dec, cur_size - 2.0);
+                    },
+                ))
+                .child(
+                    text(format!("{} pt", cur_size.round() as i32))
+                        .font(theme::STATUS_TEXT)
+                        .color(theme::text_primary()),
+                )
+                .child(ghost_icon_btn(
+                    "btn_text_size_inc",
+                    &icons::PLUS,
+                    theme::text_secondary(),
+                    false,
+                    move |s| {
+                        s.set_text_node_size(&id_inc, cur_size + 2.0);
+                    },
+                ))
+                .child(el().grow(1.0));
+            for (k, sz) in [
+                ("btn_text_size_14", 14.0),
+                ("btn_text_size_18", 18.0),
+                ("btn_text_size_24", 24.0),
+                ("btn_text_size_36", 36.0),
+                ("btn_text_size_48", 48.0),
+            ] {
+                let id_p = nid.clone();
+                let active = (cur_size - sz).abs() < 0.5;
+                size_row = size_row.child(underline_tab(k, &format!("{}", sz as i32), active).on_press(
+                    move |s: &mut AppState| {
+                        s.set_text_node_size(&id_p, sz);
+                    },
+                ));
+            }
+
+            let id_fit = nid.clone();
+            let id_auto = nid.clone();
+            let auto_on = node.meta.text_auto_fit;
+            let fit_row = row()
+                .w_full()
+                .center_y()
+                .gap(6.0)
+                .child(
+                    el()
+                        .key("btn_text_fit_now")
+                        .px(9.0)
+                        .py(5.0)
+                        .radius(6.0)
+                        .fill(theme::bg_control())
+                        .border(1.0, theme::border_subtle())
+                        .hover(theme::hover_subtle())
+                        .press(theme::press_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.fit_text_node_to_content(&id_fit);
+                        })
+                        .child(
+                            row()
+                                .center_y()
+                                .gap(5.0)
+                                .child(icons::ph(
+                                    &icons::FRAME_CORNERS,
+                                    12.5,
+                                    theme::accent_claude(),
+                                ))
+                                .child(
+                                    text(i18n::t(TextKey::TextFitToContent))
+                                        .font(theme::STATUS_TEXT)
+                                        .color(theme::text_primary()),
+                                ),
+                        ),
+                )
+                .child(
+                    el()
+                        .key("btn_text_auto_fit")
+                        .px(9.0)
+                        .py(5.0)
+                        .radius(6.0)
+                        .fill(if auto_on {
+                            theme::accent_claude().alpha(0.16)
+                        } else {
+                            theme::bg_control()
+                        })
+                        .border(
+                            1.0,
+                            if auto_on {
+                                theme::accent_claude().alpha(0.6)
+                            } else {
+                                theme::border_subtle()
+                            },
+                        )
+                        .hover(theme::hover_subtle())
+                        .press(theme::press_subtle())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.toggle_text_auto_fit(&id_auto);
+                        })
+                        .child(
+                            text(if auto_on {
+                                i18n::t(TextKey::TextAutoFitOn)
+                            } else {
+                                i18n::t(TextKey::TextAutoFitOff)
+                            })
+                            .font(theme::STATUS_TEXT)
+                            .color(if auto_on {
+                                theme::accent_claude()
+                            } else {
+                                theme::text_secondary()
+                            }),
+                        ),
+                );
+
+            col()
+                .w_full()
+                .gap(10.0)
+                .child(hairline())
+                .child(subtle_tag("FONT", theme::text_muted()))
+                .child(font_row)
+                .child(subtle_tag("SIZE", theme::text_muted()))
+                .child(size_row)
+                .child(fit_row)
+        }
+        NodeKind::Quiz => {
+            let mut deck_col = col()
+                .w_full()
+                .gap(10.0)
+                .child(subtle_tag(
+                    &format!("QUESTIONS ({})", node.meta.quiz_questions.len()),
+                    theme::text_muted(),
+                ));
+
+            for (qi, q) in node.meta.quiz_questions.iter().enumerate() {
+                let del_nid = nid.clone();
+                let hint_nid = nid.clone();
+                let mut q_card = col()
+                    .w_full()
+                    .padding(8.0)
+                    .gap(4.0)
+                    .radius(6.0)
+                    .fill(theme::bg_input())
+                    .border(1.0, theme::border_subtle())
+                    .child(
+                        row()
+                            .w_full()
+                            .center_y()
+                            .gap(6.0)
+                            .child(subtle_tag(&format!("Q{}", qi + 1), theme::kind_accent(NodeKind::Quiz)))
+                            .child(
+                                el().grow(1.0).min_w(0.0).child(
+                                    text(&q.question)
+                                        .font(theme::STATUS_TEXT)
+                                        .color(theme::text_primary())
+                                        .w_full()
+                                        .wrap(),
+                                ),
+                            )
+                            .child(ghost_icon_btn(
+                                format!("quiz_add_hint_{}", qi),
+                                &icons::LIGHTBULB,
+                                theme::accent_claude(),
+                                false,
+                                move |s| {
+                                    let h = s.quiz_hint_edit.text.trim().to_string();
+                                    if !h.is_empty() {
+                                        s.quiz_append_hint(&hint_nid, qi, &h);
+                                        s.quiz_hint_edit = Default::default();
+                                    }
+                                },
+                            ))
+                            .child(ghost_icon_btn(
+                                format!("quiz_del_q_{}", qi),
+                                &icons::X,
+                                theme::accent_danger(),
+                                false,
+                                move |s| {
+                                    s.quiz_delete_question(&del_nid, qi);
+                                },
+                            )),
+                    );
+                if !q.hints.is_empty() {
+                    q_card = q_card.child(
+                        text(format!("Hints: {}", q.hints.join(" · ")))
+                            .font(theme::BADGE_TEXT)
+                            .color(theme::text_muted())
+                            .w_full()
+                            .wrap(),
+                    );
+                }
+                deck_col = deck_col.child(q_card);
+            }
+
+            let add_nid = nid.clone();
+            let sub_q_nid = nid.clone();
+            let sub_ans_nid = nid.clone();
+            let mut correct_picker = row().w_full().center_y().gap(6.0).child(
+                text("Correct:")
+                    .font(theme::BADGE_TEXT)
+                    .color(theme::text_muted()),
+            );
+            for (oi, letter) in ["A", "B", "C", "D"].iter().enumerate() {
+                let active = s.quiz_correct_idx == oi;
+                correct_picker = correct_picker.child(
+                    el()
+                        .key(format!("quiz_new_correct_{}", oi))
+                        .px(7.0)
+                        .py(3.0)
+                        .radius(4.0)
+                        .fill(if active {
+                            theme::accent_claude().alpha(0.20)
+                        } else {
+                            theme::bg_control()
+                        })
+                        .border(
+                            1.0,
+                            if active {
+                                theme::accent_claude()
+                            } else {
+                                theme::border_subtle()
+                            },
+                        )
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut AppState| {
+                            s.quiz_correct_idx = oi;
+                        })
+                        .child(
+                            text(*letter)
+                                .font(theme::BADGE_TEXT)
+                                .color(if active {
+                                    theme::accent_claude()
+                                } else {
+                                    theme::text_secondary()
+                                }),
+                        ),
+                );
+            }
+
+            deck_col
+                .child(hairline())
+                .child(subtle_tag("ADD QUESTION", theme::text_muted()))
+                .child(
+                    text("Question")
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_muted()),
+                )
+                .child(
+                    el()
+                        .w_full()
+                        .min_h(34.0)
+                        .px(8.0)
+                        .py(6.0)
+                        .radius(6.0)
+                        .fill(theme::bg_input())
+                        .border(1.0, theme::border_subtle())
+                        .role("textbox")
+                        .child(
+                            text_input(&s.quiz_q_edit, theme::BODY_TEXT)
+                                .key("quiz_q_edit")
+                                .label("Quiz question prompt")
+                                .w_full()
+                                .color(theme::text_primary())
+                                .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                                .placeholder("Question prompt...", theme::text_muted())
+                                .on_edit(|s: &mut AppState| &mut s.quiz_q_edit)
+                                .on_submit(move |s: &mut AppState, tx| {
+                                    if !s.quiz_add_question_from_inspector(&sub_q_nid) {
+                                        tx.focus("quiz_q_edit", false);
+                                    }
+                                }),
+                        ),
+                )
+                .child(
+                    text("Options")
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_muted()),
+                )
+                .child(
+                    el()
+                        .w_full()
+                        .min_h(48.0)
+                        .px(8.0)
+                        .py(6.0)
+                        .radius(6.0)
+                        .fill(theme::bg_input())
+                        .border(1.0, theme::border_subtle())
+                        .role("textbox")
+                        .child(
+                            text_input(&s.quiz_opts_edit, theme::STATUS_TEXT)
+                                .key("quiz_opts_edit")
+                                .label("Quiz answer choices")
+                                .w_full()
+                                .color(theme::text_primary())
+                                .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                                .placeholder("Choices separated by | or newline (Option A | Option B | ...)", theme::text_muted())
+                                .on_edit(|s: &mut AppState| &mut s.quiz_opts_edit)
+                                .on_submit(|s: &mut AppState, _| {
+                                    s.quiz_opts_edit.insert("\n");
+                                }),
+                        ),
+                )
+                .child(correct_picker)
+                .child(
+                    text("Explanation")
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_muted()),
+                )
+                .child(
+                    el()
+                        .w_full()
+                        .min_h(34.0)
+                        .px(8.0)
+                        .py(6.0)
+                        .radius(6.0)
+                        .fill(theme::bg_input())
+                        .border(1.0, theme::border_subtle())
+                        .role("textbox")
+                        .child(
+                            text_input(&s.quiz_ans_edit, theme::STATUS_TEXT)
+                                .key("quiz_ans_edit")
+                                .label("Quiz explanation")
+                                .w_full()
+                                .color(theme::text_primary())
+                                .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                                .placeholder("Explanation / answer...", theme::text_muted())
+                                .on_edit(|s: &mut AppState| &mut s.quiz_ans_edit)
+                                .on_submit(move |s: &mut AppState, tx| {
+                                    if !s.quiz_add_question_from_inspector(&sub_ans_nid) {
+                                        tx.focus("quiz_q_edit", false);
+                                    }
+                                }),
+                        ),
+                )
+                .child(
+                    text("Hints")
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_muted()),
+                )
+                .child(
+                    el()
+                        .w_full()
+                        .min_h(34.0)
+                        .px(8.0)
+                        .py(6.0)
+                        .radius(6.0)
+                        .fill(theme::bg_input())
+                        .border(1.0, theme::border_subtle())
+                        .role("textbox")
+                        .child(
+                            text_input(&s.quiz_hint_edit, theme::STATUS_TEXT)
+                                .key("quiz_hint_edit")
+                                .label("Quiz optional hints")
+                                .w_full()
+                                .color(theme::text_primary())
+                                .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                                .placeholder("Optional hints (one per line)...", theme::text_muted())
+                                .on_edit(|s: &mut AppState| &mut s.quiz_hint_edit)
+                                .on_submit(|s: &mut AppState, _| {
+                                    s.quiz_hint_edit.insert("\n");
+                                }),
+                        ),
+                )
+                .child(
+                    el()
+                        .key("btn_quiz_add_q")
+                        .px(10.0)
+                        .py(6.0)
+                        .radius(6.0)
+                        .fill(theme::accent_claude().alpha(0.18))
+                        .border(1.0, theme::accent_claude().alpha(0.60))
+                        .hover(theme::accent_claude().alpha(0.28))
+                        .press(theme::press_subtle())
+                        .center()
+                        .cursor(Cursor::Pointer)
+                        .on_press_tx(move |s: &mut AppState, tx| {
+                            if !s.quiz_add_question_from_inspector(&add_nid) {
+                                tx.focus("quiz_q_edit", false);
+                            }
+                        })
+                        .child(
+                            row()
+                                .center_y()
+                                .gap(6.0)
+                                .child(icons::ph(&icons::PLUS, 13.0, theme::accent_claude()))
+                                .child(
+                                    text("Add Question")
+                                        .font(theme::STATUS_TEXT)
+                                        .color(theme::accent_claude()),
+                                ),
+                        ),
+                )
         }
         _ => el(),
     }
@@ -3239,23 +3839,38 @@ fn render_image_vision_section(s: &AppState, node: &Node) -> El {
         ));
 
     if local_selected && !s.neural_models_ready {
-        action_row = action_row.child(ghost_btn(
-            "btn_download_neural_models",
-            if s.vision_downloading_models {
-                "..."
-            } else {
-                "↓ Models"
-            },
-            theme::accent_claude(),
-            |s| {
-                s.download_neural_ocr_models();
-            },
-        ));
+        action_row = action_row.child(
+            el()
+                .key("btn_download_neural_models")
+                .px(7.0)
+                .py(4.0)
+                .radius(6.0)
+                .hover(theme::hover_subtle())
+                .press(theme::press_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut AppState| {
+                    s.download_neural_ocr_models();
+                })
+                .child(if s.vision_downloading_models {
+                    icons::ph(&icons::DOTS_THREE, 13.0, theme::accent_claude())
+                } else {
+                    row()
+                        .center_y()
+                        .gap(4.0)
+                        .child(icons::ph(&icons::ARROW_DOWN, 12.0, theme::accent_claude()))
+                        .child(
+                            text("Models")
+                                .font(theme::STATUS_TEXT)
+                                .color(theme::accent_claude()),
+                        )
+                }),
+        );
     }
 
     action_row = action_row.child(ghost_icon_btn(
         "btn_toggle_vision_settings",
-        "⚙",
+        &icons::GEAR,
         if s.vision_settings_open || s.cloud_vision_configured() {
             theme::text_primary()
         } else {
@@ -3407,9 +4022,15 @@ fn render_image_vision_section(s: &AppState, node: &Node) -> El {
                                 s.spawn_formula_from_extracted_text(&nid_spawn_formula);
                             },
                         ))
-                        .child(ghost_btn("btn_ocr_clear", "×", theme::text_muted(), move |s| {
-                            s.clear_extracted_text(&nid_clear_ocr);
-                        })),
+                        .child(ghost_icon_btn(
+                            "btn_ocr_clear",
+                            &icons::X,
+                            theme::text_muted(),
+                            false,
+                            move |s| {
+                                s.clear_extracted_text(&nid_clear_ocr);
+                            },
+                        )),
                 ),
         );
     }
@@ -3536,10 +4157,11 @@ fn render_translation_section(s: &AppState, node: &Node) -> El {
                                 s.spawn_note_from_translation(&nid_spawn_tr);
                             },
                         ))
-                        .child(ghost_btn(
+                        .child(ghost_icon_btn(
                             "btn_translate_clear",
-                            "×",
+                            &icons::X,
                             theme::text_muted(),
+                            false,
                             move |s| {
                                 s.clear_translated_text(&nid_clear_tr);
                             },
@@ -3765,14 +4387,14 @@ fn render_drawing_inspector(s: &AppState, node: &Node) -> El {
         .child(el().grow(1.0))
         .child(ghost_icon_btn(
             "btn_draw_undo",
-            "↺",
+            &icons::ARROW_CLOCKWISE,
             theme::text_secondary(),
             false,
             move |s| s.undo_drawing_stroke(&undo_id),
         ))
         .child(ghost_icon_btn(
             "btn_draw_clear",
-            "×",
+            &icons::X,
             theme::text_muted(),
             false,
             move |s| s.clear_drawing_strokes(&clear_id),
@@ -3920,10 +4542,11 @@ fn render_drawing_inspector(s: &AppState, node: &Node) -> El {
                                 s.spawn_formula_from_extracted_text(&spawn_formula_id);
                             },
                         ))
-                        .child(ghost_btn(
+                        .child(ghost_icon_btn(
                             "btn_draw_clear_ocr",
-                            "×",
+                            &icons::X,
                             theme::text_muted(),
+                            false,
                             move |s| s.clear_extracted_text(&clear_ocr_id),
                         )),
                 ),
@@ -4115,9 +4738,19 @@ fn render_media_inspector(s: &AppState, node: &Node) -> El {
                                 s.toggle_media_play(&nid_play);
                             })
                             .child(
-                                text(if playing { "⏸ Pause" } else { "▶ Play" })
-                                    .font(theme::BADGE_TEXT)
-                                    .color(accent),
+                                row()
+                                    .center_y()
+                                    .gap(5.0)
+                                    .child(icons::ph(
+                                        if playing { &icons::PAUSE } else { &icons::PLAY },
+                                        12.0,
+                                        accent,
+                                    ))
+                                    .child(
+                                        text(if playing { "Pause" } else { "Play" })
+                                            .font(theme::BADGE_TEXT)
+                                            .color(accent),
+                                    ),
                             ),
                     )
                     .child(
@@ -4260,11 +4893,11 @@ fn render_media_inspector(s: &AppState, node: &Node) -> El {
                                 s.media_players.remove(&nid_retry_fail);
                                 let _ = s.ensure_media_player(&nid_retry_fail);
                             })
-                            .child(
-                                text("↻")
-                                    .font(theme::BADGE_TEXT)
-                                    .color(theme::text_primary()),
-                            ),
+                            .child(icons::ph(
+                                &icons::ARROW_CLOCKWISE,
+                                12.0,
+                                theme::text_primary(),
+                            )),
                     ),
             );
         }
@@ -4296,11 +4929,11 @@ fn render_media_inspector(s: &AppState, node: &Node) -> El {
                         .on_press(move |s: &mut AppState| {
                             s.reload_embed_iframe(&nid_reload);
                         })
-                        .child(
-                            text("↻")
-                                .font(theme::BADGE_TEXT)
-                                .color(theme::text_primary()),
-                        ),
+                        .child(icons::ph(
+                            &icons::ARROW_CLOCKWISE,
+                            12.0,
+                            theme::text_primary(),
+                        )),
                 )
                 .child(
                     el()
@@ -4511,11 +5144,7 @@ fn render_media_inspector(s: &AppState, node: &Node) -> El {
                         .on_press(move |s: &mut AppState| {
                             s.remove_media_timestamp(&nid_d, &ts_id);
                         })
-                        .child(
-                            text("×")
-                                .font(theme::STATUS_TEXT)
-                                .color(theme::text_muted()),
-                        ),
+                        .child(icons::ph(&icons::X, 11.5, theme::text_muted())),
                 ),
         );
     }
@@ -4921,11 +5550,7 @@ fn render_calendar_inspector(s: &AppState, node: &Node) -> El {
                         .on_press(move |s: &mut AppState| {
                             s.calendar_step_week(&wk_prev_id, -1);
                         })
-                        .child(
-                            text("‹")
-                                .font(theme::CONTROL_TEXT)
-                                .color(theme::text_primary()),
-                        ),
+                        .child(icons::ph(&icons::CARET_LEFT, 13.0, theme::text_primary())),
                 )
                 .child(el().grow(1.0).center().child(
                     text(range_label)
@@ -4944,11 +5569,7 @@ fn render_calendar_inspector(s: &AppState, node: &Node) -> El {
                         .on_press(move |s: &mut AppState| {
                             s.calendar_step_week(&wk_next_id, 1);
                         })
-                        .child(
-                            text("›")
-                                .font(theme::CONTROL_TEXT)
-                                .color(theme::text_primary()),
-                        ),
+                        .child(icons::ph(&icons::CARET_RIGHT, 13.0, theme::text_primary())),
                 ),
         );
 
@@ -5047,11 +5668,7 @@ fn render_calendar_inspector(s: &AppState, node: &Node) -> El {
                         .on_press(move |s: &mut AppState| {
                             s.calendar_step_month(&prev_id, -1);
                         })
-                        .child(
-                            text("‹")
-                                .font(theme::CONTROL_TEXT)
-                                .color(theme::text_primary()),
-                        ),
+                        .child(icons::ph(&icons::CARET_LEFT, 13.0, theme::text_primary())),
                 )
                 .child(el().grow(1.0).center().child(
                     text(format!("{} {}", i18n::month_full(cm), cy))
@@ -5070,11 +5687,7 @@ fn render_calendar_inspector(s: &AppState, node: &Node) -> El {
                         .on_press(move |s: &mut AppState| {
                             s.calendar_step_month(&next_id, 1);
                         })
-                        .child(
-                            text("›")
-                                .font(theme::CONTROL_TEXT)
-                                .color(theme::text_primary()),
-                        ),
+                        .child(icons::ph(&icons::CARET_RIGHT, 13.0, theme::text_primary())),
                 ),
         );
 
@@ -5186,11 +5799,7 @@ fn render_calendar_inspector(s: &AppState, node: &Node) -> El {
                 .on_press(move |s: &mut AppState| {
                     s.set_calendar_day_note(&clr_id, clr_date.clone(), String::new());
                 })
-                .child(
-                    text("×")
-                        .font(theme::BADGE_TEXT)
-                        .color(theme::text_muted()),
-                ),
+                .child(icons::ph(&icons::X, 11.0, theme::text_muted())),
         );
     }
     sec = sec.child(
@@ -5388,15 +5997,19 @@ fn render_calendar_inspector(s: &AppState, node: &Node) -> El {
                         .on_press(move |s: &mut AppState| {
                             s.toggle_calendar_event(&nid_t, &ev_id_t);
                         })
-                        .child(
-                            text(if ev.completed { "☑" } else { "☐" })
-                                .font(theme::STATUS_TEXT)
-                                .color(if ev.completed {
-                                    theme::accent_claude()
-                                } else {
-                                    accent
-                                }),
-                        ),
+                        .child(icons::ph(
+                            if ev.completed {
+                                &icons::CHECK_SQUARE
+                            } else {
+                                &icons::SQUARE
+                            },
+                            13.0,
+                            if ev.completed {
+                                theme::accent_claude()
+                            } else {
+                                accent
+                            },
+                        )),
                 )
                 .child(
                     text(format!("{} {}{}", ev.date, tm_str, ev.title))
@@ -5420,11 +6033,7 @@ fn render_calendar_inspector(s: &AppState, node: &Node) -> El {
                         .on_press(move |s: &mut AppState| {
                             s.remove_calendar_event(&nid_d, &ev_id_d);
                         })
-                        .child(
-                            text("×")
-                                .font(theme::STATUS_TEXT)
-                                .color(theme::text_muted()),
-                        ),
+                        .child(icons::ph(&icons::X, 11.5, theme::text_muted())),
                 ),
         );
     }

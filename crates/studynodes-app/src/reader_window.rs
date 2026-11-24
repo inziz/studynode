@@ -17,6 +17,7 @@ use studynodes_vision::{OcrEnginePreference, OcrMode, SUPPORTED_LANGUAGES};
 use crate::doc_reader::{self, DocFormat, PdfLayoutMode};
 use crate::formula_math;
 use crate::i18n::{self, TextKey};
+use crate::icons;
 use crate::media_helper;
 use crate::state::DocViewTab;
 use crate::theme;
@@ -31,7 +32,7 @@ fn hash_str(s: &str) -> u64 {
 pub fn can_pop_out(kind: NodeKind) -> bool {
     !matches!(
         kind,
-        NodeKind::Checklist | NodeKind::Excerpt | NodeKind::Video | NodeKind::Audio
+        NodeKind::Checklist | NodeKind::Excerpt | NodeKind::Video | NodeKind::Audio | NodeKind::Text
     )
 }
 
@@ -509,6 +510,24 @@ fn toolbar_chip(
         .child(text(label).font(theme::STATUS_TEXT).color(fg))
 }
 
+fn toolbar_icon_chip(
+    key: &'static str,
+    ico: &'static rune::Icon,
+    fg: Color,
+    on_press: impl Fn(&mut PopoutReaderState) + 'static,
+) -> El {
+    el()
+        .key(key)
+        .size(26.0, 26.0)
+        .radius(6.0)
+        .hover(theme::hover_subtle())
+        .press(theme::press_subtle())
+        .center()
+        .cursor(Cursor::Pointer)
+        .on_press(on_press)
+        .child(icons::ph(ico, 13.5, fg))
+}
+
 pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState>) -> El {
     cx.caption_color(theme::text_secondary());
     cx.titlebar_height(36.0);
@@ -537,11 +556,7 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
         .fill(theme::bg_canvas())
         .border_sides([0.0, 0.0, 1.0, 0.0], theme::border_subtle())
         .window_drag()
-        .child(
-            text("✦")
-                .font(theme::STATUS_TEXT)
-                .color(theme::accent_claude()),
-        )
+        .child(icons::ph(&icons::SPARKLE, 13.0, theme::accent_claude()))
         .child(
             el().shrink().min_w(0.0).child(
                 text(if is_ro && snap.node_id.is_some() && !snap.title.is_empty() {
@@ -664,11 +679,7 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                                 }
                             });
                         })
-                        .child(
-                            text("⊡")
-                                .font(TextStyle::new(12.0, 500.0).mono())
-                                .color(theme::text_secondary()),
-                        ),
+                        .child(icons::ph(&icons::CAMERA, 13.5, theme::text_secondary())),
                 );
         } else {
             let mut switcher = row()
@@ -1053,9 +1064,9 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
                                     .wrap(),
                             ),
                         )
-                        .child(toolbar_chip(
+                        .child(toolbar_icon_chip(
                             "btn_popout_ai_clear",
-                            "×",
+                            &icons::X,
                             theme::text_muted(),
                             move |s| {
                                 s.snapshot.summary = None;
@@ -1336,11 +1347,7 @@ fn render_popout_pdf_surface(s: &PopoutReaderState, snap: &ReaderSnapshot, is_ro
         let mut prev_pg: Option<usize> = None;
         for pg in jump_pages {
             if prev_pg.is_some_and(|prev| pg > prev + 1) {
-                jump_row = jump_row.child(
-                    text("…")
-                        .font(theme::BADGE_TEXT)
-                        .color(theme::text_muted()),
-                );
+                jump_row = jump_row.child(icons::ph(&icons::DOTS_THREE, 12.0, theme::text_muted()));
             }
             let is_cur = pg == cur_page;
             jump_row = jump_row.child(
@@ -1925,15 +1932,15 @@ fn build_scheme_frame_el(
                             .center_y()
                             .fill(hdr_bg)
                             .border_sides([0.0, 0.0, 1.0, 0.0], theme::border_subtle())
-                            .child(
-                                text(theme::kind_glyph(child.kind))
-                                    .font(TextStyle::new(badge_sz, 600.0).mono())
-                                    .color(if is_media_greyed {
-                                        theme::text_muted()
-                                    } else {
-                                        theme::kind_accent(child.kind)
-                                    }),
-                            )
+                            .child(icons::ph(
+                                icons::kind_icon(child.kind),
+                                badge_sz.max(12.0),
+                                if is_media_greyed {
+                                    theme::text_muted()
+                                } else {
+                                    theme::kind_accent(child.kind)
+                                },
+                            ))
                             .child(
                                 el().grow(1.0).min_w(0.0).child(
                                     text(&child.title)
@@ -2261,11 +2268,7 @@ fn render_popout_section_frame(s: &PopoutReaderState, snap: &ReaderSnapshot) -> 
                     row()
                         .center_y()
                         .gap(6.0)
-                        .child(
-                            text("✦")
-                                .font(theme::BADGE_TEXT)
-                                .color(theme::accent_claude()),
-                        )
+                        .child(icons::ph(&icons::SPARKLE, 12.0, theme::accent_claude()))
                         .child(
                             text(i18n::t(TextKey::PopoutAiReview))
                                 .font(theme::SECTION_LABEL)
@@ -2313,11 +2316,11 @@ fn render_popout_flashcard(
                 .w_full()
                 .center_y()
                 .gap(8.0)
-                .child(
-                    text(theme::kind_glyph(NodeKind::Flashcard))
-                        .font(theme::CONTROL_TEXT)
-                        .color(theme::kind_accent(NodeKind::Flashcard)),
-                )
+                .child(icons::ph(
+                    icons::kind_icon(NodeKind::Flashcard),
+                    15.0,
+                    theme::kind_accent(NodeKind::Flashcard),
+                ))
                 .child(
                     text("FLASHCARD REVIEW")
                         .font(theme::SECTION_LABEL)
@@ -2970,19 +2973,34 @@ fn render_popout_image(
         ));
 
     if local_selected && !snap.neural_models_ready {
-        ocr_row = ocr_row.child(toolbar_chip(
-            "btn_popout_download_neural",
-            if snap.vision_downloading_models {
-                "..."
-            } else {
-                "↓ Models"
-            },
-            theme::accent_claude(),
-            |s| {
-                s.snapshot.vision_downloading_models = true;
-                s.send_cmd(ReaderCommand::DownloadNeuralModels);
-            },
-        ));
+        ocr_row = ocr_row.child(
+            el()
+                .key("btn_popout_download_neural")
+                .px(8.0)
+                .py(4.0)
+                .radius(6.0)
+                .hover(theme::hover_subtle())
+                .press(theme::press_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut PopoutReaderState| {
+                    s.snapshot.vision_downloading_models = true;
+                    s.send_cmd(ReaderCommand::DownloadNeuralModels);
+                })
+                .child(if snap.vision_downloading_models {
+                    icons::ph(&icons::DOTS_THREE, 13.5, theme::accent_claude())
+                } else {
+                    row()
+                        .center_y()
+                        .gap(4.0)
+                        .child(icons::ph(&icons::ARROW_DOWN, 12.5, theme::accent_claude()))
+                        .child(
+                            text("Models")
+                                .font(theme::STATUS_TEXT)
+                                .color(theme::accent_claude()),
+                        )
+                }),
+        );
     }
 
     let mut ocr_card = col()
@@ -3081,9 +3099,9 @@ fn render_popout_image(
                                 ));
                             },
                         ))
-                        .child(toolbar_chip(
+                        .child(toolbar_icon_chip(
                             "btn_popout_ocr_clear",
-                            "×",
+                            &icons::X,
                             theme::text_muted(),
                             move |s| {
                                 s.snapshot.meta.extracted_text = None;
@@ -3213,9 +3231,9 @@ fn render_popout_image(
                                 ));
                             },
                         ))
-                        .child(toolbar_chip(
+                        .child(toolbar_icon_chip(
                             "btn_popout_translate_clear",
-                            "×",
+                            &icons::X,
                             theme::text_muted(),
                             move |s| {
                                 s.snapshot.meta.translated_text = None;
@@ -3277,11 +3295,7 @@ fn render_popout_calendar(
                 .w_full()
                 .center_y()
                 .gap(8.0)
-                .child(
-                    text(theme::kind_glyph(NodeKind::Calendar))
-                        .font(theme::CONTROL_TEXT)
-                        .color(accent),
-                )
+                .child(icons::ph(icons::kind_icon(NodeKind::Calendar), 15.0, accent))
                 .child(
                     text(&snap.title)
                         .font(theme::PANEL_TITLE)
@@ -3625,15 +3639,19 @@ fn render_popout_calendar(
                             event_id: ev_id.clone(),
                         });
                     })
-                    .child(
-                        text(if ev.completed { "☑" } else { "☐" })
-                            .font(theme::CONTROL_TEXT)
-                            .color(if ev.completed {
-                                theme::text_muted()
-                            } else {
-                                accent
-                            }),
-                    )
+                    .child(icons::ph(
+                        if ev.completed {
+                            &icons::CHECK_SQUARE
+                        } else {
+                            &icons::SQUARE
+                        },
+                        14.0,
+                        if ev.completed {
+                            theme::text_muted()
+                        } else {
+                            accent
+                        },
+                    ))
                     .child(
                         text(format!("{} · {}", ev.date, ev.title))
                             .font(theme::BODY_TEXT)
@@ -3799,11 +3817,7 @@ fn render_popout_drawing(
                 .w_full()
                 .center_y()
                 .gap(8.0)
-                .child(
-                    text(theme::kind_glyph(NodeKind::Drawing))
-                        .font(theme::CONTROL_TEXT)
-                        .color(accent),
-                )
+                .child(icons::ph(icons::kind_icon(NodeKind::Drawing), 15.0, accent))
                 .child(
                     text(&snap.title)
                         .font(theme::PANEL_TITLE)
@@ -3824,18 +3838,18 @@ fn render_popout_drawing(
                     accent,
                     |s| s.drawing_eraser = true,
                 ))
-                .child(toolbar_chip(
+                .child(toolbar_icon_chip(
                     "popout_draw_undo",
-                    "↺",
+                    &icons::ARROW_CLOCKWISE,
                     theme::text_secondary(),
                     move |s| {
                         s.snapshot.meta.drawing_strokes.pop();
                         s.send_cmd(ReaderCommand::UndoDrawingStroke(undo_id.clone()));
                     },
                 ))
-                .child(toolbar_chip(
+                .child(toolbar_icon_chip(
                     "popout_draw_clear",
-                    "×",
+                    &icons::X,
                     theme::text_muted(),
                     move |s| {
                         s.snapshot.meta.drawing_strokes.clear();
@@ -4079,11 +4093,11 @@ fn render_offscreen_scheme_root(
                 .w(frame_w)
                 .center_y()
                 .gap(8.0)
-                .child(
-                    text("▭")
-                        .font(theme::CONTROL_TEXT)
-                        .color(theme::kind_accent(NodeKind::Section)),
-                )
+                .child(icons::ph(
+                    icons::kind_icon(NodeKind::Section),
+                    15.0,
+                    theme::kind_accent(NodeKind::Section),
+                ))
                 .child(
                     text(&snap.title)
                         .font(theme::PANEL_TITLE)

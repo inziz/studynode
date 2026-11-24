@@ -400,6 +400,8 @@ pub fn kind_accent(kind: NodeKind) -> Color {
             NodeKind::Audio => hex("#7FA99B"),
             NodeKind::Calendar => hex("#C8A46D"),
             NodeKind::Drawing => hex("#8FA8C8"),
+            NodeKind::Text => text_primary(),
+            NodeKind::Quiz => hex("#D9A74A"),
         }
     } else {
         match kind {
@@ -418,27 +420,20 @@ pub fn kind_accent(kind: NodeKind) -> Color {
             NodeKind::Audio => hex("#3E7364"),
             NodeKind::Calendar => hex("#9A753B"),
             NodeKind::Drawing => hex("#4F6D94"),
+            NodeKind::Text => text_primary(),
+            NodeKind::Quiz => hex("#9A753B"),
         }
     }
 }
 
-pub fn kind_glyph(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::Note => "▪",
-        NodeKind::Document => "▤",
-        NodeKind::Image => "▣",
-        NodeKind::LlmSynthesis => "✦",
-        NodeKind::Concept => "○",
-        NodeKind::Section => "▭",
-        NodeKind::Excerpt => "❝",
-        NodeKind::Flashcard => "◇",
-        NodeKind::Formula => "∑",
-        NodeKind::Checklist => "☑",
-        NodeKind::Sequence => "→",
-        NodeKind::Video => "▶",
-        NodeKind::Audio => "♫",
-        NodeKind::Calendar => "▦",
-        NodeKind::Drawing => "✎",
+/// Resolve user-selected font family for frameless `Text` canvas nodes.
+pub fn text_node_family(font: Option<&str>) -> rune::Family {
+    match font.map(str::trim).unwrap_or("sans") {
+        "serif" => rune::Family::Named("Georgia, Cambria, Times New Roman, serif"),
+        "mono" => rune::Family::Mono,
+        "display" => rune::Family::Named("Segoe UI Variable Display, Trebuchet MS, sans-serif"),
+        "hand" => rune::Family::Named("Segoe Print, Bradley Hand, Comic Sans MS, cursive"),
+        _ => rune::Family::Sans,
     }
 }
 
@@ -469,7 +464,7 @@ pub(crate) fn hash_str(s: &str) -> u64 {
 /// Rich Markdown rendering style scaled by `scale` for inspector panels and canvas cards.
 pub fn markdown_style_scaled(scale: f32) -> MarkdownStyle {
     let is_dark = active_theme().is_dark();
-    let sc = scale.clamp(0.5, 1.5);
+    let sc = scale.clamp(0.35, 4.5);
     MarkdownStyle::neutral(is_dark)
         .text(text_primary())
         .muted(text_secondary())
@@ -500,7 +495,7 @@ pub fn markdown_style() -> MarkdownStyle {
 
 /// Compact zoom-scaled Markdown style for canvas `Note` cards wrapped to `wrap_w`.
 pub fn card_markdown_style(zoom: f32, wrap_w: f32) -> MarkdownStyle {
-    markdown_style_scaled((zoom * 0.85).clamp(0.55, 1.35)).text_width(wrap_w.max(60.0))
+    markdown_style_scaled((zoom * 0.92).clamp(0.40, 4.0)).text_width(wrap_w.max(60.0))
 }
 
 /// Compact Markdown style tuned for Project AI Chat messages with highlighted `**bold**` spans.

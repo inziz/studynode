@@ -4,6 +4,7 @@ use rune::{
 };
 
 use crate::i18n::{self, TextKey};
+use crate::icons;
 use crate::state::{AppScreen, AppState, same_project_path};
 use crate::theme;
 
@@ -77,11 +78,7 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                         s.switch_tab(idx);
                         s.screen = AppScreen::Workspace;
                     })
-                    .child(
-                        text("●")
-                            .font(TextStyle::new(6.5, 600.0).mono())
-                            .color(theme::accent_claude()),
-                    )
+                    .child(el().size(6.0, 6.0).radius(3.0).fill(theme::accent_claude()))
                     .child(
                         text(&tab.title)
                             .font(theme::STATUS_TEXT)
@@ -138,15 +135,15 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                     s.is_fullscreen = !s.is_fullscreen;
                     tx.toggle_full_screen();
                 })
-                .child(
-                    text("⛶")
-                        .font(theme::CONTROL_TEXT)
-                        .color(if s.is_fullscreen {
-                            theme::accent_claude()
-                        } else {
-                            theme::text_muted()
-                        }),
-                ),
+                .child(icons::ph(
+                    &icons::CORNERS_OUT,
+                    14.0,
+                    if s.is_fullscreen {
+                        theme::accent_claude()
+                    } else {
+                        theme::text_muted()
+                    },
+                )),
         )
         .child(
             el()
@@ -415,11 +412,7 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                         .on_press(move |s: &mut AppState| {
                             s.delete_collection(&del_col);
                         })
-                        .child(
-                            text("×")
-                                .font(theme::BADGE_TEXT)
-                                .color(theme::text_muted()),
-                        ),
+                        .child(icons::ph(&icons::X, 10.5, theme::text_muted())),
                 ),
         );
     }
@@ -499,11 +492,7 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                             let name = s.new_collection_input.text.clone();
                             s.create_collection(&name);
                         })
-                        .child(
-                            text("✓")
-                                .font(theme::STATUS_TEXT)
-                                .color(Color::WHITE),
-                        ),
+                        .child(icons::ph(&icons::CHECK, 13.0, Color::WHITE)),
                 ),
         );
     }
@@ -585,11 +574,7 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 .on_press(move |s: &mut AppState| {
                     s.open_project(path_for_open.clone());
                 })
-                .child(
-                    text("▤")
-                        .font(theme::STATUS_TEXT)
-                        .color(theme::text_muted()),
-                )
+                .child(icons::ph(&icons::BOOK_OPEN, 14.0, theme::text_muted()))
                 .child(
                     text(&proj.title)
                         .font(ROW_TITLE)
@@ -598,11 +583,7 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 );
 
             if is_open_tab {
-                left_row = left_row.child(
-                    text("●")
-                        .font(TextStyle::new(6.5, 600.0).mono())
-                        .color(theme::accent_claude()),
-                );
+                left_row = left_row.child(el().size(6.0, 6.0).radius(3.0).fill(theme::accent_claude()));
             }
 
             let right_actions = if is_confirming_del {
@@ -746,11 +727,7 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                             .on_press(move |s: &mut AppState| {
                                 s.confirm_delete_project = Some(path_for_del_prompt.clone());
                             })
-                            .child(
-                                text("×")
-                                    .font(theme::CONTROL_TEXT)
-                                    .color(theme::text_muted()),
-                            ),
+                            .child(icons::ph(&icons::X, 13.0, theme::text_muted())),
                     )
             };
 

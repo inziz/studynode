@@ -10,6 +10,10 @@ pub struct FocusedNodeContext {
     pub content: String,
     pub summary: Option<String>,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub pos: [f32; 2],
+    #[serde(default)]
+    pub size: [f32; 2],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +22,10 @@ pub struct NeighborNodeContext {
     pub title: String,
     pub kind: String,
     pub summary: Option<String>,
+    #[serde(default)]
+    pub pos: [f32; 2],
+    #[serde(default)]
+    pub size: [f32; 2],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +36,10 @@ pub struct ExistingEdgeContext {
     pub relation: String,
     pub label: String,
     pub note: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_category: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +152,30 @@ impl LlmContext {
                 }
             }
         }
+        if n.kind == studynodes_graph::model::NodeKind::Quiz && !n.meta.quiz_questions.is_empty() {
+            out.push_str("\n[Quiz Questions]:");
+            for (qi, q) in n.meta.quiz_questions.iter().enumerate() {
+                out.push_str(&format!("\n- Q{} (index {}): {}", qi + 1, qi, q.question));
+                if !q.options.is_empty() {
+                    let opts: Vec<String> = q
+                        .options
+                        .iter()
+                        .enumerate()
+                        .map(|(oi, o)| format!("[{}] {}", oi, o))
+                        .collect();
+                    out.push_str(&format!(" | Options: {}", opts.join(", ")));
+                }
+                if let Some(ci) = q.correct_index {
+                    out.push_str(&format!(" | correct_index: {}", ci));
+                }
+                if !q.answer.trim().is_empty() {
+                    out.push_str(&format!(" | Answer: {}", q.answer.trim()));
+                }
+                if !q.hints.is_empty() {
+                    out.push_str(&format!(" | Hints: {}", q.hints.join(" ; ")));
+                }
+            }
+        }
         out
     }
 
@@ -167,6 +203,7 @@ impl LlmContext {
                 };
                 packed_content.push_str(&Self::format_node_metadata_suffix(n));
 
+                let (eff_w, eff_h) = n.effective_size();
                 focus_nodes.push(FocusedNodeContext {
                     node_id: n.id.as_str().to_string(),
                     title: n.title.clone(),
@@ -174,17 +211,22 @@ impl LlmContext {
                     content: packed_content,
                     summary: n.summary.clone(),
                     tags: n.tags.clone(),
+                    pos: [n.pos.x.round(), n.pos.y.round()],
+                    size: [eff_w.round(), eff_h.round()],
                 });
 
                 // 2. Discover 1-hop neighbors
                 for neighbor_id in graph.neighbors(id) {
                     if !focus_ids.contains(&neighbor_id) && neighbor_id_set.insert(neighbor_id.clone()) {
                         if let Some(nbr) = graph.get_node(&neighbor_id) {
+                            let (nw, nh) = nbr.effective_size();
                             neighbor_nodes.push(NeighborNodeContext {
                                 node_id: nbr.id.as_str().to_string(),
                                 title: nbr.title.clone(),
                                 kind: nbr.kind.display_name().to_string(),
                                 summary: nbr.summary.clone(),
+                                pos: [nbr.pos.x.round(), nbr.pos.y.round()],
+                                size: [nw.round(), nh.round()],
                             });
                         }
                     }
@@ -200,6 +242,8 @@ impl LlmContext {
                             relation: edge.relation.display_label().to_string(),
                             label: edge.label.clone(),
                             note: edge.note.clone(),
+                            color: edge.color_hex.clone(),
+                            color_category: edge.color_category.clone(),
                         });
                     }
                 }
@@ -258,6 +302,7 @@ impl LlmContext {
                 body.push_str(&extra);
             }
             let truncated: String = body.chars().take(max_chars).collect();
+            let (eff_w, eff_h) = n.effective_size();
             FocusedNodeContext {
                 node_id: n.id.as_str().to_string(),
                 title: n.title.clone(),
@@ -265,6 +310,8 @@ impl LlmContext {
                 content: truncated,
                 summary: n.summary.clone(),
                 tags: n.tags.clone(),
+                pos: [n.pos.x.round(), n.pos.y.round()],
+                size: [eff_w.round(), eff_h.round()],
             }
         };
 
@@ -301,11 +348,14 @@ impl LlmContext {
             if focus_nodes.len() < 12 {
                 focus_nodes.push(pack_node(n, 2_400));
             } else {
+                let (nw, nh) = n.effective_size();
                 neighbor_nodes.push(NeighborNodeContext {
                     node_id: n.id.as_str().to_string(),
                     title: n.title.clone(),
                     kind: n.kind.display_name().to_string(),
                     summary: n.summary.clone(),
+                    pos: [n.pos.x.round(), n.pos.y.round()],
+                    size: [nw.round(), nh.round()],
                 });
             }
         }
@@ -321,6 +371,8 @@ impl LlmContext {
                 relation: edge.relation.display_label().to_string(),
                 label: edge.label.clone(),
                 note: edge.note.clone(),
+                color: edge.color_hex.clone(),
+                color_category: edge.color_category.clone(),
             })
             .collect();
         existing_edges.sort_by(|a, b| a.edge_id.cmp(&b.edge_id));
