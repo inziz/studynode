@@ -8,6 +8,7 @@ use studynodes_vision::{OcrEnginePreference, OcrMode, SUPPORTED_LANGUAGES};
 
 use crate::doc_reader::{self, DocFormat, PdfLayoutMode, ReaderMode};
 use crate::formula_math;
+use crate::graph_formula;
 use crate::i18n::{self, TextKey};
 use crate::icons;
 use crate::media_helper;
@@ -2222,9 +2223,16 @@ fn render_generic_node_inspector(s: &AppState, node: &Node) -> El {
         content = content
             .child(render_drawing_inspector(s, node))
             .child(hairline());
+    } else if node_kind == NodeKind::GraphFormula {
+        content = content
+            .child(render_graph_formula_inspector(s, node))
+            .child(hairline());
     }
 
-    if !matches!(node_kind, NodeKind::Video | NodeKind::Drawing | NodeKind::Quiz) {
+    if !matches!(
+        node_kind,
+        NodeKind::Video | NodeKind::Drawing | NodeKind::Quiz | NodeKind::GraphFormula
+    ) {
         content = content
             .child(
                 col()
@@ -4187,6 +4195,357 @@ pub(crate) fn drawing_swatch_color(hex: &str) -> Color {
     } else {
         theme::hex(hex)
     }
+}
+
+fn render_graph_formula_inspector(s: &AppState, node: &Node) -> El {
+    let accent = theme::kind_accent(NodeKind::GraphFormula);
+    let plot_w = (s.inspector_width - 42.0).max(220.0);
+    let plot_h = 220.0;
+    let vp = graph_formula::GraphViewport::from_meta(&node.meta);
+    let active_content = if s.selected_nodes.contains(&node.id) {
+        s.inspector_content_edit.text.as_str()
+    } else {
+        node.content.as_str()
+    };
+    let plot = graph_formula::build_graph_plot(active_content, &vp, plot_w, plot_h, 1.0);
+    let (xmin, xmax) = vp.x_bounds();
+    let (ymin, ymax) = vp.y_bounds(plot_w, plot_h);
+
+    let nid_zoom_in = node.id.clone();
+    let nid_zoom_out = node.id.clone();
+    let nid_zoom_reset = node.id.clone();
+    let nid_wheel = node.id.clone();
+    let nid_drag = node.id.clone();
+
+    let mut out = col().w_full().gap(10.0);
+
+    // 1. Readable 2D Formatted Equation Preview
+    out = out.child(
+        col()
+            .key("insp_graph_formula_pretty")
+            .w_full()
+            .padding(12.0)
+            .gap(8.0)
+            .radius(8.0)
+            .fill(theme::bg_input())
+            .border(1.0, theme::border_default())
+            .child(graph_formula::render_pretty_math(active_content, 17.0)),
+    );
+
+    // 2. Highlighted Simplification / Evaluation Readout Banner (Photomath-style)
+    if let Some(err_msg) = &plot.error {
+        out = out.child(
+            el()
+                .key("insp_graph_formula_error")
+                .w_full()
+                .px(12.0)
+                .py(7.0)
+                .radius(6.0)
+                .fill(theme::accent_danger().alpha(0.16))
+                .border(1.0, theme::accent_danger().alpha(0.45))
+                .child(
+                    text(err_msg)
+                        .font(theme::STATUS_TEXT)
+                        .color(theme::accent_danger())
+                        .wrap(),
+                ),
+        );
+    } else if let Some(ro) = &plot.readout {
+        out = out.child(
+            row()
+                .key("insp_graph_formula_readout")
+                .w_full()
+                .center_y()
+                .px(12.0)
+                .py(8.0)
+                .radius(6.0)
+                .fill(theme::accent_claude())
+                .child(
+                    text(ro)
+                        .font(TextStyle::new(14.0, 600.0).mono())
+                        .color(theme::text_inverted())
+                        .truncate(),
+                )
+                .child(el().grow(1.0))
+                .child(
+                    text(graph_formula::format_zoom_badge(&vp))
+                        .font(theme::BADGE_TEXT)
+                        .color(theme::text_inverted().alpha(0.85)),
+                ),
+        );
+    }
+
+    // 3. Direct Text Input (synced seamlessly with keypad buttons)
+    out = out.child(
+        col()
+            .w_full()
+            .px(10.0)
+            .py(7.0)
+            .radius(6.0)
+            .fill(theme::bg_input())
+            .border(1.0, theme::border_subtle())
+            .child(
+                text_input(&s.inspector_content_edit, theme::MONO_BODY)
+                    .key("inspector_graph_formula_input")
+                    .label("Graphic formula equation")
+                    .w_full()
+                    .min_h(34.0)
+                    .color(theme::text_primary())
+                    .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                    .placeholder(i18n::t(TextKey::GraphFormulaPlaceholder), theme::text_muted())
+                    .on_edit(|s: &mut AppState| &mut s.inspector_content_edit)
+                    .on_input_change(|s: &mut AppState, _| {
+                        s.sync_from_inspector_edits();
+                    }),
+            ),
+    );
+
+    // 4. Photomath-Style Interactive Formatting Keypad
+    let mode = s.graph_keypad_mode;
+    let kp_rows = match mode {
+        graph_formula::KeypadMode::Sci => graph_formula::SCI_KEYPAD_ROWS,
+        graph_formula::KeypadMode::Basic => graph_formula::BASIC_KEYPAD_ROWS,
+    };
+    let mut keypad = col()
+        .key("insp_graph_formula_keypad")
+        .w_full()
+        .gap(4.0)
+        .padding(6.0)
+        .radius(8.0)
+        .fill(theme::bg_chrome())
+        .border(1.0, theme::border_subtle());
+
+    let mut ctrl_bar = row().w_full().gap(4.0);
+    for (bkey, blabel, act) in [
+        (
+            "mode",
+            if mode == graph_formula::KeypadMode::Sci {
+                "123"
+            } else {
+                "f(x)"
+            },
+            graph_formula::KeypadAction::ToggleMode,
+        ),
+        ("nl", "↵", graph_formula::KeypadAction::Newline),
+        ("left", "<", graph_formula::KeypadAction::MoveLeft),
+        ("right", ">", graph_formula::KeypadAction::MoveRight),
+        ("bs", "⌫", graph_formula::KeypadAction::Backspace),
+        ("clr", "✕", graph_formula::KeypadAction::Clear),
+    ] {
+        let nid_b = node.id.clone();
+        ctrl_bar = ctrl_bar.child(
+            el()
+                .key(format!("insp_kp_{bkey}"))
+                .grow(1.0)
+                .h(26.0)
+                .radius(4.0)
+                .fill(theme::bg_control())
+                .hover(theme::hover_subtle())
+                .border(1.0, theme::border_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.apply_graph_formula_keypad(&nid_b, act);
+                })
+                .child(
+                    text(blabel)
+                        .font(TextStyle::new(11.5, 600.0).mono())
+                        .color(theme::text_primary()),
+                ),
+        );
+    }
+    keypad = keypad.child(ctrl_bar);
+
+    for (r_idx, row_btns) in kp_rows.iter().enumerate() {
+        let mut r = row().w_full().gap(4.0);
+        for btn in *row_btns {
+            let nid_k = node.id.clone();
+            let act = btn.action;
+            r = r.child(
+                el()
+                    .key(format!("insp_kp_{}_{}_{}", mode as u8, r_idx, btn.id))
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .h(30.0)
+                    .radius(5.0)
+                    .fill(theme::bg_input())
+                    .hover(theme::hover_subtle())
+                    .border(1.0, theme::border_subtle())
+                    .center()
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.apply_graph_formula_keypad(&nid_k, act);
+                    })
+                    .child(
+                        text(btn.label)
+                            .font(TextStyle::new(12.0, 500.0))
+                            .color(theme::text_primary()),
+                    ),
+            );
+        }
+        keypad = keypad.child(r);
+    }
+    out = out.child(keypad);
+
+    // 5. Large Interactive 2D Graph Plot + Zoom/Pan Controls
+    let mut plot_box = el()
+        .key("insp_graph_formula_plot")
+        .w(plot_w)
+        .h(plot_h)
+        .radius(8.0)
+        .clip_rounded(8.0)
+        .fill(theme::bg_input())
+        .border(1.0, theme::border_default())
+        .cursor(Cursor::Grab)
+        .on_wheel(move |s: &mut AppState, e, tx| {
+            let factor = (-e.dy * 0.0022).clamp(-0.35, 0.35).exp() as f64;
+            let anchor_norm = if e.x >= 0.0 && e.x <= plot_w && e.y >= 0.0 && e.y <= plot_h {
+                Some((e.x / plot_w.max(1.0), e.y / plot_h.max(1.0)))
+            } else {
+                Some((0.5, 0.5))
+            };
+            s.zoom_graph_formula(&nid_wheel, factor, anchor_norm, (plot_w, plot_h));
+            tx.instant();
+            true
+        })
+        .on_drag(move |s: &mut AppState, d, tx| match d.phase {
+            Phase::Down => {
+                if let Some(n) = s.graph.get_node(&nid_drag) {
+                    let cur_vp = graph_formula::GraphViewport::from_meta(&n.meta);
+                    s.graph_drag_origin = Some((nid_drag.clone(), cur_vp.center_x, cur_vp.center_y));
+                }
+            }
+            Phase::Move => {
+                if let Some((orig_id, cx0, cy0)) = s.graph_drag_origin.clone() {
+                    if orig_id == nid_drag {
+                        s.pan_graph_formula(&nid_drag, cx0, cy0, d.dx, d.dy, (plot_w, plot_h));
+                        tx.instant();
+                    }
+                }
+            }
+            Phase::Up => {
+                s.graph_drag_origin = None;
+                s.finish_pan_graph_formula(&nid_drag);
+            }
+        })
+        .child(canvas(plot.shape).absolute(0.0, 0.0).w_full().h_full());
+
+    for tl in plot.tick_labels {
+        let tx_pos = if tl.align_right {
+            (tl.x - (tl.text.len() as f32 * 5.8)).clamp(2.0, (plot_w - 22.0).max(2.0))
+        } else {
+            tl.x.clamp(2.0, (plot_w - 22.0).max(2.0))
+        };
+        let ty_pos = tl.y.clamp(2.0, (plot_h - 12.0).max(2.0));
+        plot_box = plot_box.child(
+            el().absolute(tx_pos, ty_pos).child(
+                text(tl.text)
+                    .font(TextStyle::new(9.5, 450.0).mono())
+                    .color(theme::text_muted()),
+            ),
+        );
+    }
+
+    let plot_toolbar = row()
+        .w_full()
+        .center_y()
+        .gap(6.0)
+        .child(
+            text(format!(
+                "x ∈ [{:.2}, {:.2}] · y ∈ [{:.2}, {:.2}]",
+                xmin, xmax, ymin, ymax
+            ))
+            .font(theme::BADGE_TEXT)
+            .color(theme::text_muted())
+            .truncate(),
+        )
+        .child(el().grow(1.0))
+        .child(ghost_btn(
+            "btn_insp_graph_zoom_in",
+            "+",
+            theme::text_primary(),
+            move |s| {
+                s.zoom_graph_formula(&nid_zoom_in, 0.72, None, (plot_w, plot_h));
+            },
+        ))
+        .child(ghost_btn(
+            "btn_insp_graph_zoom_out",
+            "−",
+            theme::text_primary(),
+            move |s| {
+                s.zoom_graph_formula(&nid_zoom_out, 1.39, None, (plot_w, plot_h));
+            },
+        ))
+        .child(ghost_btn(
+            "btn_insp_graph_zoom_reset",
+            i18n::t(TextKey::GraphFormulaResetView),
+            accent,
+            move |s| {
+                s.reset_graph_formula_view(&nid_zoom_reset);
+            },
+        ));
+
+    out = out.child(plot_box);
+    if plot.curve_legend.len() > 1 {
+        let mut legend = row().w_full().wrap().gap(8.0);
+        for (expr_lbl, col_dot) in &plot.curve_legend {
+            legend = legend.child(
+                row()
+                    .center_y()
+                    .gap(4.0)
+                    .child(el().size(7.0, 7.0).radius(3.5).fill(*col_dot))
+                    .child(
+                        text(expr_lbl)
+                            .font(theme::BADGE_TEXT)
+                            .color(theme::text_secondary())
+                            .truncate(),
+                    ),
+            );
+        }
+        out = out.child(legend);
+    }
+    out = out.child(plot_toolbar);
+
+    // 6. Quick Presets
+    let mut presets_col = col()
+        .w_full()
+        .gap(4.0)
+        .child(subtle_tag(
+            i18n::t(TextKey::GraphFormulaPresetsTitle),
+            theme::text_muted(),
+        ));
+    for chunk in graph_formula::GRAPH_PRESETS.chunks(4) {
+        let mut r = row().w_full().gap(4.0);
+        for &(name, expr) in chunk {
+            let nid_p = node.id.clone();
+            r = r.child(
+                el()
+                    .key(format!("insp_graph_preset_{name}"))
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .py(5.0)
+                    .px(4.0)
+                    .radius(5.0)
+                    .fill(theme::bg_input())
+                    .hover(theme::hover_subtle())
+                    .border(1.0, theme::border_subtle())
+                    .center()
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.set_graph_formula_preset(&nid_p, expr);
+                    })
+                    .child(
+                        text(name)
+                            .font(theme::BADGE_TEXT)
+                            .color(theme::text_secondary())
+                            .truncate(),
+                    ),
+            );
+        }
+        presets_col = presets_col.child(r);
+    }
+
+    out.child(presets_col)
 }
 
 fn render_drawing_inspector(s: &AppState, node: &Node) -> El {

@@ -19,6 +19,7 @@ pub fn kind_icon(kind: NodeKind) -> &'static Icon {
         NodeKind::Excerpt => &QUOTES,
         NodeKind::Flashcard => &CARDS,
         NodeKind::Formula => &FUNCTION,
+        NodeKind::GraphFormula => &CHART_LINE,
         NodeKind::Checklist => &CHECK_SQUARE,
         NodeKind::Sequence => &FLOW_ARROW,
         NodeKind::Video => &PLAY_CIRCLE,
@@ -40,6 +41,7 @@ pub static QUESTION: Icon = Icon { name: "ph-question", view: 256.0, body: r#"<p
 pub static QUOTES: Icon = Icon { name: "ph-quotes", view: 256.0, body: r#"<path fill="currentColor" d="M100,56H40A16,16,0,0,0,24,72v64a16,16,0,0,0,16,16h60v8a32,32,0,0,1-32,32,8,8,0,0,0,0,16,48.05,48.05,0,0,0,48-48V72A16,16,0,0,0,100,56Zm0,80H40V72h60ZM216,56H156a16,16,0,0,0-16,16v64a16,16,0,0,0,16,16h60v8a32,32,0,0,1-32,32,8,8,0,0,0,0,16,48.05,48.05,0,0,0,48-48V72A16,16,0,0,0,216,56Zm0,80H156V72h60Z"/>"# };
 pub static CHECK_SQUARE: Icon = Icon { name: "ph-check-square", view: 256.0, body: r#"<path fill="currentColor" d="M173.66,98.34a8,8,0,0,1,0,11.32l-56,56a8,8,0,0,1-11.32,0l-24-24a8,8,0,0,1,11.32-11.32L112,148.69l50.34-50.35A8,8,0,0,1,173.66,98.34ZM224,48V208a16,16,0,0,1-16,16H48a16,16,0,0,1-16-16V48A16,16,0,0,1,48,32H208A16,16,0,0,1,224,48ZM208,208V48H48V208H208Z"/>"# };
 pub static FUNCTION: Icon = Icon { name: "ph-function", view: 256.0, body: r#"<path fill="currentColor" d="M208,40a8,8,0,0,1-8,8H170.71a24,24,0,0,0-23.62,19.71L137.59,120H184a8,8,0,0,1,0,16H134.68l-10,55.16A40,40,0,0,1,85.29,224H56a8,8,0,0,1,0-16H85.29a24,24,0,0,0,23.62-19.71l9.5-52.29H72a8,8,0,0,1,0-16h49.32l10-55.16A40,40,0,0,1,170.71,32H200A8,8,0,0,1,208,40Z"/>"# };
+pub static CHART_LINE: Icon = Icon { name: "ph-chart-line", view: 256.0, body: r#"<path fill="currentColor" d="M232,208a8,8,0,0,1-8,8H32a8,8,0,0,1-8-8V48a8,8,0,0,1,16,0v94.37L90.73,98a8,8,0,0,1,10.07-.38l58.81,44.11L218.73,90a8,8,0,1,1,10.54,12l-64,56a8,8,0,0,1-10.07.38L96.39,114.29,40,163.63V200H224A8,8,0,0,1,232,208Z"/>"# };
 pub static FLOW_ARROW: Icon = Icon { name: "ph-flow-arrow", view: 256.0, body: r#"<path fill="currentColor" d="M245.66,74.34l-32-32a8,8,0,0,0-11.32,11.32L220.69,72H208c-49.33,0-61.05,28.12-71.38,52.92-9.38,22.51-16.92,40.59-49.48,42.84a40,40,0,1,0,.1,16c43.26-2.65,54.34-29.15,64.14-52.69C161.41,107,169.33,88,208,88h12.69l-18.35,18.34a8,8,0,0,0,11.32,11.32l32-32A8,8,0,0,0,245.66,74.34ZM48,200a24,24,0,1,1,24-24A24,24,0,0,1,48,200Z"/>"# };
 pub static PLAY_CIRCLE: Icon = Icon { name: "ph-play-circle", view: 256.0, body: r#"<path fill="currentColor" d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm48.24-94.78-64-40A8,8,0,0,0,100,88v80a8,8,0,0,0,12.24,6.78l64-40a8,8,0,0,0,0-13.56ZM116,153.57V102.43L156.91,128Z"/>"# };
 pub static MUSIC_NOTES: Icon = Icon { name: "ph-music-notes", view: 256.0, body: r#"<path fill="currentColor" d="M212.92,17.69a8,8,0,0,0-6.86-1.45l-128,32A8,8,0,0,0,72,56V166.08A36,36,0,1,0,88,196V110.25l112-28v51.83A36,36,0,1,0,216,164V24A8,8,0,0,0,212.92,17.69ZM52,216a20,20,0,1,1,20-20A20,20,0,0,1,52,216ZM88,93.75V62.25l112-28v31.5ZM180,184a20,20,0,1,1,20-20A20,20,0,0,1,180,184Z"/>"# };

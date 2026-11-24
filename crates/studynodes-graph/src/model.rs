@@ -86,6 +86,8 @@ pub enum NodeKind {
     Flashcard,
     /// Monospace mathematical equation, code snippet, or reaction schema
     Formula,
+    /// Interactive mathematical formula editor and 2D function/equation plotter
+    GraphFormula,
     /// Interactive task/study-checklist card backed by Markdown checkboxes
     Checklist,
     /// Numbered procedural or causal step card with chained spawning
@@ -116,6 +118,7 @@ impl NodeKind {
             Self::Excerpt => "Excerpt",
             Self::Flashcard => "Flashcard",
             Self::Formula => "Formula",
+            Self::GraphFormula => "Graphic Formula",
             Self::Checklist => "Checklist",
             Self::Sequence => "Sequence",
             Self::Video => "Video",
@@ -138,6 +141,7 @@ impl NodeKind {
             Self::Excerpt => "#d97757",      // Terracotta citation
             Self::Flashcard => "#d4d3ce",    // Chalk prompt/flip
             Self::Formula => "#b8b7b0",      // Technical mono slate
+            Self::GraphFormula => "#4db6ac", // Interactive graphing teal
             Self::Checklist => "#9a9993",    // Muted task checklist
             Self::Sequence => "#ecebe6",     // Bright ordinal step
             Self::Video => "#c97b74",        // Muted rosewood video embed
@@ -318,6 +322,15 @@ pub struct NodeMeta {
     /// Question deck for `Quiz` nodes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quiz_questions: Vec<QuizQuestion>,
+    /// Plot viewport X center in math coordinates for `GraphFormula` nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_center_x: Option<f64>,
+    /// Plot viewport Y center in math coordinates for `GraphFormula` nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_center_y: Option<f64>,
+    /// Plot viewport horizontal span in math units for `GraphFormula` nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_span_x: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -702,5 +715,30 @@ mod tests {
         let encoded = serde_json::to_string(&populated).expect("serialize");
         let decoded: NodeMeta = serde_json::from_str(&encoded).expect("round-trip");
         assert_eq!(decoded, populated);
+    }
+
+    #[test]
+    fn test_graph_formula_kind_and_meta_round_trip() {
+        let mut node = Node::new(
+            NodeKind::GraphFormula,
+            "Graphic Formula",
+            WorldPos::new(10.0, 20.0),
+        );
+        node.content = "y = sin(x)".into();
+        node.meta.graph_center_x = Some(1.5);
+        node.meta.graph_center_y = Some(-0.5);
+        node.meta.graph_span_x = Some(8.0);
+
+        let encoded = serde_json::to_string(&node).expect("serialize GraphFormula");
+        let decoded: Node = serde_json::from_str(&encoded).expect("deserialize GraphFormula");
+        assert_eq!(decoded.kind, NodeKind::GraphFormula);
+        assert_eq!(decoded.meta.graph_center_x, Some(1.5));
+        assert_eq!(decoded.meta.graph_center_y, Some(-0.5));
+        assert_eq!(decoded.meta.graph_span_x, Some(8.0));
+
+        let legacy_meta: NodeMeta = serde_json::from_str("{}").expect("legacy empty meta");
+        assert!(legacy_meta.graph_center_x.is_none());
+        assert!(legacy_meta.graph_center_y.is_none());
+        assert!(legacy_meta.graph_span_x.is_none());
     }
 }

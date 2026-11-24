@@ -28,6 +28,7 @@ use crate::doc_reader::{
     extract_document_markdown,
 };
 use crate::formula_math;
+use crate::graph_formula;
 use crate::i18n::{self, UiLocale};
 use crate::media_helper;
 use crate::project_io;
@@ -206,6 +207,7 @@ pub fn node_base_size(kind: NodeKind) -> (f32, f32) {
         NodeKind::Excerpt => (265.0, 165.0),
         NodeKind::Flashcard => (270.0, 185.0),
         NodeKind::Formula => (272.0, 168.0),
+        NodeKind::GraphFormula => (360.0, 320.0),
         NodeKind::Checklist => (260.0, 195.0),
         NodeKind::Sequence => (248.0, 145.0),
         NodeKind::Video => (360.0, 248.0),
@@ -228,6 +230,7 @@ pub(crate) fn resizable_node_bounds(kind: NodeKind) -> Option<((f32, f32), (f32,
         NodeKind::Video => Some(((240.0, 176.0), (1280.0, 860.0))),
         NodeKind::Audio => Some(((230.0, 112.0), (900.0, 520.0))),
         NodeKind::Drawing => Some(((240.0, 180.0), (960.0, 720.0))),
+        NodeKind::GraphFormula => Some(((260.0, 220.0), (1100.0, 880.0))),
         NodeKind::Text => Some(((64.0, 28.0), (1200.0, 900.0))),
         NodeKind::Quiz => Some(((250.0, 200.0), (960.0, 780.0))),
         _ => None,
@@ -579,6 +582,11 @@ pub struct AppState {
     pub quiz_hint_edit: TextEdit,
     pub quiz_correct_idx: usize,
 
+    // Graphic Formula inline keypad & plot pan state
+    pub graph_keypad_open: HashSet<NodeId>,
+    pub graph_keypad_mode: graph_formula::KeypadMode,
+    pub graph_drag_origin: Option<(NodeId, f64, f64)>,
+
     // Performance caches & non-blocking background IO workers
     pub asset_path_cache: HashMap<String, PathBuf>,
     pub doc_preview_cache: RefCell<HashMap<NodeId, (u64, Vec<doc_reader::TextPreviewPage>)>>,
@@ -883,6 +891,9 @@ impl AppState {
             quiz_ans_edit: TextEdit::new(""),
             quiz_hint_edit: TextEdit::new(""),
             quiz_correct_idx: 0,
+            graph_keypad_open: HashSet::new(),
+            graph_keypad_mode: graph_formula::KeypadMode::default(),
+            graph_drag_origin: None,
             asset_path_cache: HashMap::new(),
             doc_preview_cache: RefCell::new(HashMap::new()),
             pdf_dimensions_cache: HashMap::new(),
@@ -2568,6 +2579,38 @@ impl AppState {
                     self.insert_formula_symbol(&node_id, &symbol);
                     push_snap = true;
                 }
+                ReaderCommand::ZoomGraphFormula {
+                    node_id,
+                    factor,
+                    anchor_norm,
+                    plot_size,
+                } => {
+                    self.zoom_graph_formula(&node_id, factor, anchor_norm, plot_size);
+                    push_snap = true;
+                }
+                ReaderCommand::PanGraphFormula {
+                    node_id,
+                    start_cx,
+                    start_cy,
+                    dx,
+                    dy,
+                    plot_size,
+                    commit,
+                } => {
+                    self.pan_graph_formula(&node_id, start_cx, start_cy, dx, dy, plot_size);
+                    if commit {
+                        self.finish_pan_graph_formula(&node_id);
+                    }
+                    push_snap = true;
+                }
+                ReaderCommand::ResetGraphFormulaView(node_id) => {
+                    self.reset_graph_formula_view(&node_id);
+                    push_snap = true;
+                }
+                ReaderCommand::ApplyGraphFormulaKeypad { node_id, action } => {
+                    self.apply_graph_formula_keypad(&node_id, action);
+                    push_snap = true;
+                }
                 ReaderCommand::AddNextSequenceStep(node_id) => {
                     if let Some(next_id) = self.add_next_sequence_step(&node_id) {
                         if self.inspector_popped_out {
@@ -2968,7 +3011,10 @@ impl AppState {
                 }
                 self.ai_panel_open = false;
                 self.editing_node_id = None;
-            } else if matches!(n.kind, NodeKind::Note | NodeKind::Formula | NodeKind::Text) {
+            } else if matches!(
+                n.kind,
+                NodeKind::Note | NodeKind::Formula | NodeKind::GraphFormula | NodeKind::Text
+            ) {
                 self.editing_node_id = Some(id.clone());
             } else {
                 self.editing_node_id = None;
@@ -3233,8 +3279,9 @@ impl AppState {
         let Some((is_formula, is_code)) = self.graph.get_node(&id).map(|n| {
             let lang = n.meta.language.as_deref().unwrap_or("MATH");
             (
-                n.kind == NodeKind::Formula,
-                lang.eq_ignore_ascii_case("RUST") || lang.eq_ignore_ascii_case("PY"),
+                matches!(n.kind, NodeKind::Formula | NodeKind::GraphFormula),
+                n.kind == NodeKind::Formula
+                    && (lang.eq_ignore_ascii_case("RUST") || lang.eq_ignore_ascii_case("PY")),
             )
         }) else {
             return;
@@ -3250,6 +3297,138 @@ impl AppState {
             self.canvas_content_edit = next_edit;
             self.sync_from_canvas_edits();
         }
+    }
+
+    pub fn zoom_graph_formula(
+        &mut self,
+        id: &NodeId,
+        factor: f64,
+        anchor_norm: Option<(f32, f32)>,
+        plot_size: (f32, f32),
+    ) {
+        let Some(node) = self.graph.get_node_mut(id) else {
+            return;
+        };
+        if node.kind != NodeKind::GraphFormula {
+            return;
+        }
+        let mut vp = graph_formula::GraphViewport::from_meta(&node.meta);
+        let (nx, ny) = anchor_norm.unwrap_or((0.5, 0.5));
+        vp.zoom_at(nx, ny, factor, plot_size.0.max(64.0), plot_size.1.max(48.0));
+        vp.write_to_meta(&mut node.meta);
+        self.persist_graph_and_snapshot();
+    }
+
+    pub fn pan_graph_formula(
+        &mut self,
+        id: &NodeId,
+        start_cx: f64,
+        start_cy: f64,
+        dx: f32,
+        dy: f32,
+        plot_size: (f32, f32),
+    ) {
+        let Some(node) = self.graph.get_node_mut(id) else {
+            return;
+        };
+        if node.kind != NodeKind::GraphFormula {
+            return;
+        }
+        let mut vp = graph_formula::GraphViewport::from_meta(&node.meta);
+        vp.pan_by_px(
+            start_cx,
+            start_cy,
+            dx,
+            dy,
+            plot_size.0.max(64.0),
+            plot_size.1.max(48.0),
+        );
+        vp.write_to_meta(&mut node.meta);
+    }
+
+    pub fn finish_pan_graph_formula(&mut self, id: &NodeId) {
+        if self
+            .graph
+            .get_node(id)
+            .is_some_and(|n| n.kind == NodeKind::GraphFormula)
+        {
+            self.persist_graph_and_snapshot();
+        }
+    }
+
+    pub fn reset_graph_formula_view(&mut self, id: &NodeId) {
+        let Some(node) = self.graph.get_node_mut(id) else {
+            return;
+        };
+        if node.kind != NodeKind::GraphFormula {
+            return;
+        }
+        graph_formula::GraphViewport::default().write_to_meta(&mut node.meta);
+        self.persist_graph_and_snapshot();
+        self.status_message = "Reset graph view".into();
+    }
+
+    pub fn apply_graph_formula_keypad(
+        &mut self,
+        id: &NodeId,
+        action: graph_formula::KeypadAction,
+    ) {
+        if action == graph_formula::KeypadAction::ToggleMode {
+            self.graph_keypad_mode = match self.graph_keypad_mode {
+                graph_formula::KeypadMode::Sci => graph_formula::KeypadMode::Basic,
+                graph_formula::KeypadMode::Basic => graph_formula::KeypadMode::Sci,
+            };
+            return;
+        }
+
+        let is_selected = self.selected_nodes.contains(id);
+        if !is_selected {
+            self.select_node(id.clone(), false);
+        }
+
+        if self.inspector_content_edit.focused {
+            graph_formula::apply_keypad_to_edit(&mut self.inspector_content_edit, action);
+            self.sync_from_inspector_edits();
+        } else {
+            graph_formula::apply_keypad_to_edit(&mut self.canvas_content_edit, action);
+            self.sync_from_canvas_edits();
+            // Keep inspector selection aligned with canvas edit without dropping focus
+            let (a, b) = self.canvas_content_edit.range();
+            self.inspector_content_edit.set_selection(a, b);
+        }
+        self.persist_graph_and_snapshot();
+    }
+
+    pub fn set_graph_formula_preset(&mut self, id: &NodeId, expr: &str) {
+        let is_selected = self.selected_nodes.contains(id);
+        if let Some(n) = self.graph.get_node_mut(id) {
+            if n.kind == NodeKind::GraphFormula {
+                n.content = expr.to_string();
+                if is_selected {
+                    self.canvas_content_edit = TextEdit::new(&n.content);
+                    self.inspector_content_edit = TextEdit::new(&n.content);
+                }
+            }
+        }
+        self.persist_graph_and_snapshot();
+        self.status_message = format!("Plotted {expr}");
+    }
+
+    pub fn toggle_graph_keypad(&mut self, id: &NodeId) {
+        if self.graph_keypad_open.contains(id) {
+            self.graph_keypad_open.remove(id);
+        } else {
+            self.graph_keypad_open.insert(id.clone());
+            if let Some(n) = self.graph.get_node_mut(id) {
+                if n.kind == NodeKind::GraphFormula && n.size.1 < 410.0 {
+                    n.size.1 = 420.0;
+                }
+            }
+            if !self.selected_nodes.contains(id) {
+                self.select_node(id.clone(), false);
+            }
+        }
+        self.persist_graph_and_snapshot();
     }
 
     /// Spawn a specialized Phase 2 study node with clean monochrome defaults.
@@ -3297,6 +3476,10 @@ impl AppState {
             NodeKind::Formula => {
                 node.content = "Δw_ij = η · x_i · y_j".into();
                 node.meta.language = Some("MATH".into());
+            }
+            NodeKind::GraphFormula => {
+                node.content = "y = sin(x)".into();
+                graph_formula::GraphViewport::default().write_to_meta(&mut node.meta);
             }
             NodeKind::Checklist => {
                 node.content = i18n::default_node_hint(kind).into();
@@ -5593,6 +5776,7 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
             | NodeKind::Concept
             | NodeKind::Excerpt
             | NodeKind::Formula
+            | NodeKind::GraphFormula
             | NodeKind::Checklist
             | NodeKind::Sequence => node.content.trim().is_empty(),
         }
