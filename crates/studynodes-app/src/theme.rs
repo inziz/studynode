@@ -1,7 +1,7 @@
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use rune::{Color, Icon, TextStyle};
+use rune::{Color, El, Icon, SurfaceFit, TextStyle, col, el, text};
 use rune_kit::MarkdownStyle;
 use serde::{Deserialize, Serialize};
 use studynodes_graph::model::NodeKind;
@@ -515,4 +515,70 @@ pub fn chat_markdown_style() -> MarkdownStyle {
         })
         .highlight_fg(Some(text_primary()))
         .list(20.0, 3.0)
+}
+
+/// Compute aspect-ratio-preserving height constrained within `[min_h, max_h]`.
+pub(crate) fn scaled_image_height(
+    img: &rune::Image,
+    avail_w: f32,
+    min_h: f32,
+    max_h: f32,
+    fallback_h: f32,
+) -> f32 {
+    if let Some([iw, ih]) = img.size() {
+        if iw > 0 && ih > 0 {
+            return (avail_w * (ih as f32 / iw as f32)).clamp(min_h, max_h);
+        }
+    }
+    fallback_h.clamp(min_h, max_h)
+}
+
+/// Shared fitted-image container supporting decoded pixels, async loading, and decode errors.
+pub(crate) fn render_fitted_image_box(
+    key: impl Into<String>,
+    img: &rune::Image,
+    height: f32,
+    radius: f32,
+) -> El {
+    let key = key.into();
+    if let Some(err) = img.error() {
+        col()
+            .key(key)
+            .w_full()
+            .h(height.max(64.0))
+            .padding(8.0)
+            .radius(radius)
+            .fill(bg_input())
+            .border(1.0, accent_danger().alpha(0.45))
+            .center()
+            .child(
+                text(format!("Image error: {}", err))
+                    .font(STATUS_TEXT)
+                    .color(accent_danger())
+                    .wrap(),
+            )
+    } else if img.is_ready() {
+        el()
+            .key(key)
+            .w_full()
+            .h(height)
+            .radius(radius)
+            .fill(bg_input())
+            .border(1.0, border_subtle())
+            .pixels_fit(img.pixels(), SurfaceFit::Fit)
+    } else {
+        el()
+            .key(key)
+            .w_full()
+            .h(height)
+            .radius(radius)
+            .fill(bg_input())
+            .border(1.0, border_subtle())
+            .center()
+            .child(
+                text("Loading image...")
+                    .font(STATUS_TEXT)
+                    .color(text_muted()),
+            )
+    }
 }

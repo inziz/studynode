@@ -229,6 +229,12 @@ pub struct QuizQuestion {
     pub answer: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
+    /// Optional SHA-256 asset hash (in `assets/`) for an image shown in the question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_image_hash: Option<String>,
+    /// Optional SHA-256 asset hash (in `assets/`) for an image shown in the answer/explanation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_image_hash: Option<String>,
 }
 
 /// Display mode for a `Quiz` node on the canvas.
@@ -732,5 +738,10 @@ mod tests {
         let encoded = serde_json::to_string(&populated).expect("serialize");
         let decoded: NodeMeta = serde_json::from_str(&encoded).expect("round-trip");
         assert_eq!(decoded, populated);
+
+        let legacy_q_json = r#"{"id":"q1","question":"Prompt?","options":["A","B"],"correct_index":0,"answer":"Exp"}"#;
+        let q_dec: QuizQuestion = serde_json::from_str(legacy_q_json).expect("legacy quiz q");
+        assert!(q_dec.question_image_hash.is_none());
+        assert!(q_dec.answer_image_hash.is_none());
     }
 }

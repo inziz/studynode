@@ -265,6 +265,11 @@ pub fn render_quiz_popout_overlay(s: &AppState, cx: &mut Cx<AppState>) -> El {
                     _ => (&icons::QUESTION, theme::text_muted()),
                 };
 
+                let rev_title = if qq.question.trim().is_empty() {
+                    format!("Q{}", qi + 1)
+                } else {
+                    format!("{}. {}", qi + 1, qq.question)
+                };
                 let mut item = col()
                     .w_full()
                     .px(12.0)
@@ -272,7 +277,7 @@ pub fn render_quiz_popout_overlay(s: &AppState, cx: &mut Cx<AppState>) -> El {
                     .radius(6.0)
                     .fill(theme::bg_input())
                     .border(1.0, theme::border_subtle())
-                    .gap(4.0)
+                    .gap(5.0)
                     .child(
                         row()
                             .w_full()
@@ -280,7 +285,7 @@ pub fn render_quiz_popout_overlay(s: &AppState, cx: &mut Cx<AppState>) -> El {
                             .justify_between()
                             .gap(8.0)
                             .child(
-                                text(format!("{}. {}", qi + 1, qq.question))
+                                text(rev_title)
                                     .font(theme::BODY_TEXT)
                                     .color(theme::text_primary())
                                     .wrap(),
@@ -288,6 +293,15 @@ pub fn render_quiz_popout_overlay(s: &AppState, cx: &mut Cx<AppState>) -> El {
                             .child(icons::ph(badge_ico, 14.0, badge_col)),
                     );
 
+                if let Some(q_img) = s.quiz_image_for_hash(qq.question_image_hash.as_deref()) {
+                    let h = theme::scaled_image_height(q_img, 580.0, 56.0, 120.0, 84.0);
+                    item = item.child(theme::render_fitted_image_box(
+                        format!("quiz_overlay_rev_q_img_{}", qi),
+                        q_img,
+                        h,
+                        5.0,
+                    ));
+                }
                 if let Some(pi) = picked {
                     if let Some(opt_txt) = qq.options.get(pi) {
                         item = item.child(
@@ -317,6 +331,15 @@ pub fn render_quiz_popout_overlay(s: &AppState, cx: &mut Cx<AppState>) -> El {
                             .color(theme::text_muted())
                             .wrap(),
                     );
+                }
+                if let Some(a_img) = s.quiz_image_for_hash(qq.answer_image_hash.as_deref()) {
+                    let h = theme::scaled_image_height(a_img, 580.0, 56.0, 120.0, 84.0);
+                    item = item.child(theme::render_fitted_image_box(
+                        format!("quiz_overlay_rev_ans_img_{}", qi),
+                        a_img,
+                        h,
+                        5.0,
+                    ));
                 }
                 review_col = review_col.child(item);
             }
@@ -439,13 +462,24 @@ pub fn render_quiz_popout_overlay(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 .radius(8.0)
                 .fill(theme::bg_card())
                 .border(1.0, theme::border_subtle())
-                .gap(14.0)
-                .child(
+                .gap(14.0);
+            if !q.question.trim().is_empty() {
+                card = card.child(
                     text(&q.question)
                         .font(TextStyle::new(16.0, 600.0).lh(24.0))
                         .color(theme::text_primary())
                         .wrap(),
                 );
+            }
+            if let Some(q_img) = s.quiz_image_for_hash(q.question_image_hash.as_deref()) {
+                let q_img_h = theme::scaled_image_height(q_img, 636.0, 110.0, 300.0, 190.0);
+                card = card.child(theme::render_fitted_image_box(
+                    "quiz_overlay_q_img",
+                    q_img,
+                    q_img_h,
+                    6.0,
+                ));
+            }
 
             if !q.options.is_empty() {
                 let mut opts_col = col().w_full().gap(8.0);
@@ -552,26 +586,38 @@ pub fn render_quiz_popout_overlay(s: &AppState, cx: &mut Cx<AppState>) -> El {
                     let letter = char::from(b'A' + (q.correct_index.unwrap_or(0) as u8).min(25));
                     format!("{} — {}", letter, txt)
                 });
-                let mut ans_box = col()
-                    .w_full()
-                    .px(11.0)
-                    .py(9.0)
-                    .radius(6.0)
-                    .fill(ok_col.alpha(0.10))
-                    .border(1.0, ok_col.alpha(0.35))
-                    .gap(4.0);
-                if let Some(line) = corr_line {
-                    ans_box = ans_box.child(text(line).font(theme::CONTROL_TEXT).color(ok_col).wrap());
+                let ans_img = s.quiz_image_for_hash(q.answer_image_hash.as_deref());
+                if corr_line.is_some() || !q.answer.trim().is_empty() || ans_img.is_some() {
+                    let mut ans_box = col()
+                        .w_full()
+                        .px(11.0)
+                        .py(9.0)
+                        .radius(6.0)
+                        .fill(ok_col.alpha(0.10))
+                        .border(1.0, ok_col.alpha(0.35))
+                        .gap(6.0);
+                    if let Some(line) = corr_line {
+                        ans_box = ans_box.child(text(line).font(theme::CONTROL_TEXT).color(ok_col).wrap());
+                    }
+                    if !q.answer.trim().is_empty() {
+                        ans_box = ans_box.child(
+                            text(q.answer.trim())
+                                .font(theme::BODY_TEXT)
+                                .color(theme::text_primary())
+                                .wrap(),
+                        );
+                    }
+                    if let Some(a_img) = ans_img {
+                        let a_img_h = theme::scaled_image_height(a_img, 610.0, 96.0, 240.0, 160.0);
+                        ans_box = ans_box.child(theme::render_fitted_image_box(
+                            "quiz_overlay_ans_img",
+                            a_img,
+                            a_img_h,
+                            6.0,
+                        ));
+                    }
+                    card = card.child(ans_box);
                 }
-                if !q.answer.trim().is_empty() {
-                    ans_box = ans_box.child(
-                        text(q.answer.trim())
-                            .font(theme::BODY_TEXT)
-                            .color(theme::text_primary())
-                            .wrap(),
-                    );
-                }
-                card = card.child(ans_box);
             }
 
             // Footer: icon-only assist buttons on left, compact progress center, icon-only nav on right
@@ -601,7 +647,10 @@ pub fn render_quiz_popout_overlay(s: &AppState, cx: &mut Cx<AppState>) -> El {
                 ));
             }
 
-            if !q.answer.trim().is_empty() || q.correct_index.is_some() {
+            if !q.answer.trim().is_empty()
+                || q.correct_index.is_some()
+                || q.answer_image_hash.is_some()
+            {
                 let ans_id = node.id.clone();
                 assist_row = assist_row.child(card_icon_btn(
                     "quiz_overlay_ans_btn",

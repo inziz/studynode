@@ -399,6 +399,16 @@ struct RawQuizQuestion {
     answer: String,
     #[serde(default, alias = "hint", deserialize_with = "deserialize_string_or_vec")]
     hints: Vec<String>,
+    #[serde(default, alias = "question_image", alias = "image_hash")]
+    question_image_hash: Option<String>,
+    #[serde(default, alias = "answer_image")]
+    answer_image_hash: Option<String>,
+}
+
+fn clean_opt_hash(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 impl From<RawQuizQuestion> for QuizQuestion {
@@ -430,6 +440,8 @@ impl From<RawQuizQuestion> for QuizQuestion {
             correct_index,
             answer: raw.answer.trim().to_string(),
             hints,
+            question_image_hash: clean_opt_hash(raw.question_image_hash.as_deref()),
+            answer_image_hash: clean_opt_hash(raw.answer_image_hash.as_deref()),
         }
     }
 }
@@ -911,6 +923,10 @@ pub enum PatchOp {
         answer: String,
         #[serde(default, alias = "hint", deserialize_with = "deserialize_string_or_vec")]
         hints: Vec<String>,
+        #[serde(default, alias = "question_image", alias = "image_hash")]
+        question_image_hash: Option<String>,
+        #[serde(default, alias = "answer_image")]
+        answer_image_hash: Option<String>,
     },
 
     /// Modifies an existing question (by 0-based `question_index`) or appends a hint on a `Quiz` node.
@@ -936,6 +952,10 @@ pub enum PatchOp {
         hints: Option<Vec<String>>,
         #[serde(default)]
         add_hint: Option<String>,
+        #[serde(default, alias = "question_image", alias = "image_hash")]
+        question_image_hash: Option<String>,
+        #[serde(default, alias = "answer_image")]
+        answer_image_hash: Option<String>,
     },
 
     /// Removes a question at 0-based `question_index` from a `Quiz` node.
@@ -1983,9 +2003,13 @@ impl StudyGraph {
                     correct_index,
                     answer,
                     hints,
+                    question_image_hash,
+                    answer_image_hash,
                 } => {
                     let clean_q = question.trim();
-                    if clean_q.is_empty() {
+                    let clean_q_img = clean_opt_hash(question_image_hash.as_deref());
+                    let clean_ans_img = clean_opt_hash(answer_image_hash.as_deref());
+                    if clean_q.is_empty() && clean_q_img.is_none() {
                         result.dropped_ops_count += 1;
                         continue;
                     }
@@ -2036,6 +2060,8 @@ impl StudyGraph {
                             correct_index: clean_correct,
                             answer: answer.trim().to_string(),
                             hints: clean_hints,
+                            question_image_hash: clean_q_img,
+                            answer_image_hash: clean_ans_img,
                         });
                         result.quiz_questions_changed += 1;
                         result
@@ -2055,6 +2081,8 @@ impl StudyGraph {
                     answer,
                     hints,
                     add_hint,
+                    question_image_hash,
+                    answer_image_hash,
                 } => {
                     let Some(nid) = self.resolve_node_id(node_id, &temp_to_real) else {
                         result.dropped_ops_count += 1;
@@ -2091,6 +2119,12 @@ impl StudyGraph {
                             }
                             if let Some(extra) = add_hint.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                                 q_item.hints.push(extra.to_string());
+                            }
+                            if let Some(q_img) = question_image_hash {
+                                q_item.question_image_hash = clean_opt_hash(Some(q_img.as_str()));
+                            }
+                            if let Some(a_img) = answer_image_hash {
+                                q_item.answer_image_hash = clean_opt_hash(Some(a_img.as_str()));
                             }
                             result.quiz_questions_changed += 1;
                             result.updated_nodes.push((

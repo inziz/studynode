@@ -5749,14 +5749,32 @@ fn render_quiz_card_body(
             .min_h(0.0)
             .scroll(ScrollSpec { stick_bottom: false })
             .gap(5.0 * zoom),
-    )
-    .child(
-        text(&q.question)
-            .font(TextStyle::new(body_size, 500.0).lh(body_size * 1.32))
-            .color(theme::text_primary())
-            .w_full()
-            .wrap(),
     );
+    if !q.question.trim().is_empty() {
+        scroll_col = scroll_col.child(
+            text(&q.question)
+                .font(TextStyle::new(body_size, 500.0).lh(body_size * 1.32))
+                .color(theme::text_primary())
+                .w_full()
+                .wrap(),
+        );
+    }
+    let img_avail_w = (node.size.0 - 24.0).max(80.0) * zoom;
+    if let Some(q_img) = s.quiz_image_for_hash(q.question_image_hash.as_deref()) {
+        let q_img_h = theme::scaled_image_height(
+            q_img,
+            img_avail_w,
+            48.0 * zoom,
+            150.0 * zoom,
+            92.0 * zoom,
+        );
+        scroll_col = scroll_col.child(theme::render_fitted_image_box(
+            format!("quiz_q_img_{}_{}", node.id.as_str(), q_idx),
+            q_img,
+            q_img_h,
+            4.0 * zoom,
+        ));
+    }
 
     let ok_col = theme::hex("#6AB07A");
     let bad_col = theme::accent_danger();
@@ -5851,23 +5869,41 @@ fn render_quiz_card_body(
         } else {
             String::new()
         };
-        if !ans_display.is_empty() {
-            scroll_col = scroll_col.child(
-                col()
-                    .w_full()
-                    .px(7.0 * zoom)
-                    .py(4.0 * zoom)
-                    .radius(4.0 * zoom)
-                    .fill(ok_col.alpha(0.10))
-                    .border(1.0, ok_col.alpha(0.45))
-                    .child(
-                        text(ans_display)
-                            .font(TextStyle::new((body_size * 0.88).max(6.0), 400.0))
-                            .color(theme::text_primary())
-                            .w_full()
-                            .wrap(),
-                    ),
-            );
+        let ans_img = s.quiz_image_for_hash(q.answer_image_hash.as_deref());
+        if !ans_display.is_empty() || ans_img.is_some() {
+            let mut ans_box = col()
+                .w_full()
+                .px(7.0 * zoom)
+                .py(4.0 * zoom)
+                .gap(4.0 * zoom)
+                .radius(4.0 * zoom)
+                .fill(ok_col.alpha(0.10))
+                .border(1.0, ok_col.alpha(0.45));
+            if !ans_display.is_empty() {
+                ans_box = ans_box.child(
+                    text(ans_display)
+                        .font(TextStyle::new((body_size * 0.88).max(6.0), 400.0))
+                        .color(theme::text_primary())
+                        .w_full()
+                        .wrap(),
+                );
+            }
+            if let Some(a_img) = ans_img {
+                let a_img_h = theme::scaled_image_height(
+                    a_img,
+                    img_avail_w,
+                    44.0 * zoom,
+                    136.0 * zoom,
+                    82.0 * zoom,
+                );
+                ans_box = ans_box.child(theme::render_fitted_image_box(
+                    format!("quiz_ans_img_{}_{}", node.id.as_str(), q_idx),
+                    a_img,
+                    a_img_h,
+                    4.0 * zoom,
+                ));
+            }
+            scroll_col = scroll_col.child(ans_box);
         }
     }
 
@@ -5903,7 +5939,8 @@ fn render_quiz_card_body(
                 ),
         );
     }
-    if !q.answer.trim().is_empty() || q.correct_index.is_some() {
+    if !q.answer.trim().is_empty() || q.correct_index.is_some() || q.answer_image_hash.is_some()
+    {
         foot_row = foot_row.child(
             el()
                 .key(format!("quiz_ans_btn_{}", node.id.as_str()))

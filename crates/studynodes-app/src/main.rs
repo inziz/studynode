@@ -5333,6 +5333,8 @@ mod tests {
                     correct_index: Some(0),
                     answer: "Alpha is correct.".into(),
                     hints: vec!["Hint for Q1".into()],
+                    question_image_hash: None,
+                    answer_image_hash: None,
                 },
                 QuizQuestion {
                     id: "q2".into(),
@@ -5341,6 +5343,8 @@ mod tests {
                     correct_index: Some(1),
                     answer: "Delta is correct.".into(),
                     hints: vec!["Hint for Q2".into()],
+                    question_image_hash: None,
+                    answer_image_hash: None,
                 },
             ];
         }
@@ -5472,6 +5476,8 @@ mod tests {
                     correct_index: Some(0),
                     answer: "Choice A explanation.".into(),
                     hints: vec!["Subtle hint".into()],
+                    question_image_hash: None,
+                    answer_image_hash: None,
                 },
                 QuizQuestion {
                     id: "hq2".into(),
@@ -5480,6 +5486,8 @@ mod tests {
                     correct_index: Some(1),
                     answer: "Choice D explanation.".into(),
                     hints: vec![],
+                    question_image_hash: None,
+                    answer_image_hash: None,
                 },
             ];
         }
@@ -5559,5 +5567,156 @@ mod tests {
         assert!(!restarted.gave_up);
         assert_eq!(restarted.active_index, 0);
         assert!(restarted.selected_options.is_empty());
+    }
+
+    #[test]
+    fn test_quiz_question_and_answer_images_canvas_and_popout() {
+        const ONE_PX_PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        const ONE_PX_RED_PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xDD, 0x8D,
+            0xB0, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+
+        let mut th = make_test_runtime();
+        let q_png = th._dir.path().join("q_diagram.png");
+        let ans_png = th._dir.path().join("ans_diagram.png");
+        std::fs::write(&q_png, ONE_PX_PNG).expect("write q_diagram.png");
+        std::fs::write(&ans_png, ONE_PX_RED_PNG).expect("write ans_diagram.png");
+
+        let rt = &mut th.rt;
+        rt.state.create_project("Quiz Images Test");
+        let quiz_id = rt
+            .state
+            .add_study_node(NodeKind::Quiz, Some(WorldPos::new(140.0, 120.0)));
+        if let Some(n) = rt.state.graph.get_node_mut(&quiz_id) {
+            n.meta.quiz_questions.clear();
+        }
+        rt.state.select_node(quiz_id.clone(), false);
+        rt.state.inspector_open = true;
+        rt.state.ai_panel_open = false;
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        // Attach draft question and answer images without typing prompt/explanation text
+        assert!(rt.state.quiz_set_draft_image_from_path(false, &q_png));
+        assert!(rt.state.quiz_set_draft_image_from_path(true, &ans_png));
+        rt.invalidate();
+        settle_frames(rt, 8);
+        assert!(has_element_key(rt, "quiz_draft_q_img_preview"));
+        assert!(has_element_key(rt, "quiz_draft_ans_img_preview"));
+        assert!(has_element_key(rt, "btn_quiz_draft_q_img_clear"));
+        assert!(has_element_key(rt, "btn_quiz_draft_ans_img_clear"));
+
+        click_key(rt, "btn_quiz_add_q");
+        settle_frames(rt, 8);
+        assert!(rt.state.quiz_q_img_hash.is_none());
+        assert!(rt.state.quiz_ans_img_hash.is_none());
+
+        let (q_hash, ans_hash) = {
+            let qs = &rt
+                .state
+                .graph
+                .get_node(&quiz_id)
+                .unwrap()
+                .meta
+                .quiz_questions;
+            assert_eq!(qs.len(), 1);
+            (
+                qs[0].question_image_hash.clone().expect("question image hash"),
+                qs[0].answer_image_hash.clone().expect("answer image hash"),
+            )
+        };
+        assert_ne!(q_hash, ans_hash);
+
+        // Inspector card and Regular canvas card display images
+        assert!(has_element_key(rt, "quiz_insp_q_img_0"));
+        assert!(has_element_key(rt, "quiz_insp_ans_img_0"));
+        let canvas_q_img = format!("quiz_q_img_{}_0", quiz_id.as_str());
+        let canvas_ans_btn = format!("quiz_ans_btn_{}", quiz_id.as_str());
+        let canvas_ans_img = format!("quiz_ans_img_{}_0", quiz_id.as_str());
+        assert!(has_element_key(rt, &canvas_q_img));
+        assert!(has_element_key(rt, &canvas_ans_btn));
+        assert!(!has_element_key(rt, &canvas_ans_img));
+
+        click_key(rt, &canvas_ans_btn);
+        settle_frames(rt, 6);
+        assert!(has_element_key(rt, &canvas_ans_img));
+
+        // Reset before testing Popout overlay display
+        rt.state.quiz_reset_session(&quiz_id);
+        click_key(rt, "btn_quiz_mode_popout");
+        settle_frames(rt, 6);
+
+        let start_btn = format!("quiz_start_btn_{}", quiz_id.as_str());
+        click_key(rt, &start_btn);
+        settle_frames(rt, 8);
+        assert!(has_element_key(rt, "quiz_overlay_q_img"));
+        assert!(has_element_key(rt, "quiz_overlay_ans_btn"));
+        assert!(!has_element_key(rt, "quiz_overlay_ans_img"));
+
+        click_key(rt, "quiz_overlay_ans_btn");
+        settle_frames(rt, 6);
+        assert!(has_element_key(rt, "quiz_overlay_ans_img"));
+
+        click_key(rt, "btn_quiz_overlay_finish");
+        settle_frames(rt, 6);
+        assert!(has_element_key(rt, "quiz_overlay_rev_q_img_0"));
+        assert!(has_element_key(rt, "quiz_overlay_rev_ans_img_0"));
+
+        click_key(rt, "btn_quiz_overlay_done_back");
+        settle_frames(rt, 6);
+        click_key(rt, "btn_quiz_mode_regular");
+        settle_frames(rt, 6);
+
+        // Clear answer image from existing question via inspector button
+        click_key(rt, "quiz_ans_img_clear_0");
+        settle_frames(rt, 6);
+        assert!(
+            rt.state
+                .graph
+                .get_node(&quiz_id)
+                .unwrap()
+                .meta
+                .quiz_questions[0]
+                .answer_image_hash
+                .is_none()
+        );
+        assert!(!has_element_key(rt, "quiz_insp_ans_img_0"));
+
+        // Replace question image on existing question and verify orphan pruning preserves active asset
+        assert!(rt
+            .state
+            .quiz_set_question_image_from_path(&quiz_id, 0, false, &ans_png));
+        rt.invalidate();
+        settle_frames(rt, 6);
+        assert_eq!(
+            rt.state
+                .graph
+                .get_node(&quiz_id)
+                .unwrap()
+                .meta
+                .quiz_questions[0]
+                .question_image_hash
+                .as_deref(),
+            Some(ans_hash.as_str())
+        );
+        let pruned = rt
+            .state
+            .bundle
+            .as_ref()
+            .unwrap()
+            .prune_orphan_assets(&rt.state.graph)
+            .unwrap();
+        assert_eq!(pruned, 1);
+        assert!(rt.state.asset_path_cache.get(&ans_hash).unwrap().exists());
     }
 }

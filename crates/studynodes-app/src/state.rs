@@ -591,6 +591,8 @@ pub struct AppState {
     pub quiz_ans_edit: TextEdit,
     pub quiz_hint_edit: TextEdit,
     pub quiz_correct_idx: usize,
+    pub quiz_q_img_hash: Option<String>,
+    pub quiz_ans_img_hash: Option<String>,
 
     // Performance caches & non-blocking background IO workers
     pub asset_path_cache: HashMap<String, PathBuf>,
@@ -897,6 +899,8 @@ impl AppState {
             quiz_ans_edit: TextEdit::new(""),
             quiz_hint_edit: TextEdit::new(""),
             quiz_correct_idx: 0,
+            quiz_q_img_hash: None,
+            quiz_ans_img_hash: None,
             asset_path_cache: HashMap::new(),
             doc_preview_cache: RefCell::new(HashMap::new()),
             pdf_dimensions_cache: HashMap::new(),
@@ -1151,6 +1155,8 @@ impl AppState {
         self.inspector_title_edit = TextEdit::new("");
         self.inspector_content_edit = TextEdit::new("");
         self.inspector_answer_edit = TextEdit::new("");
+        self.quiz_q_img_hash = None;
+        self.quiz_ans_img_hash = None;
         self.edit_edge_label = TextEdit::new("");
         self.edit_edge_note = TextEdit::new("");
 
@@ -2029,6 +2035,53 @@ impl AppState {
         for id in ids {
             self.ensure_card_preview(&id);
         }
+        self.warm_quiz_images();
+    }
+
+    pub fn warm_quiz_images(&mut self) {
+        let mut paths = Vec::new();
+        for node in self.graph.nodes.values() {
+            if node.kind != NodeKind::Quiz {
+                continue;
+            }
+            for q in &node.meta.quiz_questions {
+                for h in [
+                    q.question_image_hash.as_deref(),
+                    q.answer_image_hash.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if let Some(p) = self.asset_path_cache.get(h) {
+                        if !self.decoded_images.contains_key(p) {
+                            paths.push(p.clone());
+                        }
+                    }
+                }
+            }
+        }
+        for h in [
+            self.quiz_q_img_hash.as_deref(),
+            self.quiz_ans_img_hash.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(p) = self.asset_path_cache.get(h) {
+                if !self.decoded_images.contains_key(p) {
+                    paths.push(p.clone());
+                }
+            }
+        }
+        for p in paths {
+            let _ = self.get_or_load_image(&p);
+        }
+    }
+
+    pub fn quiz_image_for_hash(&self, hash: Option<&str>) -> Option<&rune::Image> {
+        let h = hash.map(str::trim).filter(|s| !s.is_empty())?;
+        let path = self.asset_path_cache.get(h)?;
+        self.decoded_images.get(path)
     }
 
     /// Step the preview page/section displayed directly on a canvas Document card.
@@ -2984,6 +3037,8 @@ impl AppState {
                 self.quiz_ans_edit = TextEdit::new("");
                 self.quiz_hint_edit = TextEdit::new("");
                 self.quiz_correct_idx = 0;
+                self.quiz_q_img_hash = None;
+                self.quiz_ans_img_hash = None;
             }
             node_kind = Some(n.kind);
             if matches!(n.kind, NodeKind::Document | NodeKind::Image) {
@@ -3354,6 +3409,8 @@ impl AppState {
                     correct_index: Some(0),
                     answer: "Option A captures the primary mechanism.".into(),
                     hints: vec!["Review the key definition in your notes.".into()],
+                    question_image_hash: None,
+                    answer_image_hash: None,
                 }];
             }
             _ => {}
@@ -4365,6 +4422,7 @@ impl AppState {
             self.doc_preview_cache.borrow_mut().clear();
             self.sync_edit_buffers_from_selected();
             self.ensure_all_media_players();
+            self.refresh_card_previews();
             self.persist_graph_and_snapshot();
             self.save_active_into_tab();
             self.notify_toast("↶ Undid graph change");
@@ -4393,6 +4451,7 @@ impl AppState {
             self.doc_preview_cache.borrow_mut().clear();
             self.sync_edit_buffers_from_selected();
             self.ensure_all_media_players();
+            self.refresh_card_previews();
             self.persist_graph_and_snapshot();
             self.save_active_into_tab();
             self.notify_toast("↷ Redid graph change");
@@ -5674,10 +5733,103 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
         true
     }
 
+    fn quiz_ingest_image_path(&mut self, path: &Path) -> Option<String> {
+        let Some(bundle) = &self.bundle else {
+            self.notify_toast("Open a project to attach images");
+            return None;
+        };
+        match bundle.ingest_asset(path) {
+            Ok((hash, dest_path)) => {
+                self.asset_path_cache.insert(hash.clone(), dest_path.clone());
+                let _ = self.get_or_load_image(&dest_path);
+                Some(hash)
+            }
+            Err(err) => {
+                self.notify_toast(format!("Failed to attach image: {}", err));
+                None
+            }
+        }
+    }
+
+    pub fn quiz_set_draft_image_from_path(&mut self, is_answer: bool, path: &Path) -> bool {
+        let Some(hash) = self.quiz_ingest_image_path(path) else {
+            return false;
+        };
+        if is_answer {
+            self.quiz_ans_img_hash = Some(hash);
+        } else {
+            self.quiz_q_img_hash = Some(hash);
+        }
+        true
+    }
+
+    pub fn quiz_clear_draft_image(&mut self, is_answer: bool) {
+        if is_answer {
+            self.quiz_ans_img_hash = None;
+        } else {
+            self.quiz_q_img_hash = None;
+        }
+    }
+
+    pub fn quiz_set_question_image_from_path(
+        &mut self,
+        id: &NodeId,
+        q_idx: usize,
+        is_answer: bool,
+        path: &Path,
+    ) -> bool {
+        let Some(hash) = self.quiz_ingest_image_path(path) else {
+            return false;
+        };
+        let mut updated = false;
+        if let Some(n) = self.graph.get_node_mut(id) {
+            if n.kind == NodeKind::Quiz {
+                if let Some(q) = n.meta.quiz_questions.get_mut(q_idx) {
+                    if is_answer {
+                        q.answer_image_hash = Some(hash);
+                    } else {
+                        q.question_image_hash = Some(hash);
+                    }
+                    updated = true;
+                }
+            }
+        }
+        if updated {
+            self.persist_graph_and_snapshot();
+            self.notify_toast(if is_answer {
+                format!("Attached answer image to Q{}", q_idx + 1)
+            } else {
+                format!("Attached question image to Q{}", q_idx + 1)
+            });
+        }
+        updated
+    }
+
+    pub fn quiz_clear_question_image(&mut self, id: &NodeId, q_idx: usize, is_answer: bool) {
+        let mut cleared = false;
+        if let Some(n) = self.graph.get_node_mut(id) {
+            if n.kind == NodeKind::Quiz {
+                if let Some(q) = n.meta.quiz_questions.get_mut(q_idx) {
+                    let slot = if is_answer {
+                        &mut q.answer_image_hash
+                    } else {
+                        &mut q.question_image_hash
+                    };
+                    if slot.take().is_some() {
+                        cleared = true;
+                    }
+                }
+            }
+        }
+        if cleared {
+            self.persist_graph_and_snapshot();
+        }
+    }
+
     pub fn quiz_add_question_from_inspector(&mut self, id: &NodeId) -> bool {
         let q_text = self.quiz_q_edit.text.trim().to_string();
-        if q_text.is_empty() {
-            self.notify_toast("Enter a question prompt first");
+        if q_text.is_empty() && self.quiz_q_img_hash.is_none() {
+            self.notify_toast("Enter a question prompt or attach an image first");
             return false;
         }
         let options: Vec<String> = self
@@ -5701,6 +5853,8 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        let question_image_hash = self.quiz_q_img_hash.take();
+        let answer_image_hash = self.quiz_ans_img_hash.take();
 
         let mut added_idx = None;
         if let Some(n) = self.graph.get_node_mut(id) {
@@ -5712,6 +5866,8 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
                     correct_index,
                     answer,
                     hints,
+                    question_image_hash,
+                    answer_image_hash,
                 });
                 added_idx = Some(n.meta.quiz_questions.len() - 1);
             }

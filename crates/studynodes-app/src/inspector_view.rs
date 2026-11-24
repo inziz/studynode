@@ -2008,11 +2008,12 @@ fn render_edit_doc_inspector(s: &AppState, node: &Node) -> El {
             .or_else(|| s.card_image_previews.get(&node.id));
         if doc_format == DocFormat::Image {
             if let Some(img) = preview_img {
-                let img_h = preview_image_height(img, md_w, 160.0, 320.0, 220.0);
-                preview_col = preview_col.child(render_image_preview_box(
+                let img_h = theme::scaled_image_height(img, md_w, 160.0, 320.0, 220.0);
+                preview_col = preview_col.child(theme::render_fitted_image_box(
                     "integrated_image_preview",
                     img,
                     img_h,
+                    6.0,
                 ));
             }
         }
@@ -2794,11 +2795,12 @@ fn render_readonly_doc_panel(s: &AppState, node: &Node, panel_width: f32) -> El 
             .or_else(|| s.card_image_previews.get(&node.id));
         if doc_format == DocFormat::Image {
             if let Some(img) = preview_img {
-                let img_h = preview_image_height(img, md_w, 150.0, 260.0, 190.0);
-                preview_col = preview_col.child(render_image_preview_box(
+                let img_h = theme::scaled_image_height(img, md_w, 150.0, 260.0, 190.0);
+                preview_col = preview_col.child(theme::render_fitted_image_box(
                     "integrated_image_preview",
                     img,
                     img_h,
+                    6.0,
                 ));
             }
         }
@@ -3442,42 +3444,53 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
             let mut deck_col = col()
                 .w_full()
                 .gap(10.0)
-                .child(subtle_tag("MODE", theme::text_muted()))
                 .child(
                     row()
                         .w_full()
-                        .gap(12.0)
+                        .gap(16.0)
                         .child(
-                            underline_tab("btn_quiz_mode_regular", "Regular", !is_popout)
-                                .on_press(move |s: &mut AppState| {
-                                    s.set_quiz_mode(&mode_id_reg, QuizDisplayMode::Regular);
-                                }),
+                            col()
+                                .gap(4.0)
+                                .child(subtle_tag("MODE", theme::text_muted()))
+                                .child(
+                                    row()
+                                        .gap(8.0)
+                                        .child(
+                                            underline_tab("btn_quiz_mode_regular", "Regular", !is_popout)
+                                                .on_press(move |s: &mut AppState| {
+                                                    s.set_quiz_mode(&mode_id_reg, QuizDisplayMode::Regular);
+                                                }),
+                                        )
+                                        .child(
+                                            underline_tab("btn_quiz_mode_popout", "Popout", is_popout)
+                                                .on_press(move |s: &mut AppState| {
+                                                    s.set_quiz_mode(&mode_id_pop, QuizDisplayMode::Popout);
+                                                }),
+                                        ),
+                                ),
                         )
                         .child(
-                            underline_tab("btn_quiz_mode_popout", "Popout", is_popout)
-                                .on_press(move |s: &mut AppState| {
-                                    s.set_quiz_mode(&mode_id_pop, QuizDisplayMode::Popout);
-                                }),
-                        ),
-                )
-                .child(subtle_tag("DIFFICULTY", theme::text_muted()))
-                .child(
-                    row()
-                        .w_full()
-                        .gap(12.0)
-                        .child(
-                            underline_tab("btn_quiz_diff_easy", "Easy", !is_hard).on_press(
-                                move |s: &mut AppState| {
-                                    s.set_quiz_difficulty(&diff_id_easy, QuizDifficulty::Easy);
-                                },
-                            ),
-                        )
-                        .child(
-                            underline_tab("btn_quiz_diff_hard", "Hard", is_hard).on_press(
-                                move |s: &mut AppState| {
-                                    s.set_quiz_difficulty(&diff_id_hard, QuizDifficulty::Hard);
-                                },
-                            ),
+                            col()
+                                .gap(4.0)
+                                .child(subtle_tag("DIFFICULTY", theme::text_muted()))
+                                .child(
+                                    row()
+                                        .gap(8.0)
+                                        .child(
+                                            underline_tab("btn_quiz_diff_easy", "Easy", !is_hard).on_press(
+                                                move |s: &mut AppState| {
+                                                    s.set_quiz_difficulty(&diff_id_easy, QuizDifficulty::Easy);
+                                                },
+                                            ),
+                                        )
+                                        .child(
+                                            underline_tab("btn_quiz_diff_hard", "Hard", is_hard).on_press(
+                                                move |s: &mut AppState| {
+                                                    s.set_quiz_difficulty(&diff_id_hard, QuizDifficulty::Hard);
+                                                },
+                                            ),
+                                        ),
+                                ),
                         ),
                 )
                 .child(
@@ -3580,13 +3593,23 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                     theme::text_muted(),
                 ));
 
+            let thumb_w = (s.inspector_width.clamp(300.0, 860.0) - 76.0).max(140.0);
             for (qi, q) in node.meta.quiz_questions.iter().enumerate() {
                 let del_nid = nid.clone();
                 let hint_nid = nid.clone();
+                let q_pick_nid = nid.clone();
+                let q_clear_nid = nid.clone();
+                let ans_pick_nid = nid.clone();
+                let ans_clear_nid = nid.clone();
+                let q_label = if q.question.trim().is_empty() && q.question_image_hash.is_some() {
+                    "[Image Question]"
+                } else {
+                    q.question.as_str()
+                };
                 let mut q_card = col()
                     .w_full()
                     .padding(8.0)
-                    .gap(4.0)
+                    .gap(5.0)
                     .radius(6.0)
                     .fill(theme::bg_input())
                     .border(1.0, theme::border_subtle())
@@ -3594,17 +3617,35 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                         row()
                             .w_full()
                             .center_y()
-                            .gap(6.0)
+                            .gap(4.0)
                             .child(subtle_tag(&format!("Q{}", qi + 1), theme::kind_accent(NodeKind::Quiz)))
                             .child(
                                 el().grow(1.0).min_w(0.0).child(
-                                    text(&q.question)
+                                    text(q_label)
                                         .font(theme::STATUS_TEXT)
                                         .color(theme::text_primary())
                                         .w_full()
                                         .wrap(),
                                 ),
                             )
+                            .child(quiz_image_pick_btn(
+                                format!("quiz_q_img_pick_{}", qi),
+                                "Q",
+                                "Choose Question Image",
+                                q.question_image_hash.is_some(),
+                                move |s, path| {
+                                    s.quiz_set_question_image_from_path(&q_pick_nid, qi, false, path);
+                                },
+                            ))
+                            .child(quiz_image_pick_btn(
+                                format!("quiz_ans_img_pick_{}", qi),
+                                "A",
+                                "Choose Answer Image",
+                                q.answer_image_hash.is_some(),
+                                move |s, path| {
+                                    s.quiz_set_question_image_from_path(&ans_pick_nid, qi, true, path);
+                                },
+                            ))
                             .child(ghost_icon_btn(
                                 format!("quiz_add_hint_{}", qi),
                                 &icons::LIGHTBULB,
@@ -3635,6 +3676,74 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                             .color(theme::text_muted())
                             .w_full()
                             .wrap(),
+                    );
+                }
+                if q.question_image_hash.is_some() {
+                    let clr_nid = q_clear_nid.clone();
+                    let preview_el = if let Some(q_img) =
+                        s.quiz_image_for_hash(q.question_image_hash.as_deref())
+                    {
+                        let h = theme::scaled_image_height(q_img, thumb_w, 44.0, 96.0, 64.0);
+                        theme::render_fitted_image_box(
+                            format!("quiz_insp_q_img_{}", qi),
+                            q_img,
+                            h,
+                            5.0,
+                        )
+                    } else {
+                        text("Question image attached")
+                            .font(theme::BADGE_TEXT)
+                            .color(theme::text_muted())
+                    };
+                    q_card = q_card.child(
+                        row()
+                            .w_full()
+                            .center_y()
+                            .gap(6.0)
+                            .child(el().grow(1.0).min_w(0.0).child(preview_el))
+                            .child(ghost_icon_btn(
+                                format!("quiz_q_img_clear_{}", qi),
+                                &icons::X,
+                                theme::accent_danger(),
+                                false,
+                                move |s| {
+                                    s.quiz_clear_question_image(&clr_nid, qi, false);
+                                },
+                            )),
+                    );
+                }
+                if q.answer_image_hash.is_some() {
+                    let clr_nid = ans_clear_nid.clone();
+                    let preview_el = if let Some(a_img) =
+                        s.quiz_image_for_hash(q.answer_image_hash.as_deref())
+                    {
+                        let h = theme::scaled_image_height(a_img, thumb_w, 44.0, 96.0, 64.0);
+                        theme::render_fitted_image_box(
+                            format!("quiz_insp_ans_img_{}", qi),
+                            a_img,
+                            h,
+                            5.0,
+                        )
+                    } else {
+                        text("Answer image attached")
+                            .font(theme::BADGE_TEXT)
+                            .color(theme::text_muted())
+                    };
+                    q_card = q_card.child(
+                        row()
+                            .w_full()
+                            .center_y()
+                            .gap(6.0)
+                            .child(el().grow(1.0).min_w(0.0).child(preview_el))
+                            .child(ghost_icon_btn(
+                                format!("quiz_ans_img_clear_{}", qi),
+                                &icons::X,
+                                theme::accent_danger(),
+                                false,
+                                move |s| {
+                                    s.quiz_clear_question_image(&clr_nid, qi, true);
+                                },
+                            )),
                     );
                 }
                 deck_col = deck_col.child(q_card);
@@ -3685,14 +3794,17 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                 );
             }
 
-            deck_col
+            deck_col = deck_col
                 .child(hairline())
                 .child(subtle_tag("ADD QUESTION", theme::text_muted()))
-                .child(
-                    text("Question")
-                        .font(theme::BADGE_TEXT)
-                        .color(theme::text_muted()),
-                )
+                .child(quiz_draft_field_header(
+                    "Question",
+                    "btn_quiz_draft_q_img",
+                    "btn_quiz_draft_q_img_clear",
+                    false,
+                    s.quiz_q_img_hash.is_some(),
+                    "Choose Question Image",
+                ))
                 .child(
                     el()
                         .w_full()
@@ -3718,7 +3830,17 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                                     }
                                 }),
                         ),
-                )
+                );
+            if let Some(q_img) = s.quiz_image_for_hash(s.quiz_q_img_hash.as_deref()) {
+                let h = theme::scaled_image_height(q_img, thumb_w, 40.0, 64.0, 48.0);
+                deck_col = deck_col.child(theme::render_fitted_image_box(
+                    "quiz_draft_q_img_preview",
+                    q_img,
+                    h,
+                    5.0,
+                ));
+            }
+            deck_col = deck_col
                 .child(
                     text("Options")
                         .font(theme::BADGE_TEXT)
@@ -3749,11 +3871,14 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                         ),
                 )
                 .child(correct_picker)
-                .child(
-                    text("Explanation")
-                        .font(theme::BADGE_TEXT)
-                        .color(theme::text_muted()),
-                )
+                .child(quiz_draft_field_header(
+                    "Explanation",
+                    "btn_quiz_draft_ans_img",
+                    "btn_quiz_draft_ans_img_clear",
+                    true,
+                    s.quiz_ans_img_hash.is_some(),
+                    "Choose Answer Image",
+                ))
                 .child(
                     el()
                         .w_full()
@@ -3779,7 +3904,17 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                                     }
                                 }),
                         ),
-                )
+                );
+            if let Some(a_img) = s.quiz_image_for_hash(s.quiz_ans_img_hash.as_deref()) {
+                let h = theme::scaled_image_height(a_img, thumb_w, 40.0, 64.0, 48.0);
+                deck_col = deck_col.child(theme::render_fitted_image_box(
+                    "quiz_draft_ans_img_preview",
+                    a_img,
+                    h,
+                    5.0,
+                ));
+            }
+            deck_col
                 .child(
                     text("Hints")
                         .font(theme::BADGE_TEXT)
@@ -3843,60 +3978,108 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
     }
 }
 
-fn preview_image_height(
-    img: &rune::Image,
-    avail_w: f32,
-    min_h: f32,
-    max_h: f32,
-    fallback_h: f32,
-) -> f32 {
-    if let Some([iw, ih]) = img.size() {
-        if iw > 0 && ih > 0 {
-            return (avail_w * (ih as f32 / iw as f32)).clamp(min_h, max_h);
-        }
-    }
-    fallback_h
+fn quiz_image_pick_btn(
+    key: String,
+    label: &'static str,
+    dialog_title: &'static str,
+    active: bool,
+    on_pick: impl Fn(&mut AppState, &std::path::PathBuf) + Clone + 'static,
+) -> El {
+    let accent = theme::kind_accent(NodeKind::Quiz);
+    el()
+        .key(key)
+        .px(5.0)
+        .py(2.0)
+        .radius(4.0)
+        .fill(if active {
+            accent.alpha(0.14)
+        } else {
+            theme::bg_control()
+        })
+        .hover(theme::hover_subtle())
+        .border(
+            1.0,
+            if active {
+                accent.alpha(0.45)
+            } else {
+                theme::border_subtle()
+            },
+        )
+        .cursor(Cursor::Pointer)
+        .on_press_tx(move |_: &mut AppState, tx: &mut Tx| {
+            let cb = on_pick.clone();
+            let opts = FileDialogOptions {
+                title: dialog_title.into(),
+                ..Default::default()
+            }
+            .filter("Images", &["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg"]);
+            tx.open_file(opts, move |s: &mut AppState, res, _| {
+                if let Ok(Some(path)) = res {
+                    cb(s, &path);
+                }
+            });
+        })
+        .child(
+            row()
+                .center_y()
+                .gap(4.0)
+                .child(icons::ph(
+                    &icons::IMAGE,
+                    11.0,
+                    if active { accent } else { theme::text_secondary() },
+                ))
+                .child(
+                    text(label)
+                        .font(theme::BADGE_TEXT)
+                        .color(if active {
+                            theme::text_primary()
+                        } else {
+                            theme::text_secondary()
+                        }),
+                ),
+        )
 }
 
-fn render_image_preview_box(key: &'static str, img: &rune::Image, height: f32) -> El {
-    if let Some(err) = img.error() {
-        col()
-            .key(key)
-            .w_full()
-            .h(120.0)
-            .padding(10.0)
-            .radius(6.0)
-            .fill(theme::bg_input())
-            .border(1.0, theme::accent_danger().alpha(0.45))
-            .center()
-            .child(
-                text(format!("Image error: {}", err))
-                    .font(theme::STATUS_TEXT)
-                    .color(theme::accent_danger())
-                    .wrap(),
-            )
-    } else if img.is_ready() {
-        el()
-            .key(key)
-            .w_full()
-            .h(height)
-            .radius(6.0)
-            .fill(theme::bg_input())
-            .pixels_fit(img.pixels(), SurfaceFit::Fit)
-    } else {
-        el()
-            .key(key)
-            .w_full()
-            .h(height)
-            .radius(6.0)
-            .fill(theme::bg_input())
-            .center()
-            .child(
-                text("Loading image...")
-                    .font(theme::STATUS_TEXT)
-                    .color(theme::text_muted()),
-            )
+fn quiz_draft_field_header(
+    title: &'static str,
+    pick_key: &'static str,
+    clear_key: &'static str,
+    is_answer: bool,
+    has_img: bool,
+    dialog_title: &'static str,
+) -> El {
+    let mut header = row()
+        .w_full()
+        .center_y()
+        .justify_between()
+        .gap(6.0)
+        .child(
+            text(title)
+                .font(theme::BADGE_TEXT)
+                .color(theme::text_muted()),
+        );
+    let mut btns = row().center_y().gap(4.0).child(quiz_image_pick_btn(
+        pick_key.to_string(),
+        if has_img { "Replace" } else { "Image" },
+        dialog_title,
+        has_img,
+        move |s, path| {
+            s.quiz_set_draft_image_from_path(is_answer, path);
+        },
+    ));
+    if has_img {
+        btns = btns.child(ghost_icon_btn(
+            clear_key,
+            &icons::X,
+            theme::accent_danger(),
+            false,
+            move |s| {
+                s.quiz_clear_draft_image(is_answer);
+            },
+        ));
     }
+    header = header.child(btns);
+    header
 }
 
 fn vision_input_field(

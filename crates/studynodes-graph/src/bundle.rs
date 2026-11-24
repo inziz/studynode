@@ -154,12 +154,22 @@ impl ProjectBundle {
             return Ok(0);
         }
 
-        // Collect all active asset hashes referenced by nodes
-        let active_hashes: HashSet<&str> = graph
+        // Collect all active asset hashes referenced by nodes and quiz questions/answers
+        let mut active_hashes: HashSet<&str> = graph
             .nodes
             .values()
             .filter_map(|n| n.asset_hash.as_deref())
             .collect();
+        for node in graph.nodes.values() {
+            for q in &node.meta.quiz_questions {
+                if let Some(h) = q.question_image_hash.as_deref() {
+                    active_hashes.insert(h);
+                }
+                if let Some(h) = q.answer_image_hash.as_deref() {
+                    active_hashes.insert(h);
+                }
+            }
+        }
 
         let mut pruned = 0;
         for entry in fs::read_dir(&assets_dir)? {
@@ -203,6 +213,7 @@ impl ProjectBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Node, NodeKind, QuizQuestion, WorldPos};
     use tempfile::tempdir;
 
     #[test]
@@ -240,8 +251,29 @@ mod tests {
     #[test]
     fn test_orphan_asset_pruning() {
         let dir = tempdir().unwrap();
-        let (bundle, graph) =
+        let (bundle, mut graph) =
             ProjectBundle::create(dir.path(), "orphan_test.studynodes", "Prune Test").unwrap();
+
+        // Ingest a quiz question image and answer image referenced on a Quiz node
+        let q_src = dir.path().join("q_img.png");
+        let a_src = dir.path().join("a_img.png");
+        fs::write(&q_src, b"fake-png-question").unwrap();
+        fs::write(&a_src, b"fake-png-answer").unwrap();
+        let (q_hash, q_dest) = bundle.ingest_asset(&q_src).unwrap();
+        let (a_hash, a_dest) = bundle.ingest_asset(&a_src).unwrap();
+
+        let mut quiz = Node::new(NodeKind::Quiz, "Image Quiz", WorldPos::new(0.0, 0.0));
+        quiz.meta.quiz_questions.push(QuizQuestion {
+            id: "qi1".into(),
+            question: "See image".into(),
+            options: vec!["A".into(), "B".into()],
+            correct_index: Some(0),
+            answer: "See answer image".into(),
+            hints: vec![],
+            question_image_hash: Some(q_hash),
+            answer_image_hash: Some(a_hash),
+        });
+        graph.add_node(quiz);
 
         // Ingest an asset that won't be attached to any node
         let dummy_path = dir.path().join("orphan.txt");
@@ -252,5 +284,7 @@ mod tests {
         let pruned_count = bundle.prune_orphan_assets(&graph).unwrap();
         assert_eq!(pruned_count, 1);
         assert!(!dest.exists(), "Orphan asset must be pruned from disk");
+        assert!(q_dest.exists(), "Quiz question image must be preserved");
+        assert!(a_dest.exists(), "Quiz answer image must be preserved");
     }
 }
