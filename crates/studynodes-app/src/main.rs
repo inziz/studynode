@@ -11,6 +11,7 @@ mod icons;
 mod inspector_view;
 mod media_helper;
 mod project_io;
+mod quiz_overlay;
 mod reader_window;
 mod settings_view;
 mod state;
@@ -29,30 +30,34 @@ fn view(s: &AppState, cx: &mut Cx<AppState>) -> El {
     cx.caption_color(theme::text_secondary());
     cx.titlebar_height(36.0);
 
-    if s.screen != AppScreen::Workspace {
+    if s.screen != AppScreen::Workspace || s.active_quiz_overlay.is_some() {
         touchpad_win32::set_canvas_bounds(None);
     }
 
-    let main_content = match s.screen {
-        AppScreen::Dashboard => render_dashboard(s, cx),
-        AppScreen::Settings => render_settings(s, cx),
-        AppScreen::Workspace => {
-            let topbar = render_workspace_topbar(s, cx);
-            let canvas = render_canvas_view(s);
-            let mut workspace_body = row().w_full().grow(1.0).min_h(0.0).child(canvas);
+    let main_content = if s.active_quiz_overlay.is_some() {
+        quiz_overlay::render_quiz_popout_overlay(s, cx)
+    } else {
+        match s.screen {
+            AppScreen::Dashboard => render_dashboard(s, cx),
+            AppScreen::Settings => render_settings(s, cx),
+            AppScreen::Workspace => {
+                let topbar = render_workspace_topbar(s, cx);
+                let canvas = render_canvas_view(s);
+                let mut workspace_body = row().w_full().grow(1.0).min_h(0.0).child(canvas);
 
-            if s.inspector_open && !s.inspector_popped_out {
-                let inspector = render_inspector(s, cx);
-                workspace_body = workspace_body.child(inspector);
+                if s.inspector_open && !s.inspector_popped_out {
+                    let inspector = render_inspector(s, cx);
+                    workspace_body = workspace_body.child(inspector);
+                }
+
+                col()
+                    .key("workspace_root")
+                    .w_full()
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .child(topbar)
+                    .child(workspace_body)
             }
-
-            col()
-                .key("workspace_root")
-                .w_full()
-                .grow(1.0)
-                .min_h(0.0)
-                .child(topbar)
-                .child(workspace_body)
         }
     };
 
@@ -267,6 +272,29 @@ fn handle_app_key(s: &mut AppState, ev: &rune::KeyEvent, tx: &mut rune::Tx) -> b
         tx.toggle_full_screen();
         return true;
     }
+    if s.active_quiz_overlay.is_some() {
+        if ev.key == rune::Key::Escape {
+            s.quiz_return_to_scheme();
+            return true;
+        }
+        if tx.focused().is_none() {
+            if let Some(qid) = s.active_quiz_overlay.clone() {
+                match ev.key {
+                    rune::Key::Left => {
+                        s.quiz_step_question(&qid, -1);
+                        return true;
+                    }
+                    rune::Key::Right => {
+                        s.quiz_step_question(&qid, 1);
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+            return true;
+        }
+        return false;
+    }
     if ev.key == rune::Key::Escape {
         let had_menu = s.show_block_menu || s.show_ai_menu;
         if had_menu {
@@ -453,8 +481,14 @@ mod tests {
     use super::*;
     use rune::{Env, Key, KeyEvent, MagnifyEvent, Mods, Runtime, WheelEvent};
     use studynodes_graph::coords::{ScreenPos, WorldPos};
-    use studynodes_graph::model::NodeKind;
+    use studynodes_graph::model::{NodeKind, QuizDifficulty, QuizDisplayMode, QuizQuestion};
     use tempfile::TempDir;
+
+    fn has_element_key(rt: &Runtime<AppState>, key: &str) -> bool {
+        rt.elements()
+            .into_iter()
+            .any(|e| e.key.as_deref() == Some(key) && !e.exiting)
+    }
 
     struct TestHarness {
         _dir: TempDir,
@@ -2856,6 +2890,8 @@ mod tests {
                 summary: None,
                 media_url: None,
                 quiz_questions: None,
+                quiz_mode: None,
+                quiz_difficulty: None,
             }],
         };
         let res = rt.state.apply_ai_patch_with_undo(&patch);
@@ -2881,6 +2917,8 @@ mod tests {
                 media_url: None,
                 source_nodes: vec![],
                 quiz_questions: vec![],
+                quiz_mode: None,
+                quiz_difficulty: None,
                 text_font: None,
                 text_size: None,
                 x: None,
@@ -5479,5 +5517,250 @@ mod tests {
         assert_eq!(saved_node.content, content);
         assert!(saved_node.meta.graph_center_x.is_some());
         assert!(saved_node.meta.graph_span_x.is_some());
+    }
+
+    #[test]
+    fn test_quiz_popout_easy_mode_return_and_resume() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Quiz Popout Easy Test");
+        let quiz_id = rt
+            .state
+            .add_study_node(NodeKind::Quiz, Some(WorldPos::new(160.0, 140.0)));
+        if let Some(n) = rt.state.graph.get_node_mut(&quiz_id) {
+            n.meta.quiz_questions = vec![
+                QuizQuestion {
+                    id: "q1".into(),
+                    question: "First question?".into(),
+                    options: vec!["Alpha".into(), "Beta".into()],
+                    correct_index: Some(0),
+                    answer: "Alpha is correct.".into(),
+                    hints: vec!["Hint for Q1".into()],
+                },
+                QuizQuestion {
+                    id: "q2".into(),
+                    question: "Second question?".into(),
+                    options: vec!["Gamma".into(), "Delta".into()],
+                    correct_index: Some(1),
+                    answer: "Delta is correct.".into(),
+                    hints: vec!["Hint for Q2".into()],
+                },
+            ];
+        }
+        // Also add a Video node to verify desired_embeds() is suppressed while overlay covers the window
+        let vid_id = rt
+            .state
+            .add_study_node(NodeKind::Video, Some(WorldPos::new(600.0, 140.0)));
+        if let Some(v) = rt.state.graph.get_node_mut(&vid_id) {
+            v.meta.media_url = Some("https://youtu.be/dQw4w9WgXcQ".into());
+        }
+        rt.state
+            .embed_rects
+            .insert(vid_id.clone(), [120.0, 120.0, 320.0, 180.0]);
+
+        rt.state.select_node(quiz_id.clone(), false);
+        rt.state.inspector_open = true;
+        rt.state.ai_panel_open = false;
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        let opt_0_0 = format!("quiz_opt_{}_0_0", quiz_id.as_str());
+        let ans_btn = format!("quiz_ans_btn_{}", quiz_id.as_str());
+        let start_btn = format!("quiz_start_btn_{}", quiz_id.as_str());
+        assert!(has_element_key(rt, &opt_0_0));
+        assert!(has_element_key(rt, &ans_btn));
+        assert!(rt.state.desired_embeds().iter().any(|e| e.visible));
+
+        click_key(rt, "btn_quiz_mode_popout");
+        click_key(rt, "btn_quiz_diff_easy");
+        settle_frames(rt, 6);
+
+        let quiz_node = rt.state.graph.get_node(&quiz_id).unwrap();
+        assert_eq!(quiz_node.meta.quiz_mode, QuizDisplayMode::Popout);
+        assert_eq!(quiz_node.meta.quiz_difficulty, QuizDifficulty::Easy);
+        assert!(has_element_key(rt, &start_btn));
+        assert!(!has_element_key(rt, &opt_0_0));
+
+        click_key(rt, &start_btn);
+        settle_frames(rt, 6);
+        assert_eq!(rt.state.active_quiz_overlay.as_ref(), Some(&quiz_id));
+        assert!(has_element_key(rt, "quiz_popout_overlay"));
+        assert!(has_element_key(rt, "btn_quiz_overlay_back"));
+        assert!(rt.state.desired_embeds().iter().all(|e| !e.visible));
+
+        click_key(rt, "quiz_overlay_opt_0");
+        click_key(rt, "quiz_overlay_hint_btn");
+        click_key(rt, "btn_quiz_overlay_next");
+        settle_frames(rt, 4);
+        assert_eq!(rt.state.quiz_sessions.get(&quiz_id).unwrap().active_index, 1);
+
+        // Return to scheme via Back button
+        click_key(rt, "btn_quiz_overlay_back");
+        settle_frames(rt, 6);
+        assert!(rt.state.active_quiz_overlay.is_none());
+        assert!(has_element_key(rt, &start_btn));
+
+        // Resume right where we left off
+        click_key(rt, &start_btn);
+        settle_frames(rt, 6);
+        assert_eq!(rt.state.active_quiz_overlay.as_ref(), Some(&quiz_id));
+        {
+            let sess = rt.state.quiz_sessions.get(&quiz_id).unwrap();
+            assert_eq!(sess.active_index, 1);
+            assert_eq!(sess.selected_options.get(&0), Some(&0));
+            assert_eq!(sess.revealed_hints.get(&0), Some(&1));
+        }
+
+        // Escape also returns in Easy mode and keeps progress when resumed again
+        rt.key(KeyEvent {
+            key: Key::Escape,
+            mods: Mods::default(),
+        });
+        settle_frames(rt, 6);
+        assert!(rt.state.active_quiz_overlay.is_none());
+
+        click_key(rt, &start_btn);
+        settle_frames(rt, 6);
+        assert_eq!(rt.state.quiz_sessions.get(&quiz_id).unwrap().active_index, 1);
+
+        // Easy mode reset inside overlay clears progress and returns to Q1
+        click_key(rt, "btn_quiz_overlay_reset");
+        settle_frames(rt, 6);
+        {
+            let sess = rt.state.quiz_sessions.get(&quiz_id).unwrap();
+            assert_eq!(sess.active_index, 0);
+            assert!(sess.selected_options.is_empty());
+            assert!(sess.revealed_hints.is_empty());
+            assert_eq!(sess.status, crate::state::QuizAttemptStatus::InProgress);
+        }
+
+        click_key(rt, "quiz_overlay_opt_0");
+        click_key(rt, "btn_quiz_overlay_next");
+        settle_frames(rt, 4);
+        click_key(rt, "quiz_overlay_opt_1");
+        settle_frames(rt, 4);
+        click_key(rt, "btn_quiz_overlay_finish");
+        settle_frames(rt, 6);
+        assert_eq!(
+            rt.state.quiz_sessions.get(&quiz_id).unwrap().status,
+            crate::state::QuizAttemptStatus::Completed
+        );
+
+        click_key(rt, "btn_quiz_overlay_done_back");
+        settle_frames(rt, 6);
+        assert!(rt.state.active_quiz_overlay.is_none());
+
+        // Easy mode reset button on the canvas card clears the completed attempt
+        let reset_btn = format!("quiz_reset_btn_{}", quiz_id.as_str());
+        assert!(has_element_key(rt, &reset_btn));
+        click_key(rt, &reset_btn);
+        settle_frames(rt, 6);
+        assert!(!rt.state.quiz_sessions.contains_key(&quiz_id));
+    }
+
+    #[test]
+    fn test_quiz_popout_hard_mode_lock_give_up_fail_and_retry() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Quiz Popout Hard Test");
+        let quiz_id = rt
+            .state
+            .add_study_node(NodeKind::Quiz, Some(WorldPos::new(160.0, 140.0)));
+        if let Some(n) = rt.state.graph.get_node_mut(&quiz_id) {
+            n.meta.quiz_questions = vec![
+                QuizQuestion {
+                    id: "hq1".into(),
+                    question: "Hard question 1?".into(),
+                    options: vec!["Choice A".into(), "Choice B".into()],
+                    correct_index: Some(0),
+                    answer: "Choice A explanation.".into(),
+                    hints: vec!["Subtle hint".into()],
+                },
+                QuizQuestion {
+                    id: "hq2".into(),
+                    question: "Hard question 2?".into(),
+                    options: vec!["Choice C".into(), "Choice D".into()],
+                    correct_index: Some(1),
+                    answer: "Choice D explanation.".into(),
+                    hints: vec![],
+                },
+            ];
+        }
+        rt.state.select_node(quiz_id.clone(), false);
+        rt.state.inspector_open = true;
+        rt.state.ai_panel_open = false;
+        rt.invalidate();
+        settle_frames(rt, 8);
+
+        click_key(rt, "btn_quiz_mode_popout");
+        click_key(rt, "btn_quiz_diff_hard");
+        settle_frames(rt, 6);
+
+        let start_btn = format!("quiz_start_btn_{}", quiz_id.as_str());
+        click_key(rt, &start_btn);
+        settle_frames(rt, 6);
+        assert_eq!(rt.state.active_quiz_overlay.as_ref(), Some(&quiz_id));
+        assert!(rt.state.is_quiz_hard_locked());
+        assert!(!has_element_key(rt, "btn_quiz_overlay_back"));
+        assert!(!has_element_key(rt, "btn_quiz_overlay_reset"));
+        assert!(has_element_key(rt, "btn_quiz_overlay_give_up"));
+        let give_up_r = element_rect(rt, "btn_quiz_overlay_give_up");
+        assert!(
+            give_up_r[1] + give_up_r[3] <= 36.0 + 1.0,
+            "give up button should sit cleanly inside 36px topbar: {:?}",
+            give_up_r
+        );
+
+        click_key(rt, "quiz_overlay_opt_0");
+        settle_frames(rt, 4);
+
+        // Escape and programmatic return_to_scheme are blocked while Hard-locked
+        rt.key(KeyEvent {
+            key: Key::Escape,
+            mods: Mods::default(),
+        });
+        settle_frames(rt, 4);
+        assert!(!rt.state.quiz_return_to_scheme());
+        assert_eq!(rt.state.active_quiz_overlay.as_ref(), Some(&quiz_id));
+        assert!(rt.state.is_quiz_hard_locked());
+
+        // Workspace hotkeys (e.g. Delete) are also blocked while overlay is active
+        rt.key(KeyEvent {
+            key: Key::Delete,
+            mods: Mods::default(),
+        });
+        settle_frames(rt, 4);
+        assert!(rt.state.graph.get_node(&quiz_id).is_some());
+
+        // Give Up marks the quiz Failed and unlocks returning to the scheme
+        click_key(rt, "btn_quiz_overlay_give_up");
+        settle_frames(rt, 6);
+        {
+            let sess = rt.state.quiz_sessions.get(&quiz_id).unwrap();
+            assert_eq!(sess.status, crate::state::QuizAttemptStatus::Failed);
+            assert!(sess.gave_up);
+        }
+        assert!(!rt.state.is_quiz_hard_locked());
+        assert!(has_element_key(rt, "btn_quiz_overlay_try_again"));
+        assert!(has_element_key(rt, "btn_quiz_overlay_done_back"));
+
+        click_key(rt, "btn_quiz_overlay_done_back");
+        settle_frames(rt, 6);
+        assert!(rt.state.active_quiz_overlay.is_none());
+        assert_eq!(
+            rt.state.quiz_sessions.get(&quiz_id).unwrap().status,
+            crate::state::QuizAttemptStatus::Failed
+        );
+
+        // Pressing "Try Again" on the canvas card starts a fresh locked attempt
+        click_key(rt, &start_btn);
+        settle_frames(rt, 6);
+        assert_eq!(rt.state.active_quiz_overlay.as_ref(), Some(&quiz_id));
+        assert!(rt.state.is_quiz_hard_locked());
+        let restarted = rt.state.quiz_sessions.get(&quiz_id).unwrap();
+        assert_eq!(restarted.status, crate::state::QuizAttemptStatus::InProgress);
+        assert!(!restarted.gave_up);
+        assert_eq!(restarted.active_index, 0);
+        assert!(restarted.selected_options.is_empty());
     }
 }

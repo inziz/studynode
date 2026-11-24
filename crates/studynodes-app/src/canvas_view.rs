@@ -8,7 +8,7 @@ use studynodes_graph::bezier::CubicBezier;
 use studynodes_graph::coords::{Camera, ScreenPos, WorldPos};
 use studynodes_graph::model::{
     default_relation_color_hex, CalendarViewMode, DrawingStroke, Edge, EdgeStatus, Node, NodeKind,
-    PortDirection, PortId,
+    PortDirection, PortId, QuizDifficulty, QuizDisplayMode,
 };
 
 use crate::doc_reader::{self, DocFormat, DockPosition};
@@ -17,7 +17,7 @@ use crate::graph_formula;
 use crate::i18n::{self, TextKey};
 use crate::icons;
 use crate::media_helper;
-use crate::state::{AppState, CanvasMode, node_world_size};
+use crate::state::{AppState, CanvasMode, QuizAttemptStatus, node_world_size};
 use crate::theme;
 
 const LOW_ZOOM_TITLE_ONLY: f32 = 0.48;
@@ -5865,6 +5865,10 @@ fn render_quiz_card_body(
     let accent = theme::kind_accent(NodeKind::Quiz);
     let questions = &node.meta.quiz_questions;
 
+    if node.meta.quiz_mode == QuizDisplayMode::Popout {
+        return render_quiz_popout_card(s, node, body_size, badge_size, zoom);
+    }
+
     if questions.is_empty() {
         return col()
             .key(format!("node_body_{}", node.id.as_str()))
@@ -6214,6 +6218,33 @@ fn render_quiz_card_body(
                 ),
         );
     }
+    let can_reset_regular = node.meta.quiz_difficulty == QuizDifficulty::Easy
+        && sess.is_some_and(|st| {
+            !st.selected_options.is_empty()
+                || !st.revealed_hints.is_empty()
+                || !st.revealed_answers.is_empty()
+                || st.active_index > 0
+        });
+    if can_reset_regular {
+        let reset_id = node.id.clone();
+        foot_row = foot_row.child(el().grow(1.0)).child(
+            el()
+                .key(format!("quiz_reset_btn_{}", node.id.as_str()))
+                .px(5.0 * zoom)
+                .py(2.5 * zoom)
+                .radius(4.0 * zoom)
+                .hover(theme::hover_subtle())
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.quiz_reset_session(&reset_id);
+                })
+                .child(icons::ph(
+                    &icons::ARROW_CLOCKWISE,
+                    (11.0 * zoom).clamp(8.0, 18.0),
+                    theme::text_muted(),
+                )),
+        );
+    }
 
     col()
         .key(format!("node_body_{}", node.id.as_str()))
@@ -6230,6 +6261,238 @@ fn render_quiz_card_body(
         .child(top_nav)
         .child(scroll_col)
         .child(foot_row)
+}
+
+fn render_quiz_popout_card(
+    s: &AppState,
+    node: &Node,
+    body_size: f32,
+    badge_size: f32,
+    zoom: f32,
+) -> El {
+    let click_id = node.id.clone();
+    let start_id = node.id.clone();
+    let accent = theme::kind_accent(NodeKind::Quiz);
+    let danger = theme::accent_danger();
+    let ok_col = theme::hex("#6AB07A");
+    let questions = &node.meta.quiz_questions;
+    let total = questions.len();
+    let sess = s.quiz_sessions.get(&node.id);
+    let status = sess.map(|st| st.status).unwrap_or(QuizAttemptStatus::NotStarted);
+    let is_hard = node.meta.quiz_difficulty == QuizDifficulty::Hard;
+
+    let count_label = if total == 1 {
+        "1 question".to_string()
+    } else {
+        format!("{} questions", total)
+    };
+    let diff_label = if is_hard { "Hard" } else { "Easy" };
+
+    let mut meta_row = row()
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap(6.0 * zoom)
+        .child(
+            row()
+                .items_center()
+                .gap(5.0 * zoom)
+                .child(
+                    text(count_label)
+                        .font(TextStyle::new(badge_size, 500.0).mono())
+                        .color(theme::text_muted()),
+                )
+                .child(
+                    el()
+                        .px(6.0 * zoom)
+                        .py(2.0 * zoom)
+                        .radius(4.0 * zoom)
+                        .fill(if is_hard {
+                            danger.alpha(0.14)
+                        } else {
+                            theme::bg_control()
+                        })
+                        .border(
+                            1.0,
+                            if is_hard {
+                                danger.alpha(0.45)
+                            } else {
+                                theme::border_subtle()
+                            },
+                        )
+                        .child(
+                            text(diff_label)
+                                .font(TextStyle::new(badge_size, 600.0).mono())
+                                .color(if is_hard {
+                                    danger
+                                } else {
+                                    theme::text_secondary()
+                                }),
+                        ),
+                ),
+        );
+
+    let status_chip = match status {
+        QuizAttemptStatus::NotStarted => None,
+        QuizAttemptStatus::InProgress if total > 0 => {
+            let cur = sess.map(|st| st.active_index + 1).unwrap_or(1).min(total);
+            Some((format!("Q{}/{}", cur, total), accent))
+        }
+        QuizAttemptStatus::Completed if total > 0 => {
+            let (graded_tot, graded_hit) =
+                questions
+                    .iter()
+                    .enumerate()
+                    .fold((0usize, 0usize), |(tot, cor), (qi, q)| {
+                        if let Some(ci) = q.correct_index {
+                            let hit =
+                                sess.and_then(|st| st.selected_options.get(&qi).copied()) == Some(ci);
+                            (tot + 1, cor + usize::from(hit))
+                        } else {
+                            (tot, cor)
+                        }
+                    });
+            let lbl = if graded_tot > 0 {
+                format!("{}/{}", graded_hit, graded_tot)
+            } else {
+                "Done".to_string()
+            };
+            Some((lbl, ok_col))
+        }
+        QuizAttemptStatus::Failed => Some(("Failed".to_string(), danger)),
+        _ => None,
+    };
+
+    if let Some((lbl, col_fg)) = status_chip {
+        meta_row = meta_row.child(
+            el()
+                .px(6.0 * zoom)
+                .py(2.0 * zoom)
+                .radius(4.0 * zoom)
+                .fill(col_fg.alpha(0.14))
+                .border(1.0, col_fg.alpha(0.45))
+                .child(
+                    text(lbl)
+                        .font(TextStyle::new(badge_size, 600.0).mono())
+                        .color(col_fg),
+                ),
+        );
+    }
+
+    let (btn_label, btn_ico, btn_tint, retry_on_click) = if total == 0 {
+        ("Start Quiz", &icons::PLAY, theme::text_muted(), false)
+    } else {
+        match status {
+            QuizAttemptStatus::Failed => ("Try Again", &icons::ARROW_CLOCKWISE, danger, true),
+            QuizAttemptStatus::InProgress => ("Resume Quiz", &icons::PLAY, accent, false),
+            QuizAttemptStatus::Completed => ("Review Quiz", &icons::CHECK, ok_col, false),
+            QuizAttemptStatus::NotStarted => ("Start Quiz", &icons::PLAY, accent, false),
+        }
+    };
+
+    let ico_size = (13.0 * zoom).clamp(9.0, 22.0);
+    let start_btn = el()
+        .key(format!("quiz_start_btn_{}", node.id.as_str()))
+        .grow(1.0)
+        .px(10.0 * zoom)
+        .py(8.0 * zoom)
+        .radius(6.0 * zoom)
+        .fill(if total == 0 {
+            theme::bg_control()
+        } else {
+            btn_tint.alpha(0.16)
+        })
+        .hover(if total == 0 {
+            theme::bg_control()
+        } else {
+            btn_tint.alpha(0.24)
+        })
+        .border(
+            1.0,
+            if total == 0 {
+                theme::border_subtle()
+            } else {
+                btn_tint.alpha(0.55)
+            },
+        )
+        .cursor(if total == 0 {
+            Cursor::Default
+        } else {
+            Cursor::Pointer
+        })
+        .center()
+        .on_press(move |s: &mut AppState| {
+            s.select_node(start_id.clone(), false);
+            if retry_on_click {
+                s.quiz_retry_popout(&start_id);
+            } else {
+                s.start_or_resume_quiz_popout(&start_id);
+            }
+        })
+        .child(
+            row()
+                .items_center()
+                .gap(6.0 * zoom)
+                .child(icons::ph(btn_ico, ico_size, btn_tint))
+                .child(
+                    text(btn_label)
+                        .font(TextStyle::new(body_size.max(11.0), 600.0))
+                        .color(if total == 0 {
+                            theme::text_muted()
+                        } else {
+                            theme::text_primary()
+                        }),
+                ),
+        );
+
+    let can_reset_easy = !is_hard
+        && (status != QuizAttemptStatus::NotStarted
+            || sess.is_some_and(|st| {
+                !st.selected_options.is_empty()
+                    || !st.revealed_hints.is_empty()
+                    || !st.revealed_answers.is_empty()
+                    || st.active_index > 0
+            }));
+    let mut action_row = row().w_full().items_center().gap(6.0 * zoom).child(start_btn);
+    if can_reset_easy {
+        let reset_id = node.id.clone();
+        action_row = action_row.child(
+            el()
+                .key(format!("quiz_reset_btn_{}", node.id.as_str()))
+                .px(8.0 * zoom)
+                .py(8.0 * zoom)
+                .radius(6.0 * zoom)
+                .fill(theme::bg_control())
+                .hover(theme::hover_subtle())
+                .border(1.0, theme::border_subtle())
+                .center()
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut AppState| {
+                    s.quiz_reset_session(&reset_id);
+                })
+                .child(icons::ph(
+                    &icons::ARROW_CLOCKWISE,
+                    ico_size,
+                    theme::text_secondary(),
+                )),
+        );
+    }
+
+    col()
+        .key(format!("node_body_{}", node.id.as_str()))
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .clip_soft(0.0)
+        .px(10.0 * zoom)
+        .py(8.0 * zoom)
+        .justify_between()
+        .gap(8.0 * zoom)
+        .on_press(move |s: &mut AppState| {
+            s.select_node(click_id.clone(), false);
+        })
+        .child(meta_row)
+        .child(action_row)
 }
 
 fn render_calendar_card_body(

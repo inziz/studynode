@@ -14,6 +14,7 @@ pub use graph::{ChatMessage, ChatThread, StudyGraph};
 pub use model::{
     default_relation_color_hex, resolve_trace_color_hex, resolve_trace_color_label, DrawingStroke,
     Edge, EdgeEndpoint, EdgeId, EdgeProvenance, EdgeRelation, EdgeStatus, Node, NodeId, NodeKind,
-    Port, PortDirection, PortId, PortType, QuizQuestion, TRACE_COLOR_PRESETS,
+    Port, PortDirection, PortId, PortType, QuizDifficulty, QuizDisplayMode, QuizQuestion,
+    TRACE_COLOR_PRESETS,
 };
 pub use patch::{GraphPatch, PatchOp, SemanticRelation, StagedPatchResult};
