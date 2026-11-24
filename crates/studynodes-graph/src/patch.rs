@@ -6,10 +6,29 @@ use crate::graph::StudyGraph;
 use crate::model::{
     resolve_trace_color_hex, resolve_trace_color_label, CalendarEvent, CalendarViewMode, Edge,
     EdgeEndpoint, EdgeId, EdgeRelation, MediaTimestamp, Node, NodeId, NodeKind, PortId,
-    QuizQuestion,
+    QuizDifficulty, QuizDisplayMode, QuizQuestion,
 };
 #[cfg(test)]
 use crate::model::{EdgeProvenance, EdgeStatus};
+
+fn parse_quiz_mode(raw: &str) -> Option<QuizDisplayMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "regular" | "inline" | "card" | "normal" => Some(QuizDisplayMode::Regular),
+        "popout" | "pop-out" | "pop_out" | "popup" | "fullscreen" | "full_screen" | "full-screen"
+        | "overlay" | "modal" => Some(QuizDisplayMode::Popout),
+        _ => None,
+    }
+}
+
+fn parse_quiz_difficulty(raw: &str) -> Option<QuizDifficulty> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "easy" | "normal" | "relaxed" | "flexible" | "unlock" | "unlocked" => {
+            Some(QuizDifficulty::Easy)
+        }
+        "hard" | "strict" | "locked" | "lock" | "exam" | "challenge" => Some(QuizDifficulty::Hard),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -822,6 +841,10 @@ pub enum PatchOp {
             deserialize_with = "deserialize_quiz_questions_forgiving"
         )]
         quiz_questions: Vec<QuizQuestion>,
+        #[serde(default, alias = "mode")]
+        quiz_mode: Option<String>,
+        #[serde(default, alias = "difficulty")]
+        quiz_difficulty: Option<String>,
         #[serde(default)]
         text_font: Option<String>,
         #[serde(default)]
@@ -863,6 +886,10 @@ pub enum PatchOp {
             deserialize_with = "deserialize_opt_quiz_questions_forgiving"
         )]
         quiz_questions: Option<Vec<QuizQuestion>>,
+        #[serde(default, alias = "mode")]
+        quiz_mode: Option<String>,
+        #[serde(default, alias = "difficulty")]
+        quiz_difficulty: Option<String>,
     },
 
     /// Appends a multiple-choice / study question with optional hints to a `Quiz` node (auto-creates one if needed).
@@ -1768,6 +1795,8 @@ impl StudyGraph {
                     media_url,
                     source_nodes,
                     quiz_questions,
+                    quiz_mode,
+                    quiz_difficulty,
                     text_font,
                     text_size,
                     x,
@@ -1849,8 +1878,20 @@ impl StudyGraph {
                                 Some(text_size.unwrap_or(18.0).clamp(10.0, 96.0));
                         }
                         NodeKind::Quiz => {
-                            node.size = (320.0, 260.0);
                             node.meta.quiz_questions = quiz_questions.clone();
+                            if let Some(m) = quiz_mode.as_deref().and_then(parse_quiz_mode) {
+                                node.meta.quiz_mode = m;
+                            }
+                            if let Some(d) = quiz_difficulty
+                                .as_deref()
+                                .and_then(parse_quiz_difficulty)
+                            {
+                                node.meta.quiz_difficulty = d;
+                            }
+                            node.size = match node.meta.quiz_mode {
+                                QuizDisplayMode::Regular => (320.0, 260.0),
+                                QuizDisplayMode::Popout => (280.0, 148.0),
+                            };
                         }
                         _ => {}
                     }
@@ -1887,6 +1928,8 @@ impl StudyGraph {
                     summary,
                     media_url,
                     quiz_questions,
+                    quiz_mode,
+                    quiz_difficulty,
                 } => {
                     if let Some(nid) = self.resolve_node_id(node_id, &temp_to_real) {
                         if let Some(node) = self.get_node_mut(&nid) {
@@ -1913,6 +1956,15 @@ impl StudyGraph {
                             if let Some(qs) = quiz_questions {
                                 node.meta.quiz_questions = qs.clone();
                                 result.quiz_questions_changed += qs.len().max(1);
+                            }
+                            if let Some(m) = quiz_mode.as_deref().and_then(parse_quiz_mode) {
+                                node.meta.quiz_mode = m;
+                            }
+                            if let Some(d) = quiz_difficulty
+                                .as_deref()
+                                .and_then(parse_quiz_difficulty)
+                            {
+                                node.meta.quiz_difficulty = d;
                             }
                             let desc = title.clone().unwrap_or_else(|| node.title.clone());
                             result.updated_nodes.push((nid, desc));
@@ -3056,6 +3108,8 @@ mod tests {
                     media_url: None,
                     source_nodes: vec![doc_id.clone()],
                     quiz_questions: vec![],
+                    quiz_mode: None,
+                    quiz_difficulty: None,
                     text_font: None,
                     text_size: None,
                     x: None,
@@ -3073,6 +3127,8 @@ mod tests {
                     media_url: None,
                     source_nodes: vec![doc_id.clone()],
                     quiz_questions: vec![],
+                    quiz_mode: None,
+                    quiz_difficulty: None,
                     text_font: None,
                     text_size: None,
                     x: None,
@@ -3233,6 +3289,8 @@ mod tests {
                     summary: None,
                     media_url: Some("https://youtu.be/dQw4w9WgXcQ".into()),
                     quiz_questions: None,
+                    quiz_mode: None,
+                    quiz_difficulty: None,
                 },
                 PatchOp::MoveNode {
                     node_id: chk_id.as_str().to_string(),
@@ -3754,5 +3812,50 @@ mod tests {
         assert!((r1.size.0 - 320.0).abs() < 1e-3);
         let new_leaf = &res_map.new_nodes[0];
         assert!((new_leaf.pos.x - 860.0).abs() < 1e-3 && (new_leaf.pos.y - 300.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_quiz_mode_and_difficulty_patch_ops() {
+        let mut g = StudyGraph::new("Quiz Modes Test");
+        let create_json = serde_json::json!({
+            "summary": "Create popout hard quiz",
+            "ops": [{
+                "op": "create_study_node",
+                "temp_id": "tmp_q",
+                "kind": "Quiz",
+                "title": "Exam Sim",
+                "quiz_mode": "popout",
+                "quiz_difficulty": "hard",
+                "quiz_questions": [{
+                    "question": "What is 2 + 2?",
+                    "options": ["3", "4"],
+                    "correct_index": 1,
+                    "answer": "Basic arithmetic."
+                }]
+            }]
+        });
+        let patch: GraphPatch = serde_json::from_value(create_json).expect("parse create quiz patch");
+        let res = g.validate_and_stage_patch(&patch);
+        assert_eq!(res.new_nodes.len(), 1);
+        let qid = res.new_nodes[0].id.clone();
+        let node = g.get_node(&qid).unwrap();
+        assert_eq!(node.meta.quiz_mode, QuizDisplayMode::Popout);
+        assert_eq!(node.meta.quiz_difficulty, QuizDifficulty::Hard);
+
+        let update_json = serde_json::json!({
+            "summary": "Switch quiz to regular easy",
+            "ops": [{
+                "op": "update_node",
+                "node_id": qid.as_str(),
+                "mode": "regular",
+                "difficulty": "easy"
+            }]
+        });
+        let upd: GraphPatch = serde_json::from_value(update_json).expect("parse update quiz patch");
+        let upd_res = g.validate_and_stage_patch(&upd);
+        assert_eq!(upd_res.updated_nodes.len(), 1);
+        let updated = g.get_node(&qid).unwrap();
+        assert_eq!(updated.meta.quiz_mode, QuizDisplayMode::Regular);
+        assert_eq!(updated.meta.quiz_difficulty, QuizDifficulty::Easy);
     }
 }

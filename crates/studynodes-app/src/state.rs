@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use studynodes_graph::coords::{Camera, ScreenPos, WorldPos};
 use studynodes_graph::model::{
     CalendarEvent, CalendarViewMode, DrawingStroke, Edge, EdgeEndpoint, EdgeId, EdgeRelation,
-    EdgeStatus, MediaTimestamp, Node, NodeId, NodeKind, PortDirection, PortId, QuizQuestion,
-    SubtitleCue, resolve_trace_color_hex, resolve_trace_color_label,
+    EdgeStatus, MediaTimestamp, Node, NodeId, NodeKind, PortDirection, PortId, QuizDifficulty,
+    QuizDisplayMode, QuizQuestion, SubtitleCue, resolve_trace_color_hex, resolve_trace_color_label,
 };
 use studynodes_graph::{
     ChatMessage, ChatThread, CommandHistory, GraphCommand, ProjectBundle, StudyGraph,
@@ -186,12 +186,24 @@ pub enum CanvasMode {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum QuizAttemptStatus {
+    #[default]
+    NotStarted,
+    InProgress,
+    Completed,
+    Failed,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct QuizSessionState {
     pub active_index: usize,
     pub selected_options: HashMap<usize, usize>,
     pub revealed_hints: HashMap<usize, usize>,
     pub revealed_answers: HashSet<usize>,
+    pub status: QuizAttemptStatus,
+    pub gave_up: bool,
+    pub difficulty_used: Option<QuizDifficulty>,
 }
 
 /// Canonical canvas dimensions `(base_w, base_h)` per node kind so rendered cards and wire sockets match.
@@ -229,7 +241,7 @@ pub(crate) fn resizable_node_bounds(kind: NodeKind) -> Option<((f32, f32), (f32,
         NodeKind::Audio => Some(((230.0, 112.0), (900.0, 520.0))),
         NodeKind::Drawing => Some(((240.0, 180.0), (960.0, 720.0))),
         NodeKind::Text => Some(((64.0, 28.0), (1200.0, 900.0))),
-        NodeKind::Quiz => Some(((250.0, 200.0), (960.0, 780.0))),
+        NodeKind::Quiz => Some(((240.0, 128.0), (960.0, 780.0))),
         _ => None,
     }
 }
@@ -571,8 +583,9 @@ pub struct AppState {
     pub drawing_eraser: bool,
     pub dock_measured_size: Option<[f32; 2]>,
 
-    // Interactive Quiz card sessions & question composer buffers
+    // Interactive Quiz card sessions, full-screen overlay state, & question composer buffers
     pub quiz_sessions: HashMap<NodeId, QuizSessionState>,
+    pub active_quiz_overlay: Option<NodeId>,
     pub quiz_q_edit: TextEdit,
     pub quiz_opts_edit: TextEdit,
     pub quiz_ans_edit: TextEdit,
@@ -878,6 +891,7 @@ impl AppState {
             drawing_eraser: false,
             dock_measured_size: None,
             quiz_sessions: HashMap::new(),
+            active_quiz_overlay: None,
             quiz_q_edit: TextEdit::new(""),
             quiz_opts_edit: TextEdit::new(""),
             quiz_ans_edit: TextEdit::new(""),
@@ -1253,6 +1267,7 @@ impl AppState {
                 self.tabs.push(tab);
                 let new_idx = self.tabs.len() - 1;
                 self.load_tab_into_active(new_idx);
+                self.active_quiz_overlay = None;
                 self.screen = AppScreen::Workspace;
                 self.confirm_delete_project = None;
                 self.refresh_recent_projects();
@@ -1366,6 +1381,7 @@ impl AppState {
             .position(|t| same_project_path(&t.path, &path))
         {
             self.load_tab_into_active(existing_idx);
+            self.active_quiz_overlay = None;
             self.screen = AppScreen::Workspace;
             self.confirm_delete_project = None;
             return;
@@ -1388,6 +1404,7 @@ impl AppState {
                 self.tabs.push(tab);
                 let idx = self.tabs.len() - 1;
                 self.load_tab_into_active(idx);
+                self.active_quiz_overlay = None;
                 self.screen = AppScreen::Workspace;
                 self.confirm_delete_project = None;
             }
@@ -1399,7 +1416,7 @@ impl AppState {
 
     /// Switch directly between open project tabs.
     pub fn switch_tab(&mut self, idx: usize) {
-        if idx >= self.tabs.len() {
+        if self.is_quiz_hard_locked() || idx >= self.tabs.len() {
             return;
         }
         if self.active_tab == Some(idx) {
@@ -1408,6 +1425,7 @@ impl AppState {
         }
         self.save_active_into_tab();
         self.load_tab_into_active(idx);
+        self.active_quiz_overlay = None;
         self.screen = AppScreen::Workspace;
     }
 
@@ -1446,11 +1464,13 @@ impl AppState {
             self.ai_chat_messages.clear();
             self.ai_chat_input = TextEdit::new("");
             self.ai_chat_pending = false;
+            self.active_quiz_overlay = None;
             self.screen = AppScreen::Dashboard;
             crate::touchpad_win32::set_canvas_bounds(None);
             self.refresh_recent_projects();
             self.push_reader_snapshot();
         } else if is_active {
+            self.active_quiz_overlay = None;
             let next_idx = idx.min(self.tabs.len() - 1);
             self.load_tab_into_active(next_idx);
         } else if let Some(cur) = self.active_tab {
@@ -1537,6 +1557,9 @@ impl AppState {
 
     /// Return to dashboard while keeping open workspace tabs preserved.
     pub fn close_to_dashboard(&mut self) {
+        if self.is_quiz_hard_locked() {
+            return;
+        }
         self.save_active_into_tab();
         self.cancel_smooth_zoom();
         self.flush_live_camera();
@@ -1545,6 +1568,7 @@ impl AppState {
         self.show_block_menu = false;
         self.show_ai_menu = false;
         self.inspector_more_menu_open = false;
+        self.active_quiz_overlay = None;
         self.screen = AppScreen::Dashboard;
         crate::touchpad_win32::set_canvas_bounds(None);
         self.refresh_recent_projects();
@@ -3720,6 +3744,9 @@ impl AppState {
         self.audio_subtitle_errors.remove(id);
         self.selected_calendar_date.remove(id);
         self.quiz_sessions.remove(id);
+        if self.active_quiz_overlay.as_ref() == Some(id) {
+            self.active_quiz_overlay = None;
+        }
         if let Some((removed, edges)) = self.graph.remove_node(id) {
             self.selected_nodes.remove(id);
             if self.popped_out_node_id.as_ref() == Some(id) {
@@ -4235,6 +4262,10 @@ impl AppState {
             self.audio_subtitle_errors.remove(del_id);
             self.selected_nodes.remove(del_id);
             self.selected_calendar_date.remove(del_id);
+            self.quiz_sessions.remove(del_id);
+            if self.active_quiz_overlay.as_ref() == Some(del_id) {
+                self.active_quiz_overlay = None;
+            }
             self.doc_preview_cache.borrow_mut().remove(del_id);
             if self.editing_node_id.as_ref() == Some(del_id) {
                 self.editing_node_id = None;
@@ -4324,6 +4355,13 @@ impl AppState {
                 }
                 keep
             });
+            if let Some(ref oid) = self.active_quiz_overlay {
+                if !self.graph.get_node(oid).is_some_and(|n| {
+                    n.kind == NodeKind::Quiz && n.meta.quiz_mode == QuizDisplayMode::Popout
+                }) {
+                    self.active_quiz_overlay = None;
+                }
+            }
             self.doc_preview_cache.borrow_mut().clear();
             self.sync_edit_buffers_from_selected();
             self.ensure_all_media_players();
@@ -4343,6 +4381,13 @@ impl AppState {
             if let Some(ref eid) = self.selected_edge {
                 if !self.graph.edges.contains_key(eid) {
                     self.selected_edge = None;
+                }
+            }
+            if let Some(ref oid) = self.active_quiz_overlay {
+                if !self.graph.get_node(oid).is_some_and(|n| {
+                    n.kind == NodeKind::Quiz && n.meta.quiz_mode == QuizDisplayMode::Popout
+                }) {
+                    self.active_quiz_overlay = None;
                 }
             }
             self.doc_preview_cache.borrow_mut().clear();
@@ -5159,6 +5204,9 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
     }
 
     pub fn open_settings(&mut self) {
+        if self.is_quiz_hard_locked() {
+            return;
+        }
         if self.screen != AppScreen::Settings {
             self.settings_return_screen = self.screen;
         }
@@ -5393,12 +5441,40 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
             return;
         }
         let sess = self.quiz_sessions.entry(id.clone()).or_default();
+        if sess.status == QuizAttemptStatus::Failed {
+            return;
+        }
         let next = (sess.active_index as isize + delta).clamp(0, (total - 1) as isize) as usize;
         sess.active_index = next;
     }
 
+    pub fn quiz_jump_question(&mut self, id: &NodeId, q_idx: usize) {
+        let total = self
+            .graph
+            .get_node(id)
+            .map(|n| n.meta.quiz_questions.len())
+            .unwrap_or(0);
+        if total == 0 {
+            return;
+        }
+        let sess = self.quiz_sessions.entry(id.clone()).or_default();
+        if sess.status == QuizAttemptStatus::Failed {
+            return;
+        }
+        if sess.status == QuizAttemptStatus::NotStarted {
+            sess.status = QuizAttemptStatus::InProgress;
+        }
+        sess.active_index = q_idx.min(total - 1);
+    }
+
     pub fn quiz_select_option(&mut self, id: &NodeId, q_idx: usize, opt_idx: usize) {
         let sess = self.quiz_sessions.entry(id.clone()).or_default();
+        if sess.status == QuizAttemptStatus::Failed {
+            return;
+        }
+        if sess.status == QuizAttemptStatus::NotStarted {
+            sess.status = QuizAttemptStatus::InProgress;
+        }
         sess.selected_options.insert(q_idx, opt_idx);
     }
 
@@ -5413,6 +5489,12 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
             return;
         }
         let sess = self.quiz_sessions.entry(id.clone()).or_default();
+        if sess.status == QuizAttemptStatus::Failed {
+            return;
+        }
+        if sess.status == QuizAttemptStatus::NotStarted {
+            sess.status = QuizAttemptStatus::InProgress;
+        }
         let cur = sess.revealed_hints.get(&q_idx).copied().unwrap_or(0);
         if cur < total_hints {
             sess.revealed_hints.insert(q_idx, cur + 1);
@@ -5421,6 +5503,12 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
 
     pub fn quiz_reveal_answer(&mut self, id: &NodeId, q_idx: usize) {
         let sess = self.quiz_sessions.entry(id.clone()).or_default();
+        if sess.status == QuizAttemptStatus::Failed {
+            return;
+        }
+        if sess.status == QuizAttemptStatus::NotStarted {
+            sess.status = QuizAttemptStatus::InProgress;
+        }
         if sess.revealed_answers.contains(&q_idx) {
             sess.revealed_answers.remove(&q_idx);
         } else {
@@ -5430,6 +5518,160 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
 
     pub fn quiz_reset_session(&mut self, id: &NodeId) {
         self.quiz_sessions.remove(id);
+    }
+
+    /// True when a `Hard` popout quiz attempt is currently `InProgress`, locking exit until finished or given up.
+    pub fn is_quiz_hard_locked(&self) -> bool {
+        let Some(id) = self.active_quiz_overlay.as_ref() else {
+            return false;
+        };
+        let Some(node) = self.graph.get_node(id) else {
+            return false;
+        };
+        if node.kind != NodeKind::Quiz || node.meta.quiz_difficulty != QuizDifficulty::Hard {
+            return false;
+        }
+        self.quiz_sessions
+            .get(id)
+            .is_some_and(|sess| sess.status == QuizAttemptStatus::InProgress)
+    }
+
+    pub fn set_quiz_mode(&mut self, id: &NodeId, mode: QuizDisplayMode) {
+        if let Some(n) = self.graph.get_node_mut(id) {
+            if n.kind != NodeKind::Quiz {
+                return;
+            }
+            if n.meta.quiz_mode != mode {
+                n.meta.quiz_mode = mode;
+                let is_default_regular =
+                    (n.size.0 - 320.0).abs() < 1.0 && (n.size.1 - 260.0).abs() < 1.0;
+                let is_default_popout =
+                    (n.size.0 - 280.0).abs() < 1.0 && (n.size.1 - 148.0).abs() < 1.0;
+                if mode == QuizDisplayMode::Popout
+                    && (is_default_regular || (n.size.1 > 240.0 && n.size.0 <= 330.0))
+                {
+                    n.size = (280.0, 148.0);
+                } else if mode == QuizDisplayMode::Regular
+                    && (is_default_popout || n.size.1 < 200.0)
+                {
+                    n.size = (320.0, 260.0);
+                }
+                if mode == QuizDisplayMode::Regular && self.active_quiz_overlay.as_ref() == Some(id)
+                {
+                    self.active_quiz_overlay = None;
+                }
+                self.persist_graph_and_snapshot();
+            }
+        }
+    }
+
+    pub fn set_quiz_difficulty(&mut self, id: &NodeId, diff: QuizDifficulty) {
+        if let Some(n) = self.graph.get_node_mut(id) {
+            if n.kind != NodeKind::Quiz {
+                return;
+            }
+            if n.meta.quiz_difficulty != diff {
+                n.meta.quiz_difficulty = diff;
+                self.persist_graph_and_snapshot();
+            }
+        }
+    }
+
+    /// Launch or resume the full-screen popout quiz overlay for `id`.
+    pub fn start_or_resume_quiz_popout(&mut self, id: &NodeId) -> bool {
+        if self.is_quiz_hard_locked() && self.active_quiz_overlay.as_ref() != Some(id) {
+            self.notify_toast("Hard mode: finish the active quiz or Give Up first");
+            return false;
+        }
+        let Some(node) = self.graph.get_node(id) else {
+            return false;
+        };
+        if node.kind != NodeKind::Quiz {
+            return false;
+        }
+        let total = node.meta.quiz_questions.len();
+        if total == 0 {
+            self.notify_toast("Add at least one question to start this quiz");
+            return false;
+        }
+        let diff = node.meta.quiz_difficulty;
+        let sess = self.quiz_sessions.entry(id.clone()).or_default();
+        sess.active_index = sess.active_index.min(total - 1);
+        if sess.status == QuizAttemptStatus::NotStarted {
+            sess.status = QuizAttemptStatus::InProgress;
+            sess.gave_up = false;
+            sess.difficulty_used = Some(diff);
+        }
+        self.active_quiz_overlay = Some(id.clone());
+        true
+    }
+
+    /// Reset a quiz attempt (e.g. after Hard-mode failure or completion) and start fresh in popout overlay.
+    pub fn quiz_retry_popout(&mut self, id: &NodeId) -> bool {
+        let Some(node) = self.graph.get_node(id) else {
+            return false;
+        };
+        if node.kind != NodeKind::Quiz {
+            return false;
+        }
+        if node.meta.quiz_questions.is_empty() {
+            self.notify_toast("Add at least one question to start this quiz");
+            return false;
+        }
+        let diff = node.meta.quiz_difficulty;
+        let mut sess = QuizSessionState::default();
+        sess.active_index = 0;
+        sess.status = QuizAttemptStatus::InProgress;
+        sess.gave_up = false;
+        sess.difficulty_used = Some(diff);
+        self.quiz_sessions.insert(id.clone(), sess);
+        self.active_quiz_overlay = Some(id.clone());
+        true
+    }
+
+    /// Return from the full-screen quiz overlay back to the workspace scheme (blocked while Hard-locked).
+    pub fn quiz_return_to_scheme(&mut self) -> bool {
+        if self.is_quiz_hard_locked() {
+            self.notify_toast("Hard mode: finish the quiz or press Give Up to exit");
+            return false;
+        }
+        self.active_quiz_overlay = None;
+        true
+    }
+
+    /// Give up an active quiz attempt, marking it `Failed` and lifting the Hard-mode lock until retried.
+    pub fn quiz_give_up_popout(&mut self) -> bool {
+        let Some(id) = self.active_quiz_overlay.clone() else {
+            return false;
+        };
+        let diff = self.graph.get_node(&id).map(|n| n.meta.quiz_difficulty);
+        let sess = self.quiz_sessions.entry(id).or_default();
+        sess.status = QuizAttemptStatus::Failed;
+        sess.gave_up = true;
+        if let Some(d) = diff {
+            sess.difficulty_used = Some(d);
+        }
+        true
+    }
+
+    /// Mark the active popout quiz attempt as completed for summary review.
+    pub fn quiz_finish_popout(&mut self) -> bool {
+        let Some(id) = self.active_quiz_overlay.clone() else {
+            return false;
+        };
+        let Some(node) = self.graph.get_node(&id) else {
+            self.active_quiz_overlay = None;
+            return false;
+        };
+        let diff = node.meta.quiz_difficulty;
+        let sess = self.quiz_sessions.entry(id).or_default();
+        if sess.status == QuizAttemptStatus::Failed {
+            return false;
+        }
+        sess.status = QuizAttemptStatus::Completed;
+        sess.gave_up = false;
+        sess.difficulty_used = Some(diff);
+        true
     }
 
     pub fn quiz_add_question_from_inspector(&mut self, id: &NodeId) -> bool {
@@ -5508,6 +5750,13 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
                 sess.selected_options.clear();
                 sess.revealed_hints.clear();
                 sess.revealed_answers.clear();
+                if new_len == 0 {
+                    sess.status = QuizAttemptStatus::NotStarted;
+                    sess.gave_up = false;
+                }
+            }
+            if new_len == 0 && self.active_quiz_overlay.as_ref() == Some(id) {
+                self.active_quiz_overlay = None;
             }
             self.persist_graph_and_snapshot();
             self.status_message = format!("Deleted quiz Q{}", q_idx + 1);
@@ -6967,6 +7216,7 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
             || crate::touchpad_win32::is_active()
             || matches!(self.canvas_mode, CanvasMode::Panning { .. });
         let global_ok = self.screen == AppScreen::Workspace
+            && self.active_quiz_overlay.is_none()
             && !self.show_block_menu
             && !self.show_ai_menu
             && !cam_live

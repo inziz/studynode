@@ -231,6 +231,26 @@ pub struct QuizQuestion {
     pub hints: Vec<String>,
 }
 
+/// Display mode for a `Quiz` node on the canvas.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuizDisplayMode {
+    /// Interactive quiz card directly inside the canvas node.
+    #[default]
+    Regular,
+    /// Compact launcher card on the canvas that opens a full-screen quiz overlay.
+    Popout,
+}
+
+/// Difficulty / locking mode for a `Quiz` node.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuizDifficulty {
+    /// Learner can pause and return to the canvas scheme at any time and resume later.
+    #[default]
+    Easy,
+    /// Learner is locked into the quiz until finishing or giving up (which marks it failed until retried).
+    Hard,
+}
+
 /// Optional metadata extending specialized study nodes (`Flashcard`, `Excerpt`, `Formula`, `Sequence`, `Section`, `Video`, `Audio`, `Calendar`, `Drawing`, `Image`, `Text`, `Quiz`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct NodeMeta {
@@ -318,6 +338,12 @@ pub struct NodeMeta {
     /// Question deck for `Quiz` nodes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quiz_questions: Vec<QuizQuestion>,
+    /// Display mode for `Quiz` nodes (`Regular` inline card or `Popout` full-screen quiz).
+    #[serde(default)]
+    pub quiz_mode: QuizDisplayMode,
+    /// Difficulty / exit-lock mode for `Quiz` nodes (`Easy` allows returning to scheme; `Hard` locks until finished or given up).
+    #[serde(default)]
+    pub quiz_difficulty: QuizDifficulty,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -691,12 +717,16 @@ mod tests {
         assert!(meta.ocr_engine.is_none());
         assert!(meta.translated_text.is_none());
         assert!(meta.target_language.is_none());
+        assert_eq!(meta.quiz_mode, QuizDisplayMode::Regular);
+        assert_eq!(meta.quiz_difficulty, QuizDifficulty::Easy);
 
         let populated = NodeMeta {
             extracted_text: Some("E = mc²".into()),
             ocr_engine: Some("Windows Native OCR".into()),
             translated_text: Some("Energía = masa · c²".into()),
             target_language: Some("es".into()),
+            quiz_mode: QuizDisplayMode::Popout,
+            quiz_difficulty: QuizDifficulty::Hard,
             ..Default::default()
         };
         let encoded = serde_json::to_string(&populated).expect("serialize");

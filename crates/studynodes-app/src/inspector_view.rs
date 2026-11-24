@@ -3,7 +3,9 @@ use rune::{
     auto_grow, canvas, col, el, memo, row, text, text_input,
 };
 use rune_kit::Markdown;
-use studynodes_graph::model::{CalendarViewMode, EdgeRelation, Node, NodeId, NodeKind};
+use studynodes_graph::model::{
+    CalendarViewMode, EdgeRelation, Node, NodeId, NodeKind, QuizDifficulty, QuizDisplayMode,
+};
 use studynodes_vision::{OcrEnginePreference, OcrMode, SUPPORTED_LANGUAGES};
 
 use crate::doc_reader::{self, DocFormat, PdfLayoutMode, ReaderMode};
@@ -11,7 +13,7 @@ use crate::formula_math;
 use crate::i18n::{self, TextKey};
 use crate::icons;
 use crate::media_helper;
-use crate::state::{ActivePdfState, AppState, DocViewTab};
+use crate::state::{ActivePdfState, AppState, DocViewTab, QuizAttemptStatus};
 use crate::theme;
 
 const SHEET_TITLE: TextStyle = TextStyle::new(19.0, 600.0).lh(24.0);
@@ -3423,11 +3425,158 @@ fn render_specialized_node_inspector(s: &AppState, node: &Node) -> El {
                 .child(fit_row)
         }
         NodeKind::Quiz => {
+            let mode_id_reg = node.id.clone();
+            let mode_id_pop = node.id.clone();
+            let diff_id_easy = node.id.clone();
+            let diff_id_hard = node.id.clone();
+            let insp_start_id = node.id.clone();
+            let is_popout = node.meta.quiz_mode == QuizDisplayMode::Popout;
+            let is_hard = node.meta.quiz_difficulty == QuizDifficulty::Hard;
+            let total_qs = node.meta.quiz_questions.len();
+            let attempt_status = s
+                .quiz_sessions
+                .get(&node.id)
+                .map(|st| st.status)
+                .unwrap_or(QuizAttemptStatus::NotStarted);
+
             let mut deck_col = col()
                 .w_full()
                 .gap(10.0)
+                .child(subtle_tag("MODE", theme::text_muted()))
+                .child(
+                    row()
+                        .w_full()
+                        .gap(12.0)
+                        .child(
+                            underline_tab("btn_quiz_mode_regular", "Regular", !is_popout)
+                                .on_press(move |s: &mut AppState| {
+                                    s.set_quiz_mode(&mode_id_reg, QuizDisplayMode::Regular);
+                                }),
+                        )
+                        .child(
+                            underline_tab("btn_quiz_mode_popout", "Popout", is_popout)
+                                .on_press(move |s: &mut AppState| {
+                                    s.set_quiz_mode(&mode_id_pop, QuizDisplayMode::Popout);
+                                }),
+                        ),
+                )
+                .child(subtle_tag("DIFFICULTY", theme::text_muted()))
+                .child(
+                    row()
+                        .w_full()
+                        .gap(12.0)
+                        .child(
+                            underline_tab("btn_quiz_diff_easy", "Easy", !is_hard).on_press(
+                                move |s: &mut AppState| {
+                                    s.set_quiz_difficulty(&diff_id_easy, QuizDifficulty::Easy);
+                                },
+                            ),
+                        )
+                        .child(
+                            underline_tab("btn_quiz_diff_hard", "Hard", is_hard).on_press(
+                                move |s: &mut AppState| {
+                                    s.set_quiz_difficulty(&diff_id_hard, QuizDifficulty::Hard);
+                                },
+                            ),
+                        ),
+                )
+                .child(
+                    text(if is_hard {
+                        "Hard locks exit until completed or given up."
+                    } else {
+                        "Easy lets you pause to the scheme and resume."
+                    })
+                    .font(theme::BADGE_TEXT)
+                    .color(theme::text_muted()),
+                );
+
+            if is_popout {
+                let danger = theme::accent_danger();
+                let accent = theme::kind_accent(NodeKind::Quiz);
+                let ok_col = theme::hex("#6AB07A");
+                let (lbl, ico, fg, retry) = match attempt_status {
+                    QuizAttemptStatus::Failed => ("Try Again", &icons::ARROW_CLOCKWISE, danger, true),
+                    QuizAttemptStatus::InProgress => ("Resume Quiz", &icons::PLAY, accent, false),
+                    QuizAttemptStatus::Completed => ("Review Quiz", &icons::CHECK, ok_col, false),
+                    QuizAttemptStatus::NotStarted => ("Start Quiz", &icons::PLAY, accent, false),
+                };
+                let mut action_row = row().w_full().items_center().gap(6.0).child(
+                    el()
+                        .key("btn_inspector_start_quiz")
+                        .grow(1.0)
+                        .px(10.0)
+                        .py(7.0)
+                        .radius(6.0)
+                        .fill(if total_qs == 0 {
+                            theme::bg_control()
+                        } else {
+                            fg.alpha(0.16)
+                        })
+                        .hover(if total_qs == 0 {
+                            theme::bg_control()
+                        } else {
+                            fg.alpha(0.24)
+                        })
+                        .border(
+                            1.0,
+                            if total_qs == 0 {
+                                theme::border_subtle()
+                            } else {
+                                fg.alpha(0.50)
+                            },
+                        )
+                        .cursor(if total_qs == 0 {
+                            Cursor::Default
+                        } else {
+                            Cursor::Pointer
+                        })
+                        .center()
+                        .on_press(move |s: &mut AppState| {
+                            if retry {
+                                s.quiz_retry_popout(&insp_start_id);
+                            } else {
+                                s.start_or_resume_quiz_popout(&insp_start_id);
+                            }
+                        })
+                        .child(
+                            row()
+                                .items_center()
+                                .gap(6.0)
+                                .child(icons::ph(
+                                    ico,
+                                    13.0,
+                                    if total_qs == 0 {
+                                        theme::text_muted()
+                                    } else {
+                                        fg
+                                    },
+                                ))
+                                .child(text(lbl).font(theme::CONTROL_TEXT).color(if total_qs == 0 {
+                                    theme::text_muted()
+                                } else {
+                                    theme::text_primary()
+                                })),
+                        ),
+                );
+                if !is_hard && attempt_status != QuizAttemptStatus::NotStarted {
+                    let reset_id = node.id.clone();
+                    action_row = action_row.child(ghost_icon_btn(
+                        "btn_inspector_reset_quiz",
+                        &icons::ARROW_CLOCKWISE,
+                        theme::text_secondary(),
+                        false,
+                        move |s: &mut AppState| {
+                            s.quiz_reset_session(&reset_id);
+                        },
+                    ));
+                }
+                deck_col = deck_col.child(action_row);
+            }
+
+            deck_col = deck_col
+                .child(hairline())
                 .child(subtle_tag(
-                    &format!("QUESTIONS ({})", node.meta.quiz_questions.len()),
+                    &format!("QUESTIONS ({})", total_qs),
                     theme::text_muted(),
                 ));
 
