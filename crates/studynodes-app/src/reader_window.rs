@@ -16,6 +16,7 @@ use studynodes_vision::{OcrEnginePreference, OcrMode, SUPPORTED_LANGUAGES};
 
 use crate::doc_reader::{self, DocFormat, PdfLayoutMode};
 use crate::formula_math;
+use crate::graph_formula;
 use crate::i18n::{self, TextKey};
 use crate::icons;
 use crate::media_helper;
@@ -181,6 +182,26 @@ pub enum ReaderCommand {
         node_id: NodeId,
         symbol: String,
     },
+    ZoomGraphFormula {
+        node_id: NodeId,
+        factor: f64,
+        anchor_norm: Option<(f32, f32)>,
+        plot_size: (f32, f32),
+    },
+    PanGraphFormula {
+        node_id: NodeId,
+        start_cx: f64,
+        start_cy: f64,
+        dx: f32,
+        dy: f32,
+        plot_size: (f32, f32),
+        commit: bool,
+    },
+    ResetGraphFormulaView(NodeId),
+    ApplyGraphFormulaKeypad {
+        node_id: NodeId,
+        action: graph_formula::KeypadAction,
+    },
     AddNextSequenceStep(NodeId),
     ToggleSectionFramed(NodeId),
     ToggleChecklistItem {
@@ -303,6 +324,8 @@ pub struct PopoutReaderState {
     pub drawing_color_hex: String,
     pub drawing_stroke_width: f32,
     pub drawing_eraser: bool,
+    pub graph_keypad_mode: graph_formula::KeypadMode,
+    pub graph_drag_origin: Option<(NodeId, f64, f64)>,
 }
 
 impl Default for PopoutReaderState {
@@ -323,6 +346,8 @@ impl Default for PopoutReaderState {
             drawing_color_hex: "#F4F3EE".into(),
             drawing_stroke_width: 3.5,
             drawing_eraser: false,
+            graph_keypad_mode: graph_formula::KeypadMode::default(),
+            graph_drag_origin: None,
         }
     }
 }
@@ -806,6 +831,7 @@ pub fn render_popout_reader(s: &PopoutReaderState, cx: &mut Cx<PopoutReaderState
             NodeKind::Section => render_popout_section_frame(s, snap),
             NodeKind::Flashcard => render_popout_flashcard(s, snap, &node_id, is_ro),
             NodeKind::Formula => render_popout_formula(s, snap, &node_id, is_ro),
+            NodeKind::GraphFormula => render_popout_graph_formula(s, snap, &node_id, is_ro),
             NodeKind::Sequence => render_popout_sequence(s, snap, &node_id, is_ro),
             NodeKind::Image => render_popout_image(s, snap, &node_id, is_ro),
             NodeKind::Calendar => render_popout_calendar(s, snap, &node_id),
@@ -1675,6 +1701,30 @@ fn build_scheme_frame_el(
                         );
                     }
                     d_col
+                }
+                NodeKind::GraphFormula => {
+                    let plot_w = (cw - 16.0).max(80.0);
+                    let plot_h = (ch - 52.0).max(48.0);
+                    let vp = graph_formula::GraphViewport::from_meta(&child.meta);
+                    let plot =
+                        graph_formula::build_graph_plot(&child.content, &vp, plot_w, plot_h, scale);
+                    col()
+                        .w_full()
+                        .grow(1.0)
+                        .min_h(0.0)
+                        .gap(4.0)
+                        .child(graph_formula::render_pretty_math(&child.content, body_sz))
+                        .child(
+                            el()
+                                .key(format!("popout_sec_graph_{}", child.id.as_str()))
+                                .w(plot_w)
+                                .h(plot_h)
+                                .radius(4.0)
+                                .clip_rounded(4.0)
+                                .fill(theme::bg_input())
+                                .border(1.0, theme::border_subtle())
+                                .child(canvas(plot.shape).absolute(0.0, 0.0).w_full().h_full()),
+                        )
                 }
                 NodeKind::Flashcard => {
                     let flip_id = child.id.clone();
@@ -2661,6 +2711,287 @@ fn render_popout_formula(
             sym_rows = sym_rows.child(r);
         }
         card = card.child(sym_rows);
+    }
+
+    col()
+        .w_full()
+        .grow(1.0)
+        .padding(24.0)
+        .items_center()
+        .scroll(ScrollSpec { stick_bottom: false })
+        .child(card)
+}
+
+fn render_popout_graph_formula(
+    s: &PopoutReaderState,
+    snap: &ReaderSnapshot,
+    node_id: &NodeId,
+    is_ro: bool,
+) -> El {
+    let accent = theme::kind_accent(NodeKind::GraphFormula);
+    let plot_w = (s.viewport_width - 120.0).clamp(320.0, 700.0);
+    let plot_h = 300.0;
+    let vp = graph_formula::GraphViewport::from_meta(&snap.meta);
+    let active_content = if is_ro {
+        snap.content.as_str()
+    } else {
+        s.source_edit.text.as_str()
+    };
+    let plot = graph_formula::build_graph_plot(active_content, &vp, plot_w, plot_h, 1.0);
+
+    let nid_in = node_id.clone();
+    let nid_out = node_id.clone();
+    let nid_reset = node_id.clone();
+    let nid_wheel = node_id.clone();
+    let nid_drag = node_id.clone();
+
+    let mut card = col()
+        .key("popout_graph_formula_view")
+        .w_full()
+        .max_w(760.0)
+        .padding(22.0)
+        .gap(12.0)
+        .radius(10.0)
+        .fill(theme::bg_card())
+        .border(1.0, theme::border_default())
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(8.0)
+                .child(icons::ph(
+                    icons::kind_icon(NodeKind::GraphFormula),
+                    16.0,
+                    accent,
+                ))
+                .child(
+                    text(&snap.title)
+                        .font(TextStyle::new(17.0, 600.0))
+                        .color(theme::text_primary()),
+                )
+                .child(el().grow(1.0))
+                .child(
+                    text(graph_formula::format_zoom_badge(&vp))
+                        .font(theme::BADGE_TEXT)
+                        .color(accent),
+                ),
+        )
+        .child(
+            col()
+                .w_full()
+                .padding(14.0)
+                .radius(6.0)
+                .fill(theme::bg_input())
+                .border(1.0, theme::border_subtle())
+                .child(graph_formula::render_pretty_math(active_content, 19.0)),
+        );
+
+    if let Some(ro) = &plot.readout {
+        card = card.child(
+            el()
+                .w_full()
+                .px(14.0)
+                .py(8.0)
+                .radius(6.0)
+                .fill(theme::accent_claude())
+                .child(
+                    text(ro)
+                        .font(TextStyle::new(14.5, 600.0).mono())
+                        .color(theme::text_inverted()),
+                ),
+        );
+    }
+
+    if !is_ro {
+        let nid_f = node_id.clone();
+        card = card.child(
+            col()
+                .w_full()
+                .padding(10.0)
+                .radius(6.0)
+                .fill(theme::bg_input())
+                .border(1.0, theme::border_default())
+                .child(
+                    text_input(&s.source_edit, TextStyle::new(14.5, 500.0).mono().lh(20.0))
+                        .key("popout_graph_formula_input")
+                        .label("Graphic formula source")
+                        .w_full()
+                        .min_h(36.0)
+                        .color(theme::text_primary())
+                        .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+                        .on_edit(|s: &mut PopoutReaderState| &mut s.source_edit)
+                        .on_input_change(move |s: &mut PopoutReaderState, _| {
+                            let title = s.title_edit.text.clone();
+                            let content = s.source_edit.text.clone();
+                            s.snapshot.content = content.clone();
+                            s.send_cmd(ReaderCommand::UpdateTitleContent {
+                                node_id: nid_f.clone(),
+                                title,
+                                content,
+                            });
+                        }),
+                ),
+        );
+    }
+
+    let mut plot_box = el()
+        .key("popout_graph_formula_plot")
+        .w(plot_w)
+        .h(plot_h)
+        .radius(8.0)
+        .clip_rounded(8.0)
+        .fill(theme::bg_input())
+        .border(1.0, theme::border_default())
+        .cursor(Cursor::Grab)
+        .on_wheel(move |s: &mut PopoutReaderState, e, tx| {
+            let factor = (-e.dy * 0.0022).clamp(-0.35, 0.35).exp() as f64;
+            let anchor_norm = if e.x >= 0.0 && e.x <= plot_w && e.y >= 0.0 && e.y <= plot_h {
+                Some((e.x / plot_w.max(1.0), e.y / plot_h.max(1.0)))
+            } else {
+                Some((0.5, 0.5))
+            };
+            s.send_cmd(ReaderCommand::ZoomGraphFormula {
+                node_id: nid_wheel.clone(),
+                factor,
+                anchor_norm,
+                plot_size: (plot_w, plot_h),
+            });
+            tx.instant();
+            true
+        })
+        .on_drag(move |s: &mut PopoutReaderState, d, tx| match d.phase {
+            Phase::Down => {
+                let cur_vp = graph_formula::GraphViewport::from_meta(&s.snapshot.meta);
+                s.graph_drag_origin = Some((nid_drag.clone(), cur_vp.center_x, cur_vp.center_y));
+            }
+            Phase::Move => {
+                if let Some((orig_id, cx0, cy0)) = s.graph_drag_origin.clone() {
+                    if orig_id == nid_drag {
+                        s.send_cmd(ReaderCommand::PanGraphFormula {
+                            node_id: nid_drag.clone(),
+                            start_cx: cx0,
+                            start_cy: cy0,
+                            dx: d.dx,
+                            dy: d.dy,
+                            plot_size: (plot_w, plot_h),
+                            commit: false,
+                        });
+                        tx.instant();
+                    }
+                }
+            }
+            Phase::Up => {
+                if let Some((orig_id, cx0, cy0)) = s.graph_drag_origin.take() {
+                    if orig_id == nid_drag {
+                        s.send_cmd(ReaderCommand::PanGraphFormula {
+                            node_id: nid_drag.clone(),
+                            start_cx: cx0,
+                            start_cy: cy0,
+                            dx: d.dx,
+                            dy: d.dy,
+                            plot_size: (plot_w, plot_h),
+                            commit: true,
+                        });
+                    }
+                }
+            }
+        })
+        .child(canvas(plot.shape).absolute(0.0, 0.0).w_full().h_full());
+
+    for tl in plot.tick_labels {
+        let tx_pos = if tl.align_right {
+            (tl.x - (tl.text.len() as f32 * 5.8)).clamp(2.0, (plot_w - 22.0).max(2.0))
+        } else {
+            tl.x.clamp(2.0, (plot_w - 22.0).max(2.0))
+        };
+        let ty_pos = tl.y.clamp(2.0, (plot_h - 12.0).max(2.0));
+        plot_box = plot_box.child(
+            el().absolute(tx_pos, ty_pos).child(
+                text(tl.text)
+                    .font(TextStyle::new(10.0, 450.0).mono())
+                    .color(theme::text_muted()),
+            ),
+        );
+    }
+
+    card = card.child(plot_box).child(
+        row()
+            .w_full()
+            .center_y()
+            .gap(6.0)
+            .child(el().grow(1.0))
+            .child(toolbar_chip("btn_popout_graph_in", "+", theme::text_primary(), move |s| {
+                s.send_cmd(ReaderCommand::ZoomGraphFormula {
+                    node_id: nid_in.clone(),
+                    factor: 0.72,
+                    anchor_norm: None,
+                    plot_size: (plot_w, plot_h),
+                });
+            }))
+            .child(toolbar_chip("btn_popout_graph_out", "−", theme::text_primary(), move |s| {
+                s.send_cmd(ReaderCommand::ZoomGraphFormula {
+                    node_id: nid_out.clone(),
+                    factor: 1.39,
+                    anchor_norm: None,
+                    plot_size: (plot_w, plot_h),
+                });
+            }))
+            .child(toolbar_chip(
+                "btn_popout_graph_reset",
+                i18n::t(TextKey::GraphFormulaResetView),
+                accent,
+                move |s| {
+                    s.send_cmd(ReaderCommand::ResetGraphFormulaView(nid_reset.clone()));
+                },
+            )),
+    );
+
+    if !is_ro {
+        let mode = s.graph_keypad_mode;
+        let rows = match mode {
+            graph_formula::KeypadMode::Sci => graph_formula::SCI_KEYPAD_ROWS,
+            graph_formula::KeypadMode::Basic => graph_formula::BASIC_KEYPAD_ROWS,
+        };
+        let mut keypad = col()
+            .w_full()
+            .gap(4.0)
+            .padding(8.0)
+            .radius(8.0)
+            .fill(theme::bg_chrome())
+            .border(1.0, theme::border_subtle());
+        for (r_idx, row_btns) in rows.iter().enumerate() {
+            let mut r = row().w_full().gap(4.0);
+            for btn in *row_btns {
+                let nid_k = node_id.clone();
+                let act = btn.action;
+                r = r.child(
+                    el()
+                        .key(format!("popout_kp_{r_idx}_{}", btn.id))
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .h(30.0)
+                        .radius(5.0)
+                        .fill(theme::bg_input())
+                        .hover(theme::hover_subtle())
+                        .border(1.0, theme::border_subtle())
+                        .center()
+                        .cursor(Cursor::Pointer)
+                        .on_press(move |s: &mut PopoutReaderState| {
+                            s.send_cmd(ReaderCommand::ApplyGraphFormulaKeypad {
+                                node_id: nid_k.clone(),
+                                action: act,
+                            });
+                        })
+                        .child(
+                            text(btn.label)
+                                .font(TextStyle::new(12.0, 500.0))
+                                .color(theme::text_primary()),
+                        ),
+                );
+            }
+            keypad = keypad.child(r);
+        }
+        card = card.child(keypad);
     }
 
     col()

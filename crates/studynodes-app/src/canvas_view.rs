@@ -13,6 +13,7 @@ use studynodes_graph::model::{
 
 use crate::doc_reader::{self, DocFormat, DockPosition};
 use crate::formula_math;
+use crate::graph_formula;
 use crate::i18n::{self, TextKey};
 use crate::icons;
 use crate::media_helper;
@@ -2866,6 +2867,9 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
         NodeKind::Formula => {
             render_formula_body(s, node, is_selected, body_size, badge_size, zoom)
         }
+        NodeKind::GraphFormula => {
+            render_graph_formula_card_body(s, node, is_selected, body_size, badge_size, zoom)
+        }
         NodeKind::Sequence => render_sequence_body(node, body_size, badge_size, zoom),
         NodeKind::Video => render_video_card_body(s, node, body_size, badge_size, zoom),
         NodeKind::Audio => render_audio_card_body(s, node, body_size, badge_size, zoom),
@@ -3000,7 +3004,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
         );
     }
 
-    if node.kind == NodeKind::Drawing {
+    if matches!(node.kind, NodeKind::Drawing | NodeKind::GraphFormula) {
         shell
     } else {
         shell.cache()
@@ -3039,6 +3043,10 @@ fn card_header_meta_pill(node: &Node, badge_size: f32, zoom: f32) -> El {
                 .unwrap_or("MATH")
                 .to_uppercase(),
             theme::text_secondary(),
+        )),
+        NodeKind::GraphFormula => Some((
+            graph_formula::format_zoom_badge(&graph_formula::GraphViewport::from_meta(&node.meta)),
+            theme::kind_accent(NodeKind::GraphFormula),
         )),
         NodeKind::Sequence => Some((
             format!("#{:02}", node.meta.step_index.unwrap_or(1)),
@@ -3544,6 +3552,276 @@ fn render_checklist_body(node: &Node, body_size: f32, badge_size: f32, zoom: f32
     }
 
     body
+}
+
+fn render_graph_formula_card_body(
+    s: &AppState,
+    node: &Node,
+    is_selected: bool,
+    body_size: f32,
+    badge_size: f32,
+    zoom: f32,
+) -> El {
+    let is_editing = is_selected && s.editing_node_id.as_ref() == Some(&node.id);
+    let (node_w, node_h) = crate::state::node_world_size(node);
+
+    let eq_strip_reserve = if is_editing { 64.0 } else { 38.0 };
+    let plot_w = ((node_w - 16.0) * zoom).max(110.0 * zoom);
+    let plot_h = ((node_h - 36.0 - eq_strip_reserve) * zoom).max(76.0 * zoom);
+
+    let vp = graph_formula::GraphViewport::from_meta(&node.meta);
+    let active_content = if is_editing {
+        s.canvas_content_edit.text.as_str()
+    } else {
+        node.content.as_str()
+    };
+    let plot = graph_formula::build_graph_plot(active_content, &vp, plot_w, plot_h, zoom);
+
+    let select_id = node.id.clone();
+    let zoom_in_id = node.id.clone();
+    let zoom_out_id = node.id.clone();
+    let zoom_reset_id = node.id.clone();
+    let wheel_id = node.id.clone();
+    let drag_id = node.id.clone();
+
+    let pretty_eq = graph_formula::render_pretty_math(
+        active_content,
+        (body_size * 0.96).clamp(9.0, 18.0),
+    );
+
+    let mut header_eq = col()
+        .w_full()
+        .padding(5.0 * zoom)
+        .gap(3.5 * zoom)
+        .radius(4.0 * zoom)
+        .fill(theme::bg_input())
+        .border(
+            1.0,
+            if is_editing {
+                theme::border_default()
+            } else {
+                theme::border_subtle()
+            },
+        );
+
+    let mut pretty_row = row()
+        .w_full()
+        .center_y()
+        .gap(4.0 * zoom)
+        .child(el().grow(1.0).min_w(0.0).clip_soft(0.0).child(pretty_eq));
+
+    if let Some(err_msg) = &plot.error {
+        pretty_row = pretty_row.child(
+            el()
+                .px(4.0 * zoom)
+                .py(1.5 * zoom)
+                .radius(3.0 * zoom)
+                .fill(theme::accent_danger().alpha(0.16))
+                .child(
+                    text(err_msg)
+                        .font(TextStyle::new((badge_size * 0.88).max(7.0), 500.0))
+                        .color(theme::accent_danger())
+                        .truncate(),
+                ),
+        );
+    } else if let Some(ro) = &plot.readout {
+        let raw_norm = active_content
+            .trim()
+            .strip_prefix("y =")
+            .or_else(|| active_content.trim().strip_prefix("y="))
+            .unwrap_or(active_content.trim())
+            .replace(' ', "");
+        let ro_norm = ro.replace(' ', "");
+        let is_multi = active_content.contains('\n') || active_content.contains(';');
+        if !is_multi && ro_norm != raw_norm {
+            pretty_row = pretty_row.child(
+                el()
+                    .px(5.0 * zoom)
+                    .py(1.5 * zoom)
+                    .radius(3.0 * zoom)
+                    .fill(theme::accent_claude().alpha(0.18))
+                    .child(
+                        text(ro)
+                            .font(TextStyle::new((badge_size * 0.9).max(7.5), 600.0).mono())
+                            .color(theme::accent_claude())
+                            .truncate(),
+                    ),
+            );
+        }
+    }
+
+    header_eq = header_eq.child(pretty_row);
+
+    if is_editing {
+        header_eq = header_eq.child(
+            text_input(
+                &s.canvas_content_edit,
+                TextStyle::new((body_size * 0.92).clamp(9.0, 18.0), 500.0)
+                    .mono()
+                    .lh((body_size * 1.25).max(12.0)),
+            )
+            .key(format!("graph_formula_input_{}", node.id.as_str()))
+            .label("Graphic formula editor")
+            .w_full()
+            .color(theme::text_primary())
+            .caret(theme::accent_claude(), theme::accent_claude().alpha(0.25))
+            .placeholder(i18n::t(TextKey::GraphFormulaPlaceholder), theme::text_muted())
+            .on_edit(|s: &mut AppState| &mut s.canvas_content_edit)
+            .on_input_change(|s: &mut AppState, _| {
+                s.sync_from_canvas_edits();
+                s.maybe_auto_expand_formula_on_canvas_edit();
+            }),
+        );
+    }
+
+    let mut plot_box = el()
+        .key(format!("graph_plot_{}", node.id.as_str()))
+        .w(plot_w)
+        .h(plot_h)
+        .radius(5.0 * zoom)
+        .clip_rounded(5.0 * zoom)
+        .fill(theme::bg_input())
+        .border(1.0, theme::border_subtle())
+        .cursor(Cursor::Grab)
+        .on_wheel(move |s: &mut AppState, e, tx| {
+            if e.mods.ctrl || e.mods.cmd {
+                let factor = (e.dy * 0.0014).clamp(-0.28, 0.28).exp();
+                let anchor = ScreenPos::new(s.canvas_size[0] * 0.5, s.canvas_size[1] * 0.5);
+                s.queue_zoom_at(anchor, factor, 22.0, Some(tx));
+                return true;
+            }
+            let factor = (-e.dy * 0.0022).clamp(-0.35, 0.35).exp() as f64;
+            let anchor_norm = if e.x >= 0.0 && e.x <= plot_w && e.y >= 0.0 && e.y <= plot_h {
+                Some((e.x / plot_w.max(1.0), e.y / plot_h.max(1.0)))
+            } else {
+                Some((0.5, 0.5))
+            };
+            s.zoom_graph_formula(&wheel_id, factor, anchor_norm, (plot_w, plot_h));
+            tx.instant();
+            true
+        })
+        .on_drag(move |s: &mut AppState, d, tx| match d.phase {
+            Phase::Down => {
+                if let Some(n) = s.graph.get_node(&drag_id) {
+                    let cur_vp = graph_formula::GraphViewport::from_meta(&n.meta);
+                    s.graph_drag_origin = Some((drag_id.clone(), cur_vp.center_x, cur_vp.center_y));
+                }
+            }
+            Phase::Move => {
+                if let Some((orig_id, cx0, cy0)) = s.graph_drag_origin.clone() {
+                    if orig_id == drag_id {
+                        s.pan_graph_formula(&drag_id, cx0, cy0, d.dx, d.dy, (plot_w, plot_h));
+                        tx.instant();
+                    }
+                }
+            }
+            Phase::Up => {
+                s.graph_drag_origin = None;
+                if !d.cancelled() && d.dx.hypot(d.dy) < 3.0 {
+                    s.select_node(drag_id.clone(), false);
+                } else {
+                    s.finish_pan_graph_formula(&drag_id);
+                }
+            }
+        })
+        .child(canvas(plot.shape).absolute(0.0, 0.0).w_full().h_full());
+
+    if zoom >= 0.52 {
+        let tick_fs = (badge_size * 0.85).clamp(7.0, 11.0);
+        for tl in plot.tick_labels {
+            let tx_pos = if tl.align_right {
+                (tl.x - (tl.text.len() as f32 * tick_fs * 0.58)).clamp(2.0, (plot_w - 22.0).max(2.0))
+            } else {
+                tl.x.clamp(2.0, (plot_w - 22.0).max(2.0))
+            };
+            let ty_pos = tl.y.clamp(2.0, (plot_h - 12.0).max(2.0));
+            plot_box = plot_box.child(
+                el().absolute(tx_pos, ty_pos).child(
+                    text(tl.text)
+                        .font(TextStyle::new(tick_fs, 450.0).mono())
+                        .color(theme::text_muted()),
+                ),
+            );
+        }
+    }
+
+    // Zoom control pills in top-right corner of plot
+    let btn_fs = (badge_size * 0.95).clamp(8.0, 12.0);
+    plot_box = plot_box.child(
+        row()
+            .absolute((plot_w - 68.0 * zoom.clamp(0.75, 1.25)).max(4.0), 4.0 * zoom)
+            .gap(2.5 * zoom)
+            .padding(2.0 * zoom)
+            .radius(4.0 * zoom)
+            .fill(theme::bg_chrome().alpha(0.86))
+            .border(1.0, theme::border_subtle())
+            .child(
+                el()
+                    .key(format!("graph_zoom_in_{}", node.id.as_str()))
+                    .px(4.5 * zoom)
+                    .py(1.5 * zoom)
+                    .radius(3.0 * zoom)
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.zoom_graph_formula(&zoom_in_id, 0.72, None, (plot_w, plot_h));
+                    })
+                    .child(
+                        text("+")
+                            .font(TextStyle::new(btn_fs, 600.0).mono())
+                            .color(theme::text_primary()),
+                    ),
+            )
+            .child(
+                el()
+                    .key(format!("graph_zoom_out_{}", node.id.as_str()))
+                    .px(4.5 * zoom)
+                    .py(1.5 * zoom)
+                    .radius(3.0 * zoom)
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.zoom_graph_formula(&zoom_out_id, 1.39, None, (plot_w, plot_h));
+                    })
+                    .child(
+                        text("−")
+                            .font(TextStyle::new(btn_fs, 600.0).mono())
+                            .color(theme::text_primary()),
+                    ),
+            )
+            .child(
+                el()
+                    .key(format!("graph_zoom_reset_{}", node.id.as_str()))
+                    .px(4.0 * zoom)
+                    .py(1.5 * zoom)
+                    .radius(3.0 * zoom)
+                    .hover(theme::hover_subtle())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move |s: &mut AppState| {
+                        s.reset_graph_formula_view(&zoom_reset_id);
+                    })
+                    .child(
+                        text("↺")
+                            .font(TextStyle::new(btn_fs, 600.0).mono())
+                            .color(theme::text_secondary()),
+                    ),
+            ),
+    );
+
+    col()
+        .key(format!("node_body_{}", node.id.as_str()))
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .clip_soft(0.0)
+        .px(8.0 * zoom)
+        .py(5.0 * zoom)
+        .gap(5.0 * zoom)
+        .on_press(move |s: &mut AppState| {
+            s.select_node(select_id.clone(), false);
+        })
+        .child(header_eq)
+        .child(plot_box)
 }
 
 fn render_formula_body(
@@ -4058,7 +4336,7 @@ fn render_block_menu_popover(
     dock_w: f32,
     dock_h: f32,
 ) -> El {
-    let menu_w = 456.0;
+    let menu_w = 540.0;
     let est_h = 250.0;
     let cw = s.canvas_size[0].max(240.0);
     let ch = s.canvas_size[1].max(200.0);
@@ -4104,6 +4382,7 @@ fn render_block_menu_popover(
         ("btn_add_excerpt", i18n::t(TextKey::BlockExcerptTitle), NodeKind::Excerpt),
         ("btn_add_checklist", i18n::t(TextKey::BlockChecklistTitle), NodeKind::Checklist),
         ("btn_add_formula", i18n::t(TextKey::BlockFormulaTitle), NodeKind::Formula),
+        ("btn_add_graph_formula", i18n::t(TextKey::BlockGraphFormulaTitle), NodeKind::GraphFormula),
         ("btn_add_sequence", i18n::t(TextKey::BlockSequenceTitle), NodeKind::Sequence),
         ("btn_add_video", i18n::t(TextKey::BlockVideoTitle), NodeKind::Video),
         ("btn_add_audio", i18n::t(TextKey::BlockAudioTitle), NodeKind::Audio),
@@ -4122,7 +4401,7 @@ fn render_block_menu_popover(
         .border(1.0, theme::border_default())
         .shadow(10.0, 24.0, Color::BLACK.alpha(0.55));
 
-    for chunk in items.chunks(5) {
+    for chunk in items.chunks(6) {
         let mut r = row().w_full().gap(6.0);
         for &(key, name, kind) in chunk {
             r = r.child(
@@ -4157,6 +4436,13 @@ fn render_block_menu_popover(
                                 let id = s.add_study_node(NodeKind::Text, spawn_pos);
                                 tx.focus_when_shown(format!("text_body_{}", id.as_str()), false);
                             }
+                            NodeKind::GraphFormula => {
+                                let id = s.add_study_node(NodeKind::GraphFormula, spawn_pos);
+                                tx.focus_when_shown(
+                                    format!("graph_formula_input_{}", id.as_str()),
+                                    false,
+                                );
+                            }
                             _ => {
                                 s.add_study_node(kind, spawn_pos);
                             }
@@ -4177,7 +4463,7 @@ fn render_block_menu_popover(
                     ),
             );
         }
-        for _ in chunk.len()..5 {
+        for _ in chunk.len()..6 {
             r = r.child(el().grow(1.0).min_w(0.0));
         }
         menu = menu.child(r);

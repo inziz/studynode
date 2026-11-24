@@ -349,6 +349,8 @@ where
         "flashcard" | "card" => NodeKind::Flashcard,
         "checklist" | "todo" | "tasks" => NodeKind::Checklist,
         "formula" | "equation" | "math" | "code" => NodeKind::Formula,
+        "graphformula" | "graphicformula" | "graph" | "plot" | "plotter" | "graphing"
+        | "functiongraph" => NodeKind::GraphFormula,
         "excerpt" | "quote" | "citation" => NodeKind::Excerpt,
         "sequence" | "step" => NodeKind::Sequence,
         "section" | "group" | "frame" => NodeKind::Section,
@@ -1861,6 +1863,9 @@ impl StudyGraph {
                         }
                         NodeKind::Formula => {
                             node.meta.language = Some("MATH".into());
+                        }
+                        NodeKind::GraphFormula => {
+                            node.size = (360.0, 320.0);
                         }
                         NodeKind::Sequence => {
                             node.meta.step_index = Some(created_count as u32);

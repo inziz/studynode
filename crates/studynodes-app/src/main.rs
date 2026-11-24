@@ -5,6 +5,7 @@ mod dashboard_view;
 mod doc_reader;
 mod embed_webview;
 mod formula_math;
+mod graph_formula;
 mod i18n;
 mod icons;
 mod inspector_view;
@@ -227,6 +228,44 @@ fn setup_settings_demo(s: &mut AppState) {
     s.open_settings();
 }
 
+fn setup_graph_formula_demo(s: &mut AppState) {
+    let demo_dir = std::env::temp_dir().join("studynodes_scene_graph_formula");
+    let _ = std::fs::remove_dir_all(&demo_dir);
+    *s = AppState::with_projects_dir(demo_dir);
+    s.create_project("Graphic Formula Showcase");
+
+    let g1_id = s.add_study_node(
+        studynodes_graph::model::NodeKind::GraphFormula,
+        Some(studynodes_graph::coords::WorldPos::new(48.0, 56.0)),
+    );
+    let g2_id = s.add_study_node(
+        studynodes_graph::model::NodeKind::GraphFormula,
+        Some(studynodes_graph::coords::WorldPos::new(440.0, 56.0)),
+    );
+    let g3_id = s.add_study_node(
+        studynodes_graph::model::NodeKind::GraphFormula,
+        Some(studynodes_graph::coords::WorldPos::new(48.0, 408.0)),
+    );
+    s.deselect_all();
+
+    if let Some(n) = s.graph.get_node_mut(&g1_id) {
+        n.title = "Linear + Cube Root".into();
+        n.content = "2x + ³√(27)".into();
+    }
+    if let Some(n) = s.graph.get_node_mut(&g2_id) {
+        n.title = "Circle Equation".into();
+        n.content = "x² + y² = 9".into();
+    }
+    if let Some(n) = s.graph.get_node_mut(&g3_id) {
+        n.title = "Trig Waveforms".into();
+        n.content = "y = sin(x)\ny = cos(x)".into();
+    }
+
+    s.select_node(g1_id, false);
+    s.inspector_open = true;
+    s.ai_panel_open = false;
+}
+
 fn handle_app_key(s: &mut AppState, ev: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
     if ev.key == rune::Key::Function(11) {
         s.is_fullscreen = !s.is_fullscreen;
@@ -326,6 +365,7 @@ fn main() {
         ("dashboard", setup_dashboard_demo),
         ("workspace", setup_workspace_demo),
         ("settings", setup_settings_demo),
+        ("graph_formula", setup_graph_formula_demo),
     ];
     spec.setup = Some(|s, waker| {
         s.smooth_zoom_enabled = true;
@@ -4964,6 +5004,7 @@ mod tests {
             "btn_add_excerpt",
             "btn_add_checklist",
             "btn_add_formula",
+            "btn_add_graph_formula",
             "btn_add_sequence",
             "btn_add_video",
             "btn_add_audio",
@@ -5314,6 +5355,168 @@ mod tests {
         settle_frames(rt, 4);
         assert_eq!(rt.state.graph.nodes.len(), 2);
         assert_eq!(rt.state.graph.get_node(&b_id).unwrap().pos, WorldPos::new(100.0, 100.0));
+    }
+
+    #[test]
+    fn test_graphic_formula_creation_keypad_zoom_pan_containment_and_persistence() {
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Graphic Formula E2E");
+        rt.state.inspector_open = true;
+        rt.state.ai_panel_open = false;
+        rt.invalidate();
+        settle_frames(rt, 6);
+
+        // 1. Create Graphic Formula node from block menu
+        click_key(rt, "btn_toggle_block_menu");
+        settle_frames(rt, 4);
+        click_key(rt, "btn_add_graph_formula");
+        settle_frames(rt, 6);
+
+        let gf_id = rt
+            .state
+            .graph
+            .nodes
+            .values()
+            .find(|n| n.kind == NodeKind::GraphFormula)
+            .expect("Graphic Formula node must be created")
+            .id
+            .clone();
+
+        // Formatting keypad lives exclusively in the sidebar inspector, never inside the canvas node card.
+        assert!(
+            rt.state.inspector_open,
+            "selecting/adding Graphic Formula must open sidebar inspector"
+        );
+        let _ = element_rect(rt, "insp_graph_formula_keypad");
+        let kp_toggle_key = format!("graph_keypad_toggle_{}", gf_id.as_str());
+        let kp_card_key = format!("graph_card_keypad_{}", gf_id.as_str());
+        assert!(
+            rt.elements().into_iter().all(|e| {
+                e.key.as_deref() != Some(kp_toggle_key.as_str())
+                    && e.key.as_deref() != Some(kp_card_key.as_str())
+            }),
+            "Graphic Formula canvas card must not render inline keypad controls"
+        );
+
+        // 2. Use inspector keypad buttons to build `2x + ³√(27)`
+        click_key(rt, "insp_kp_clr");
+        settle_frames(rt, 2);
+        click_key(rt, "insp_kp_mode"); // switch to Basic
+        settle_frames(rt, 2);
+        for key in ["insp_kp_1_3_2", "insp_kp_1_0_x", "insp_kp_1_3_add", "insp_kp_1_1_cbrt", "insp_kp_1_3_2", "insp_kp_1_1_7"] {
+            click_key(rt, key);
+            settle_frames(rt, 2);
+        }
+        let content = rt.state.graph.get_node(&gf_id).unwrap().content.clone();
+        assert!(
+            content.contains("2x") && content.contains("³√(27)"),
+            "expected keypad-formatted equation '2x + ³√(27)', got '{content}'"
+        );
+
+        // 3. Verify zoom in / zoom out / reset buttons & wheel zoom on card plot
+        let span_initial = rt
+            .state
+            .graph
+            .get_node(&gf_id)
+            .unwrap()
+            .meta
+            .graph_span_x
+            .unwrap_or(12.0);
+        click_key(rt, &format!("graph_zoom_in_{}", gf_id.as_str()));
+        settle_frames(rt, 3);
+        let span_in = rt
+            .state
+            .graph
+            .get_node(&gf_id)
+            .unwrap()
+            .meta
+            .graph_span_x
+            .unwrap();
+        assert!(span_in < span_initial, "zoom in must shrink span_x: {span_in} vs {span_initial}");
+
+        click_key(rt, &format!("graph_zoom_out_{}", gf_id.as_str()));
+        settle_frames(rt, 3);
+        let span_out = rt
+            .state
+            .graph
+            .get_node(&gf_id)
+            .unwrap()
+            .meta
+            .graph_span_x
+            .unwrap();
+        assert!(span_out > span_in, "zoom out must grow span_x: {span_out} vs {span_in}");
+
+        let plot_key = format!("graph_plot_{}", gf_id.as_str());
+        let pr = element_rect(rt, &plot_key);
+        let (px, py) = (pr[0] + pr[2] * 0.5, pr[1] + pr[3] * 0.5);
+        rt.pointer_move(px, py);
+        rt.wheel_event(WheelEvent::new(0.0, 60.0).at(px, py));
+        settle_frames(rt, 3);
+        let span_wheel = rt
+            .state
+            .graph
+            .get_node(&gf_id)
+            .unwrap()
+            .meta
+            .graph_span_x
+            .unwrap();
+        assert!(span_wheel < span_out, "wheel +dy over plot must zoom in");
+
+        click_key(rt, &format!("graph_zoom_reset_{}", gf_id.as_str()));
+        settle_frames(rt, 3);
+        assert!(
+            (rt.state.graph.get_node(&gf_id).unwrap().meta.graph_span_x.unwrap() - 12.0).abs()
+                < 1e-6
+        );
+
+        // 4. Dragging inside plot pans graph viewport WITHOUT moving node card
+        let pos_before = rt.state.graph.get_node(&gf_id).unwrap().pos;
+        let cx_before = rt
+            .state
+            .graph
+            .get_node(&gf_id)
+            .unwrap()
+            .meta
+            .graph_center_x
+            .unwrap_or(0.0);
+        rt.pointer_move(px, py);
+        rt.pointer_down(px, py);
+        rt.pointer_move(px + 48.0, py - 24.0);
+        rt.pointer_up(px + 48.0, py - 24.0);
+        settle_frames(rt, 4);
+        let pos_after = rt.state.graph.get_node(&gf_id).unwrap().pos;
+        let cx_after = rt
+            .state
+            .graph
+            .get_node(&gf_id)
+            .unwrap()
+            .meta
+            .graph_center_x
+            .unwrap_or(0.0);
+        assert_eq!(pos_before, pos_after, "panning plot must not move card");
+        assert!((cx_after - cx_before).abs() > 0.2, "panning plot must shift graph_center_x");
+
+        // 5. Plot box stays strictly inside node card borders
+        let card_r = element_rect(rt, gf_id.as_str());
+        let plot_r = element_rect(rt, &plot_key);
+        assert!(
+            plot_r[0] >= card_r[0] - 0.5
+                && plot_r[1] >= card_r[1] - 0.5
+                && plot_r[0] + plot_r[2] <= card_r[0] + card_r[2] + 0.5
+                && plot_r[1] + plot_r[3] <= card_r[1] + card_r[3] + 0.5,
+            "graph plot {plot_r:?} must remain inside card borders {card_r:?}"
+        );
+
+        // 6. Save & reload bundle preserves GraphFormula node and viewport
+        let project_dir = rt.state.bundle.as_ref().unwrap().root_dir.clone();
+        let (_, reloaded) = studynodes_graph::ProjectBundle::open(&project_dir)
+            .expect("open bundle");
+        let saved_node = reloaded.get_node(&gf_id).expect("saved GraphFormula node");
+        assert_eq!(saved_node.kind, NodeKind::GraphFormula);
+        assert_eq!(saved_node.content, content);
+        assert!(saved_node.meta.graph_center_x.is_some());
+        assert!(saved_node.meta.graph_span_x.is_some());
     }
 
     #[test]

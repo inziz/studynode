@@ -99,7 +99,7 @@ Return ONLY a single JSON object with `"summary"` (string) and `"ops"` (array of
 
 ### Allowed Enum Values
 - `relation`: `"supports"`, `"contradicts"`, `"derived_from"`, `"elaborates"`, `"prerequisite_for"`, `"example_of"`, `"custom"`.
-- `kind` (for `create_study_node`): `"Flashcard"`, `"Checklist"`, `"Quiz"`, `"Formula"`, `"Excerpt"`, `"Sequence"`, `"Section"`, `"Text"`.
+- `kind` (for `create_study_node`): `"Flashcard"`, `"Checklist"`, `"Quiz"`, `"Formula"`, `"GraphFormula"`, `"Excerpt"`, `"Sequence"`, `"Section"`, `"Text"`.
 - `color` (optional trace color by relevance or topic): `"critical"` (`#E06C75`), `"core"` (`#D97757`), `"supporting"` (`#6AB07A`), `"reference"` (`#7A8A9E`), `"theory"` (`#5B9BD5`), `"synthesis"` (`#A37CE0`), `"example"` (`#D9A74A`), `"method"` (`#4DB6AC`), or any `#RRGGBB` hex string (`"auto"` clears color).
 
 ### Strict Rules
@@ -181,7 +181,7 @@ pub const CANVAS_AGENT_CHAT_SYSTEM_PROMPT: &str = r#"You are the StudyNodes Proj
 - For image search requests ("find an image of...", "search for pictures/diagrams of...", "busca una imagen..."), emit `search_images` with a concise English/topic query (or bilingual keywords) and `count` (1–3).
 - Only use real `node_id` values (`id: ...`) from the Project Knowledge Context (or exact existing node titles, or `temp_id` values `tmp_*` created earlier in the same `ops` array).
 - If the user is only asking a conceptual/informational question without requesting canvas, image, or calendar changes, do NOT emit `canvas_actions`.
-- For `kind`, allowed values are: `"Note"`, `"Text"`, `"Flashcard"`, `"Quiz"`, `"Checklist"`, `"Formula"`, `"Excerpt"`, `"Sequence"`, `"Section"`, `"Video"`, `"Audio"`, `"Calendar"`.
+- For `kind`, allowed values are: `"Note"`, `"Text"`, `"Flashcard"`, `"Quiz"`, `"Checklist"`, `"Formula"`, `"GraphFormula"`, `"Excerpt"`, `"Sequence"`, `"Section"`, `"Video"`, `"Audio"`, `"Calendar"`.
 - For trace/connection colors (`color` on `propose_connection`, `annotate_edge`, or `set_edge_color`), choose relevance/topic colors intentionally: `"critical"` (essential link/contradiction), `"core"` (primary dependency), `"supporting"` (evidence), `"reference"` (background context), `"theory"` (conceptual theory), `"synthesis"` (cross-topic insight), `"example"` (illustration/practice), `"method"` (formula/procedure), or `#RRGGBB` hex (`"auto"` clears color).
 - For quizzes, you can create multi-question `Quiz` nodes (`quiz_questions` array with `question`, `options`, `correct_index`, `answer`, `hints`, plus optional `"question_image_hash"`, `"answer_image_hash"`, `"quiz_mode": "regular" | "popout"`, and `"quiz_difficulty": "easy" | "hard"`) or modify existing ones via `update_node`, `add_quiz_question`, `update_quiz_question`, and `remove_quiz_question`.
 "#;
