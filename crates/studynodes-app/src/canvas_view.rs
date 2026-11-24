@@ -3562,15 +3562,12 @@ fn render_graph_formula_card_body(
     badge_size: f32,
     zoom: f32,
 ) -> El {
-    let accent = theme::kind_accent(NodeKind::GraphFormula);
     let is_editing = is_selected && s.editing_node_id.as_ref() == Some(&node.id);
-    let keypad_open = s.graph_keypad_open.contains(&node.id) && zoom >= 0.65;
     let (node_w, node_h) = crate::state::node_world_size(node);
 
     let eq_strip_reserve = if is_editing { 64.0 } else { 38.0 };
-    let keypad_reserve = if keypad_open { 142.0 } else { 0.0 };
     let plot_w = ((node_w - 16.0) * zoom).max(110.0 * zoom);
-    let plot_h = ((node_h - 36.0 - eq_strip_reserve - keypad_reserve) * zoom).max(76.0 * zoom);
+    let plot_h = ((node_h - 36.0 - eq_strip_reserve) * zoom).max(76.0 * zoom);
 
     let vp = graph_formula::GraphViewport::from_meta(&node.meta);
     let active_content = if is_editing {
@@ -3580,7 +3577,6 @@ fn render_graph_formula_card_body(
     };
     let plot = graph_formula::build_graph_plot(active_content, &vp, plot_w, plot_h, zoom);
 
-    let toggle_kp_id = node.id.clone();
     let select_id = node.id.clone();
     let zoom_in_id = node.id.clone();
     let zoom_out_id = node.id.clone();
@@ -3653,41 +3649,6 @@ fn render_graph_formula_card_body(
             );
         }
     }
-
-    pretty_row = pretty_row.child(
-        el()
-            .key(format!("graph_keypad_toggle_{}", node.id.as_str()))
-            .px(5.0 * zoom)
-            .py(1.5 * zoom)
-            .radius(3.0 * zoom)
-            .fill(if keypad_open {
-                accent.alpha(0.22)
-            } else {
-                theme::bg_control()
-            })
-            .border(
-                1.0,
-                if keypad_open {
-                    accent.alpha(0.55)
-                } else {
-                    theme::border_subtle()
-                },
-            )
-            .hover(theme::hover_subtle())
-            .cursor(Cursor::Pointer)
-            .on_press(move |s: &mut AppState| {
-                s.toggle_graph_keypad(&toggle_kp_id);
-            })
-            .child(
-                text("fx")
-                    .font(TextStyle::new(badge_size.max(8.0), 600.0).mono())
-                    .color(if keypad_open {
-                        accent
-                    } else {
-                        theme::text_secondary()
-                    }),
-            ),
-    );
 
     header_eq = header_eq.child(pretty_row);
 
@@ -3847,7 +3808,7 @@ fn render_graph_formula_card_body(
             ),
     );
 
-    let mut body = col()
+    col()
         .key(format!("node_body_{}", node.id.as_str()))
         .w_full()
         .grow(1.0)
@@ -3860,89 +3821,7 @@ fn render_graph_formula_card_body(
             s.select_node(select_id.clone(), false);
         })
         .child(header_eq)
-        .child(plot_box);
-
-    if keypad_open {
-        let mode = s.graph_keypad_mode;
-        let rows = match mode {
-            graph_formula::KeypadMode::Sci => graph_formula::SCI_KEYPAD_ROWS,
-            graph_formula::KeypadMode::Basic => graph_formula::BASIC_KEYPAD_ROWS,
-        };
-        let kp_fs = (badge_size * 0.92).clamp(8.0, 12.0);
-        let mut kp_col = col()
-            .key(format!("graph_card_keypad_{}", node.id.as_str()))
-            .w_full()
-            .gap(2.5 * zoom)
-            .padding(4.0 * zoom)
-            .radius(5.0 * zoom)
-            .fill(theme::bg_chrome())
-            .border(1.0, theme::border_subtle());
-
-        let mut bar = row().w_full().gap(3.0 * zoom);
-        for (bkey, blabel, act) in [
-            ("mode", if mode == graph_formula::KeypadMode::Sci { "123" } else { "f(x)" }, graph_formula::KeypadAction::ToggleMode),
-            ("nl", "↵", graph_formula::KeypadAction::Newline),
-            ("left", "<", graph_formula::KeypadAction::MoveLeft),
-            ("right", ">", graph_formula::KeypadAction::MoveRight),
-            ("bs", "⌫", graph_formula::KeypadAction::Backspace),
-            ("clr", "✕", graph_formula::KeypadAction::Clear),
-        ] {
-            let nid_b = node.id.clone();
-            bar = bar.child(
-                el()
-                    .key(format!("card_kp_{}_{}", node.id.as_str(), bkey))
-                    .grow(1.0)
-                    .h((20.0 * zoom).clamp(16.0, 26.0))
-                    .radius(3.0 * zoom)
-                    .fill(theme::bg_control())
-                    .hover(theme::hover_subtle())
-                    .center()
-                    .cursor(Cursor::Pointer)
-                    .on_press(move |s: &mut AppState| {
-                        s.apply_graph_formula_keypad(&nid_b, act);
-                    })
-                    .child(
-                        text(blabel)
-                            .font(TextStyle::new(kp_fs, 600.0).mono())
-                            .color(theme::text_primary()),
-                    ),
-            );
-        }
-        kp_col = kp_col.child(bar);
-
-        for row_btns in rows {
-            let mut r = row().w_full().gap(2.5 * zoom);
-            for btn in *row_btns {
-                let nid_k = node.id.clone();
-                let act = btn.action;
-                r = r.child(
-                    el()
-                        .key(format!("card_kp_{}_{}", node.id.as_str(), btn.id))
-                        .grow(1.0)
-                        .min_w(0.0)
-                        .h((22.0 * zoom).clamp(18.0, 28.0))
-                        .radius(3.0 * zoom)
-                        .fill(theme::bg_input())
-                        .hover(theme::hover_subtle())
-                        .border(1.0, theme::border_subtle())
-                        .center()
-                        .cursor(Cursor::Pointer)
-                        .on_press(move |s: &mut AppState| {
-                            s.apply_graph_formula_keypad(&nid_k, act);
-                        })
-                        .child(
-                            text(btn.label)
-                                .font(TextStyle::new(kp_fs, 500.0))
-                                .color(theme::text_primary()),
-                        ),
-                );
-            }
-            kp_col = kp_col.child(r);
-        }
-        body = body.child(kp_col);
-    }
-
-    body
+        .child(plot_box)
 }
 
 fn render_formula_body(

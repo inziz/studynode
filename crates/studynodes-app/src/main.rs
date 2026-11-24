@@ -5345,6 +5345,22 @@ mod tests {
             .id
             .clone();
 
+        // Formatting keypad lives exclusively in the sidebar inspector, never inside the canvas node card.
+        assert!(
+            rt.state.inspector_open,
+            "selecting/adding Graphic Formula must open sidebar inspector"
+        );
+        let _ = element_rect(rt, "insp_graph_formula_keypad");
+        let kp_toggle_key = format!("graph_keypad_toggle_{}", gf_id.as_str());
+        let kp_card_key = format!("graph_card_keypad_{}", gf_id.as_str());
+        assert!(
+            rt.elements().into_iter().all(|e| {
+                e.key.as_deref() != Some(kp_toggle_key.as_str())
+                    && e.key.as_deref() != Some(kp_card_key.as_str())
+            }),
+            "Graphic Formula canvas card must not render inline keypad controls"
+        );
+
         // 2. Use inspector keypad buttons to build `2x + ³√(27)`
         click_key(rt, "insp_kp_clr");
         settle_frames(rt, 2);

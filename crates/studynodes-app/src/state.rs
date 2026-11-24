@@ -582,8 +582,7 @@ pub struct AppState {
     pub quiz_hint_edit: TextEdit,
     pub quiz_correct_idx: usize,
 
-    // Graphic Formula inline keypad & plot pan state
-    pub graph_keypad_open: HashSet<NodeId>,
+    // Graphic Formula sidebar keypad mode & plot pan state
     pub graph_keypad_mode: graph_formula::KeypadMode,
     pub graph_drag_origin: Option<(NodeId, f64, f64)>,
 
@@ -891,7 +890,6 @@ impl AppState {
             quiz_ans_edit: TextEdit::new(""),
             quiz_hint_edit: TextEdit::new(""),
             quiz_correct_idx: 0,
-            graph_keypad_open: HashSet::new(),
             graph_keypad_mode: graph_formula::KeypadMode::default(),
             graph_drag_origin: None,
             asset_path_cache: HashMap::new(),
@@ -3011,10 +3009,13 @@ impl AppState {
                 }
                 self.ai_panel_open = false;
                 self.editing_node_id = None;
-            } else if matches!(
-                n.kind,
-                NodeKind::Note | NodeKind::Formula | NodeKind::GraphFormula | NodeKind::Text
-            ) {
+            } else if n.kind == NodeKind::GraphFormula {
+                if !self.inspector_popped_out {
+                    self.inspector_open = true;
+                }
+                self.ai_panel_open = false;
+                self.editing_node_id = Some(id.clone());
+            } else if matches!(n.kind, NodeKind::Note | NodeKind::Formula | NodeKind::Text) {
                 self.editing_node_id = Some(id.clone());
             } else {
                 self.editing_node_id = None;
@@ -3412,23 +3413,6 @@ impl AppState {
         }
         self.persist_graph_and_snapshot();
         self.status_message = format!("Plotted {expr}");
-    }
-
-    pub fn toggle_graph_keypad(&mut self, id: &NodeId) {
-        if self.graph_keypad_open.contains(id) {
-            self.graph_keypad_open.remove(id);
-        } else {
-            self.graph_keypad_open.insert(id.clone());
-            if let Some(n) = self.graph.get_node_mut(id) {
-                if n.kind == NodeKind::GraphFormula && n.size.1 < 410.0 {
-                    n.size.1 = 420.0;
-                }
-            }
-            if !self.selected_nodes.contains(id) {
-                self.select_node(id.clone(), false);
-            }
-        }
-        self.persist_graph_and_snapshot();
     }
 
     /// Spawn a specialized Phase 2 study node with clean monochrome defaults.
