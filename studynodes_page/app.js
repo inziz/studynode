@@ -76,11 +76,19 @@ async function hydrateFromGitHub() {
     });
 
     if (Array.isArray(rawContribs) && rawContribs.length > 0) {
-      const list = rawContribs.map((item) => ({
-        login: item.login,
-        avatar_url: item.avatar_url,
-        html_url: item.html_url,
-      }));
+      const byLogin = new Map();
+      FALLBACK_CONTRIBUTORS.forEach((c) => {
+        byLogin.set(c.login.toLowerCase(), c);
+      });
+      rawContribs.forEach((item) => {
+        if (!item?.login) return;
+        byLogin.set(item.login.toLowerCase(), {
+          login: item.login,
+          avatar_url: item.avatar_url,
+          html_url: item.html_url,
+        });
+      });
+      const list = Array.from(byLogin.values());
       renderAvatarLinks("top-contributors", list);
       renderAvatarLinks("footer-contributors", list);
     }
