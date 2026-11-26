@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>StudyNodes — Interactive Scheme Creator</title>
+  <meta name="description" content="StudyNodes is a native GPU-accelerated desktop study environment built in Rust combining an infinite node canvas, multi-format reading, live 2D math typesetting and plotting, active recall quizzes, OCR, and LLM synthesis." />
+  <link rel="icon" type="image/png" href="assets/logo.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#top">
+        <img src="assets/logo.png" alt="StudyNodes logo" width="24" height="24" />
+        <span>StudyNodes</span>
+      </a>
+      <nav class="topnav" aria-label="Primary navigation">
+        <a href="#features">Features</a>
+        <a href="#nodes">18 Nodes</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#install">Install</a>
+        <a href="#license">License</a>
+      </nav>
+      <div class="topbar-actions">
+        <a class="btn btn-ghost" href="https://github.com/inziz/studynode" target="_blank" rel="noreferrer">GitHub</a>
+        <a class="btn btn-primary" href="https://github.com/inziz/studynode/releases/latest" target="_blank" rel="noreferrer">Download v0.6.0</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="top">
+    <!-- Hero Section -->
+    <section class="hero">
+      <div class="hero-inner">
+        <div class="hero-copy">
+          <img class="hero-logo" src="assets/logo.png" alt="StudyNodes Icon" width="72" height="72" />
+          <h1>StudyNodes</h1>
+          <p class="hero-subtitle">interactive scheme creator</p>
+          <p class="hero-lead">
+            A native GPU-accelerated desktop study environment built in <strong>Rust</strong> on the
+            <strong>Rune</strong> UI runtime (<code>wgpu</code> / DirectX 12). Combine an infinite spatial canvas,
+            multi-format reading, live 2D mathematical typesetting and plotting, active recall quizzes,
+            offline/cloud OCR, and human-in-the-loop LLM synthesis.
+          </p>
+          <div class="hero-cta">
+            <a class="btn btn-primary" href="https://github.com/inziz/studynode/releases/latest" target="_blank" rel="noreferrer">
+              Download Windows Installer
+            </a>
+            <a class="btn btn-secondary" href="#overview">Read Documentation</a>
+          </div>
+        </div>
+
+        <div class="hero-media">
+          <div class="window-chrome">
+            <div class="window-dots" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </div>
+            <span class="window-title">StudyNodes — Exam Prep · Harmonic Motion &amp; Calculus</span>
+            <span class="window-badge">Dx12 · 120Hz</span>
+          </div>
+          <img
+            src="assets/exam-template.png"
+            alt="StudyNodes workspace showing framed sections, damped harmonic oscillator formula, interactive wave superposition plot, quiz, flashcards, and calendar"
+            class="hero-screenshot"
+          />
+        </div>
+      </div>
+    </section>
+
+    <!-- Centered Main Content -->
+    <section class="content-band" id="overview">
+      <div class="content-container">
+        <!-- Compact Project Stats + Contributors Strip right after Hero (scrolls naturally, not sticky) -->
+        <section class="repo-strip" aria-label="GitHub project statistics and contributors">
+          <div class="repo-strip-left">
+            <a class="repo-name" href="https://github.com/inziz/studynode" target="_blank" rel="noreferrer">inziz/studynode</a>
+            <div class="repo-metrics">
+              <span><strong id="stat-stars">0</strong> stars</span>
+              <span><strong id="stat-forks">0</strong> forks</span>
+              <span id="stat-release">v0.6.0</span>
+              <span class="lang-inline"><span class="lang-dot"></span><span id="stat-language">Rust</span></span>
+            </div>
+          </div>
+          <div class="repo-strip-right">
+            <span class="contrib-label">Contributors</span>
+            <div class="avatar-row" id="top-contributors">
+              <!-- Populated by app.js as clickable profile pictures -->
+            </div>
+          </div>
+        </section>
+
+        <!-- Segmented Section Switcher (follows AGENTS.md: unified track + rectangular segments, no pills) -->
+        <nav class="doc-segmented" aria-label="Documentation sections">
+          <a href="#features" class="is-active">Core Features</a>
+          <a href="#nodes">18 Node Types</a>
+          <a href="#math">2D Math &amp; Plotter</a>
+          <a href="#quizzes">Quizzes</a>
+          <a href="#architecture">Architecture</a>
+          <a href="#install">Install</a>
+          <a href="#license">License</a>
+        </nav>
+
+        <article class="doc-column">
+          <section id="features" class="doc-section">
+            <h2>Core Features</h2>
+
+            <div class="feature-block">
+              <h3>Dashboard, Multi-Project Tabs &amp; Starter Templates</h3>
+              <figure class="shot-frame">
+                <img src="assets/dashboard.png" alt="StudyNodes Dashboard showing recent workspaces, collections, and starter templates" />
+                <figcaption>Project Dashboard with collections filtering, tab switcher, and one-click starter schemas.</figcaption>
+              </figure>
+              <ul>
+                <li><strong>Workspace Management:</strong> Search existing <code>.studynodes</code> bundles, group projects into custom collections, rename or delete projects, and export/import <code>.studynodes</code> zip archives.</li>
+                <li><strong>Multi-Project Tabs:</strong> Keep multiple study projects open simultaneously in the top tab bar without losing camera position, selection, or draft edits.</li>
+                <li><strong>Rich Starter Examples:</strong> Launch immediately into pre-built <strong>Literature</strong> (Transformer architecture), <strong>Exam Prep</strong> (harmonic motion &amp; calculus), or <strong>Concept Map</strong> (synaptic plasticity) knowledge graphs, or start from a <strong>Blank</strong> canvas.</li>
+              </ul>
+            </div>
+
+            <div class="feature-block">
+              <h3>Infinite Canvas, Framed Sections &amp; Semantic Wires</h3>
+              <figure class="shot-frame">
+                <img src="assets/workspace.png" alt="StudyNodes Workspace canvas with framed Cognitive Neuroscience section and Markdown inspector" />
+                <figcaption>Infinite canvas paired with a live Document Reader and AI Summary sidebar.</figcaption>
+              </figure>
+              <ul>
+                <li><strong>Smooth Camera Navigation:</strong> Pan with click-drag, middle-mouse, <code>Space</code>+drag, or native 2D Windows Precision Touchpad gestures; zoom smoothly anchored to cursor coordinates.</li>
+                <li><strong>Framed Sections:</strong> Organize related cards inside labeled, color-tinted group frames (<code>Section</code> nodes). Dragging a section moves all contained cards together; sections can also pop out into a dedicated window or export to a high-DPI PNG screenshot.</li>
+                <li><strong>Typed Cubic Bézier Wires:</strong> Connect any node's output socket to another node's input socket with directional arrowheads, midpoint relation badges (<code>supports</code>, <code>contradicts</code>, <code>derived_from</code>, <code>explains</code>, <code>example_of</code>, <code>relates_to</code>, or custom labels), per-trace semantic colors, and animated GPU flow pulses.</li>
+                <li><strong>Movable Dock:</strong> Anchor the floating creation dock to the bottom, top, left, or right edge—or drag it freely into vertical icon-only mode.</li>
+              </ul>
+            </div>
+          </section>
+
+          <section id="nodes" class="doc-section">
+            <h2>18 Study Node Types</h2>
+            <p class="section-intro">Every node card lives on the same spatial coordinate plane and can be wired into causal chains, exam drills, or reading clusters.</p>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Node Kind</th>
+                    <th>Purpose</th>
+                    <th>Key Capabilities</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td><strong>Note</strong></td><td>Markdown study card</td><td>Headings, lists, tables, code blocks, inline editing &amp; scrolling</td></tr>
+                  <tr><td><strong>Document</strong></td><td>File &amp; syllabus reader</td><td>PDF, DOCX, ODT, PPTX, XLSX, EPUB, HTML, RTF, CSV, TXT, MD</td></tr>
+                  <tr><td><strong>Image</strong></td><td>Visual diagrams &amp; figures</td><td>Frameless or framed mode, resizing, OCR &amp; translation extraction</td></tr>
+                  <tr><td><strong>Text</strong></td><td>Floating canvas headings</td><td>Borderless typography with Sans/Serif/Mono/Display/Hand styles</td></tr>
+                  <tr><td><strong>Formula</strong></td><td>2D mathematical expressions</td><td>Multi-page math keyboard (<code>123</code>/<code>f(x)</code>/<code>abc</code>/<code>αβγ</code>), fraction/root layout &amp; live evaluation</td></tr>
+                  <tr><td><strong>Graph Formula</strong></td><td>2D plot &amp; implicit solver</td><td>Plots <code>y = f(x)</code>, multi-curve expressions, implicit curves, and inequalities</td></tr>
+                  <tr><td><strong>Flashcard</strong></td><td>Spaced recall card</td><td>Front/back flip view with mastery ratings (<code>new</code>, <code>again</code>, <code>good</code>, <code>easy</code>)</td></tr>
+                  <tr><td><strong>Quiz</strong></td><td>Multi-question practice deck</td><td>Inline or full-screen Popout overlay, Easy &amp; Hard modes, hints, and question/answer images</td></tr>
+                  <tr><td><strong>Sequence</strong></td><td>Ordered procedural steps</td><td>Step badges (<code>Step 1</code>, <code>Step 2</code>, ...) and chained step spawning</td></tr>
+                  <tr><td><strong>Checklist</strong></td><td>Interactive task card</td><td>Clickable Markdown <code>- [ ]</code> / <code>- [x]</code> items directly on the canvas</td></tr>
+                  <tr><td><strong>Excerpt</strong></td><td>Source quotation card</td><td>Deep-linked back to exact source <code>Document</code> node and page</td></tr>
+                  <tr><td><strong>Concept</strong></td><td>Core topic anchor</td><td>Topic hub for concept maps and semantic clusters</td></tr>
+                  <tr><td><strong>AI Synthesis</strong></td><td>LLM-generated summary</td><td>Cross-node synthesis generated from selected neighborhoods</td></tr>
+                  <tr><td><strong>Section</strong></td><td>Spatial group container</td><td>Framed area or banner with group drag, pop-out, and PNG export</td></tr>
+                  <tr><td><strong>Calendar</strong></td><td>Study schedule &amp; planner</td><td>Month and 7-day Week views, timed events, day notes, linked cards</td></tr>
+                  <tr><td><strong>Video</strong></td><td>Video study card</td><td>Local MP4/WEBM playback or WebView2 embeds (YouTube, Vimeo) with timestamps</td></tr>
+                  <tr><td><strong>Audio</strong></td><td>Audio &amp; subtitle card</td><td>Local/stream playback, <code>.srt</code>/<code>.vtt</code> parsing, auto-transcription &amp; timestamps</td></tr>
+                  <tr><td><strong>Drawing</strong></td><td>Freehand sketch canvas</td><td>Multi-color vector strokes, eraser, and OCR/formula recognition</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section id="math" class="doc-section">
+            <h2>2D Mathematical Equations &amp; Interactive Plotter</h2>
+            <figure class="shot-frame">
+              <img src="assets/graph-formula.png" alt="StudyNodes Graphic Formula showcase with 2D equation rendering and math keypad" />
+              <figcaption>2D stacked typesetting, live symbolic evaluation banner, and multi-curve explicit/implicit plotting.</figcaption>
+            </figure>
+            <ul>
+              <li><strong>Structured 2D Typesetting:</strong> Expressions such as fractions (<code>(a+b)/c</code>), nth roots (<code>root(n, x)</code> / <code>√x</code>), exponents, subscripts, summations, integrals, logarithms, and Greek symbols render as stacked 2D notation in both canvas cards and the sidebar inspector.</li>
+              <li><strong>Multi-Page Keypad:</strong> Switch between numbers/operators (<code>123</code>), calculus/trig/logic functions (<code>f(x)</code>), Latin letters (<code>abc</code>), and Greek symbols (<code>αβγ</code>), or toggle raw LaTeX/ASCII input (<code>\alpha</code>, <code>\frac{a}{b}</code>, <code>\sqrt{x}</code>).</li>
+              <li><strong>Live Symbolic Readout:</strong> Automatically evaluates arithmetic and simplifies algebraic expressions (e.g. <code>2x + root(3, 27) → 2x + 3</code>) in a highlighted result banner.</li>
+              <li><strong>Interactive Plotter:</strong> Renders explicit <code>y = f(x)</code>, stacked systems, implicit curves (circles and conics via marching squares), and inequalities with mouse-wheel zoom and pan per card.</li>
+            </ul>
+          </section>
+
+          <section id="quizzes" class="doc-section">
+            <h2>Active Recall: Flashcards &amp; Full-Screen Quizzes</h2>
+            <figure class="shot-frame">
+              <img src="assets/quiz-popout.png" alt="StudyNodes full-screen Popout Quiz overlay" />
+              <figcaption>Distraction-free Popout Quiz mode with question navigation, hints, and score tracking.</figcaption>
+            </figure>
+            <ul>
+              <li><strong>Inline or Full-Screen Popout Quiz:</strong> Run quizzes directly inside a canvas node (<code>Regular</code>) or launch a centered full-screen overlay (<code>Popout</code>).</li>
+              <li><strong>Easy vs. Hard Difficulty Modes:</strong> <strong>Easy</strong> lets you pause and return to the canvas scheme anytime to check notes and resume later; <strong>Hard</strong> locks you into the quiz until completed or until you press <strong>Give Up</strong>.</li>
+              <li><strong>Rich Question Decks:</strong> Supports multiple-choice or free-response prompts, progressive hints, detailed answer explanations, and attached images on both questions and answers.</li>
+            </ul>
+          </section>
+
+          <section class="doc-section">
+            <h2>Reader, Media, AI Synthesis &amp; Settings</h2>
+            <div class="split-notes">
+              <div class="note-card">
+                <h4>Multi-Format Reader &amp; OCR</h4>
+                <p>Built-in reader supports PDF (<code>hayro</code> Continuous / Two-Page / Single-Page layouts), DOCX, ODT, PPTX, XLSX, EPUB, HTML, RTF, CSV, Markdown, and images with content-addressed SHA-256 asset ingestion. Includes offline <code>PP-OCRv5</code> ONNX extraction, Cloud Vision API support, and multi-backend translation via Ollama or cloud APIs.</p>
+              </div>
+              <div class="note-card">
+                <h4>Video, Audio, Calendar &amp; Drawing</h4>
+                <p>Play local videos/audio or YouTube, Vimeo, and Spotify embeds inside WebView2 with clickable timestamp bookmarks and <code>.srt</code>/<code>.vtt</code> subtitles. Plan deadlines in Month or 7-day Week views on Calendar cards, or sketch freehand vector diagrams directly on the canvas.</p>
+              </div>
+              <div class="note-card">
+                <h4>AI Canvas Synthesis &amp; Project Chat</h4>
+                <p>Select clusters of nodes to generate cross-node summaries and proposed ("ghost") connections with one-click Accept/Dismiss badges, or chat per project with optional <strong>Canvas Actions</strong> supporting full undo/redo across Gemini, OpenAI, Anthropic, OpenRouter, Groq, DeepSeek, and Ollama.</p>
+              </div>
+              <div class="note-card">
+                <h4>Themes, Languages &amp; Auto-Updates</h4>
+                <p>6 themes (<strong>Warm Charcoal</strong>, Dark, Light, Tokyo Night, Solarized Dark, Solarized Light), 6 UI languages (EN, ES, FR, DE, PT, JA), sliding switches, segmented controls, and automatic GitHub Releases checking with atomic binary replacement.</p>
+              </div>
+            </div>
+            <figure class="shot-frame">
+              <img src="assets/settings.png" alt="StudyNodes sidebar Settings panel with segmented controls and sliding toggle switches" />
+              <figcaption>Sidebar-organized Settings with sliding toggle switches, segmented selectors, and built-in updater controls.</figcaption>
+            </figure>
+          </section>
+
+          <section id="architecture" class="doc-section">
+            <h2>Technical Architecture</h2>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Crate</th>
+                    <th>Responsibility</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td><code>crates/studynodes-graph</code></td><td>UI-agnostic core: <code>Node</code>, <code>Edge</code>, <code>Camera</code>, <code>CubicBezier</code>, <code>GraphPatch</code> diff engine, <code>CommandHistory</code> undo/redo, and atomic <code>.studynodes</code> bundle persistence.</td></tr>
+                  <tr><td><code>crates/studynodes-llm</code></td><td>Bounded 1-hop context serialization, canvas-action prompt builder, forgiving JSON extraction, and Gemini / OpenAI / Anthropic / Mock clients.</td></tr>
+                  <tr><td><code>crates/studynodes-vision</code></td><td>Offline <code>PP-OCRv5</code> ONNX pipeline (<code>oar-ocr</code>), image contrast preprocessing, Cloud Vision clients, and Ollama / Gemini / MyMemory translation.</td></tr>
+                  <tr><td><code>crates/studynodes-app</code></td><td>Native Rune GPU desktop application, math AST/plotter, reader, quiz/calendar/media/drawing views, DirectManipulation touchpad, WebView2 host, and auto-updater.</td></tr>
+                  <tr><td><code>crates/studynodes-installer</code></td><td>Self-contained per-user Windows installer &amp; uninstaller (<code>studynodes-setup</code>) embedding <code>studynodes.exe</code> and generating Start Menu &amp; Desktop shortcuts.</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="arch-grid">
+              <div class="arch-card">
+                <h4>Rendering &amp; Zero-Rebuild GPU Pipeline</h4>
+                <p>Pan (<code>live_offset</code>), cursor-anchored zoom (<code>live_scale</code>), and traveling wire pulses (<code>live_trim</code>) update GPU uniforms directly via <code>tx.live_only()</code> without rebuilding the view tree or running Taffy layout. After 30s without user input, animation timers stop so Rune enters <code>window::rest</code> (0% idle CPU/GPU wakeups) and reclaims GPU layer targets. Viewport culling, low-zoom title LOD below <code>0.48x</code>, <code>rune::memo</code> subtree caching, and bounded decode caches keep long sessions smooth.</p>
+              </div>
+              <div class="arch-card">
+                <h4>Atomic Storage in <code>Documents\StudyNodes</code></h4>
+                <p>User bundles and <code>reader_prefs.json</code> live in <code>&lt;Documents&gt;\StudyNodes\</code> (resolved via <code>SHGetKnownFolderPath</code>, with automatic non-destructive first-run migration from legacy <code>./study_projects</code>). Background writes serialize to <code>project.json.tmp</code>, call <code>sync_all()</code>, and atomically rename to <code>project.json</code> while pruning unreferenced assets in <code>assets/</code>.</p>
+              </div>
+              <div class="arch-card">
+                <h4>Formula AST &amp; Marching Squares Plotter</h4>
+                <p>A recursive-descent parser converts ASCII, Unicode math, and LaTeX shorthands into an AST rendered with stacked fractions, dynamic radical bars, exponents, and subscripts. Live readouts simplify arithmetic/linear expressions, while plots adaptively sample discontinuities and extract implicit contours and inequality shading via grid marching squares.</p>
+              </div>
+              <div class="arch-card">
+                <h4>Platform Integrations &amp; Self-Updater</h4>
+                <p>Windows Precision Touchpad support uses COM <code>IDirectManipulationViewport</code> for unlocked 2D diagonal pan and pinch. WebView2 embeds serve an ephemeral localhost origin host. Updates check GitHub Releases, validate PE <code>MZ</code> headers, perform atomic <code>.exe → .old → .new</code> binary replacement with rollback, and clean up <code>.old</code> on relaunch.</p>
+              </div>
+            </div>
+          </section>
+
+          <section id="install" class="doc-section">
+            <h2>Installation &amp; Building from Source</h2>
+            <p>Download <strong><code>StudyNodes-Setup-v0.6.0-windows-x86_64.exe</code></strong> (guided per-user installer with shortcuts and uninstaller registration) or the standalone <strong><code>studynodes-v0.6.0-windows-x86_64.exe</code></strong> from <a href="https://github.com/inziz/studynode/releases/latest" target="_blank" rel="noreferrer">GitHub Releases</a>, or build locally from source:</p>
+            <div class="code-card">
+              <div class="code-header">
+                <span>PowerShell</span>
+                <button class="copy-btn" type="button" data-copy-target="build-commands">Copy</button>
+              </div>
+              <pre id="build-commands"><code># Run the desktop application
+cargo run -p studynodes-app
+
+# Run all workspace unit, UI, and integration tests
+cargo test --workspace --no-fail-fast
+
+# Capture headless GPU UI screenshots from showcase scenes
+cargo run -p studynodes-app -- --snap docs/screenshots/exam-template.png --scene template_exam
+
+# Build release binary and self-contained Windows installer
+powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1</code></pre>
+            </div>
+          </section>
+
+          <section id="license" class="doc-section">
+            <h2>License</h2>
+            <div class="license-card">
+              <p><strong>PolyForm Noncommercial License 1.0.0 + Commercial Restriction Agreement</strong></p>
+              <p>
+                StudyNodes is licensed for noncommercial personal, educational, and research use under the
+                <strong>PolyForm Noncommercial License 1.0.0</strong>. In addition, under the specific project
+                agreement: <strong>no company or individual may use this project, its binaries, derivative works,
+                or its source code for lucrative or commercial purposes without a previous written agreement</strong>
+                with the project owner (<code>inziz</code>).
+              </p>
+            </div>
+          </section>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <!-- Bottom Contributors Section & Footer -->
+  <footer class="site-footer" id="contributors">
+    <div class="footer-inner">
+      <div class="footer-top">
+        <div class="footer-brand">
+          <div class="brand-lockup">
+            <img src="assets/logo.png" alt="StudyNodes logo" width="28" height="28" />
+            <div>
+              <strong>StudyNodes</strong>
+              <p>interactive scheme creator · built with Rust &amp; Rune</p>
+            </div>
+          </div>
+          <div class="footer-links">
+            <a href="https://github.com/inziz/studynode" target="_blank" rel="noreferrer">Repository</a>
+            <a href="https://github.com/inziz/studynode/releases/latest" target="_blank" rel="noreferrer">Releases (v0.6.0)</a>
+            <a href="#license">License</a>
+            <a href="#top">Back to top ↑</a>
+          </div>
+        </div>
+
+        <div class="footer-contributors">
+          <h3>Contributors</h3>
+          <div class="avatar-row" id="footer-contributors">
+            <!-- Populated by app.js as clickable profile pictures -->
+          </div>
+        </div>
+      </div>
+
+      <div class="footer-bottom">
+        <span>PolyForm Noncommercial License 1.0.0 · No lucrative or commercial use without prior written agreement</span>
+        <span id="live-sync-note">inziz/studynode</span>
+      </div>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
