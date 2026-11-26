@@ -228,3 +228,14 @@ cargo run -p studynodes-app -- --snap docs/screenshots/exam-template.png --scene
 # Build release app + self-contained Windows setup executable
 powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1
 ```
+
+---
+
+## License
+
+StudyNodes is licensed under the **[PolyForm Noncommercial License 1.0.0](LICENSE)** together with a specific commercial restriction notice:
+
+> **No company or individual may use this project, its binaries, derivative works, or its source code for lucrative or commercial purposes without a previous written agreement.**
+
+See [LICENSE](LICENSE) for complete terms.
+
