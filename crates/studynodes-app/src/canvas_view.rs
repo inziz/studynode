@@ -218,7 +218,6 @@ fn build_wire_shape(s: &AppState, cam: &Camera) -> Shape {
     let socket_r = (4.5 * zoom).clamp(2.2, 8.0);
     let arrow_len = (8.5 * zoom).clamp(4.0, 13.0);
     let arrow_hw = (4.0 * zoom).clamp(2.0, 6.2);
-    let animate_wires = s.reader_prefs.animate_wires && zoom >= 0.35;
     let curve_pad = 140.0 * zoom;
 
     for edge in s.graph.edges.values() {
@@ -285,42 +284,6 @@ fn build_wire_shape(s: &AppState, cam: &Camera) -> Shape {
                 arrow_hw,
                 wire_color,
             );
-
-            if animate_wires {
-                // Traveling directional pulse + chevron along the Bézier flow
-                let t_anim = 0.08 + s.wire_anim_phase.clamp(0.0, 1.0) * 0.84;
-                let alpha_env = (t_anim * 6.0).min((1.0 - t_anim) * 6.0).clamp(0.0, 1.0);
-                let pulse_color = if is_selected || is_ghost {
-                    theme::accent_claude().alpha(0.92 * alpha_env)
-                } else if has_trace_tint {
-                    trace_color.alpha(0.92 * alpha_env)
-                } else {
-                    theme::text_primary().alpha(0.82 * alpha_env)
-                };
-
-                let t_tail = (t_anim - 0.07).max(0.02);
-                let trail: Vec<[f32; 2]> = (0..=4)
-                    .map(|step| {
-                        let frac = step as f32 / 4.0;
-                        let t = t_tail + (t_anim - t_tail) * frac;
-                        let sp = cam.world_to_screen(curve.eval(t));
-                        [sp.x, sp.y]
-                    })
-                    .collect();
-                wire_shape =
-                    wire_shape.stroke(trail, wire_w * 1.45, pulse_color.alpha(0.55 * alpha_env));
-
-                let pulse_sp = cam.world_to_screen(curve.eval(t_anim));
-                let pulse_dir = curve.tangent(t_anim);
-                wire_shape = draw_arrow_triangle(
-                    wire_shape,
-                    [pulse_sp.x, pulse_sp.y],
-                    pulse_dir,
-                    (8.0 * zoom).clamp(5.0, 12.0),
-                    (3.6 * zoom).clamp(2.4, 5.5),
-                    pulse_color,
-                );
-            }
         }
     }
 
@@ -363,7 +326,85 @@ fn build_wire_shape(s: &AppState, cam: &Camera) -> Shape {
     wire_shape
 }
 
+const MAX_ANIMATED_WIRE_PULSES: usize = 28;
+
+/// Build GPU-driven `live_trim` traveling pulse layers for visible edges so wire animations run
+/// via `tx.live_only()` with ZERO view rebuilds, ZERO Taffy layouts, and ZERO per-frame allocations.
+fn build_wire_pulse_layers(s: &AppState, cam: &Camera) -> Vec<El> {
+    let zoom = cam.zoom;
+    if !s.reader_prefs.animate_wires || zoom < 0.35 || s.graph.edges.is_empty() {
+        return Vec::new();
+    }
+    let curve_pad = 140.0 * zoom;
+    let mut edges: Vec<&Edge> = s.graph.edges.values().collect();
+    edges.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+
+    let mut layers = Vec::new();
+    for edge in edges {
+        if layers.len() >= MAX_ANIMATED_WIRE_PULSES {
+            break;
+        }
+        let (Some(from_node), Some(to_node)) = (
+            s.graph.get_node(&edge.from.node),
+            s.graph.get_node(&edge.to.node),
+        ) else {
+            continue;
+        };
+        let from_world = port_world_pos_for(from_node, &edge.from.port);
+        let to_world = port_world_pos_for(to_node, &edge.to.port);
+        let from_sp = cam.world_to_screen(from_world);
+        let to_sp = cam.world_to_screen(to_world);
+        let min_x = from_sp.x.min(to_sp.x) - curve_pad;
+        let min_y = from_sp.y.min(to_sp.y) - curve_pad;
+        let max_x = from_sp.x.max(to_sp.x) + curve_pad;
+        let max_y = from_sp.y.max(to_sp.y) + curve_pad;
+        if !is_rect_in_viewport(min_x, min_y, max_x - min_x, max_y - min_y, s.canvas_size) {
+            continue;
+        }
+
+        let chord = (to_sp.x - from_sp.x).hypot(to_sp.y - from_sp.y);
+        let seg_count = if zoom < 0.55 || chord < 160.0 { 12 } else { 20 };
+        let curve = CubicBezier::wire(from_world, to_world);
+        let segments: Vec<[f32; 2]> = curve
+            .sample_segments(seg_count)
+            .into_iter()
+            .map(|wp| {
+                let sp = cam.world_to_screen(wp);
+                [sp.x, sp.y]
+            })
+            .collect();
+
+        let is_selected = s.selected_edge.as_ref() == Some(&edge.id);
+        let is_ghost = edge.status == EdgeStatus::Proposed;
+        let trace_color = resolve_edge_render_color(s, edge, is_selected);
+        let has_trace_tint = s.reader_prefs.enable_trace_colors
+            && (edge.color_hex.is_some()
+                || (!is_ghost && default_relation_color_hex(&edge.relation).is_some()));
+
+        let pulse_w = (2.7 * zoom.clamp(0.7, 1.4)).clamp(1.8, 4.2);
+        let pulse_color = if is_selected || is_ghost {
+            theme::accent_claude().alpha(0.88)
+        } else if has_trace_tint {
+            trace_color.alpha(0.88)
+        } else {
+            theme::text_primary().alpha(0.72)
+        };
+
+        let pulse_shape = Shape::new().stroke(segments, pulse_w, pulse_color);
+        layers.push(
+            canvas(pulse_shape)
+                .key(format!("wire_pulse_{}", edge.id.as_str()))
+                .absolute(0.0, 0.0)
+                .w_full()
+                .h_full()
+                .live_trim(&s.wire_pulse_trim),
+        );
+    }
+    layers
+}
+
 fn apply_pan_drag_step(s: &mut AppState, start_offset: WorldPos, dx: f32, dy: f32, tx: &mut Tx) {
+    s.mark_user_activity();
     let z = s.graph.viewport.zoom.max(0.01);
     s.graph.viewport.offset.x = start_offset.x - (dx / z);
     s.graph.viewport.offset.y = start_offset.y - (dy / z);
@@ -462,6 +503,7 @@ pub fn render_canvas_view(s: &AppState) -> El {
             s.handle_dropped_files(files, ScreenPos::new(400.0, 300.0));
         })
         .on_secondary_press_local(|s: &mut AppState, p, tx| {
+            s.mark_user_activity();
             if s.smooth_zoom_enabled {
                 s.flush_live_camera();
             }
@@ -476,6 +518,7 @@ pub fn render_canvas_view(s: &AppState) -> El {
         })
         .on_drag(move |s: &mut AppState, d, tx| match d.phase {
             Phase::Down => {
+                s.mark_user_activity();
                 if s.smooth_zoom_enabled {
                     s.flush_live_camera();
                 }
@@ -551,6 +594,9 @@ pub fn render_canvas_view(s: &AppState) -> El {
             .w_full()
             .h_full(),
     );
+    for pulse_layer in build_wire_pulse_layers(s, &cam) {
+        world_stage = world_stage.child(pulse_layer);
+    }
 
     // 3. Regular Node Cards (deterministic z-order: unselected sorted by id, selected on top)
     let mut ordered_nodes: Vec<&Node> = s
@@ -1787,6 +1833,8 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                                         start_pos.y + (d.dy / z),
                                     );
                                 }
+                                s.mark_user_activity();
+                                tx.instant();
                             }
                             CanvasMode::Panning { start_offset, .. } => {
                                 let start_offset = *start_offset;
@@ -1885,6 +1933,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                                         start_pos.y + (d.dy / z),
                                     );
                                 }
+                                s.mark_user_activity();
                                 tx.instant();
                             }
                         }
@@ -2079,6 +2128,8 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                                                 start_pos.y + (d.dy / z),
                                             );
                                         }
+                                        s.mark_user_activity();
+                                        tx.instant();
                                     }
                                     CanvasMode::Panning { start_offset, .. } => {
                                         let start_offset = *start_offset;
@@ -2246,6 +2297,8 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                                             start_pos.y + (d.dy / z),
                                         );
                                     }
+                                    s.mark_user_activity();
+                                    tx.instant();
                                 }
                                 CanvasMode::Panning { start_offset, .. } => {
                                     let start_offset = *start_offset;
@@ -2330,6 +2383,8 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                                 start_pos.y + (d.dy / z),
                             );
                         }
+                        s.mark_user_activity();
+                        tx.instant();
                     }
                     CanvasMode::Panning { start_offset, .. } => {
                         let start_offset = *start_offset;
@@ -2478,11 +2533,22 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                 } else {
                     let md_src = node.content.trim();
                     let md_w = (w - 22.0 * zoom).max(80.0 * zoom);
-                    let md_style = theme::card_markdown_style(zoom, md_w);
-                    let md_el = col()
-                        .key(format!("note_md_{}", node.id.as_str()))
-                        .w_full()
-                        .child(Markdown::new(md_src).selectable(false).render(&md_style));
+                    let memo_ver = (
+                        md_src,
+                        (md_w * 2.0).round() as i32,
+                        (zoom * 100.0).round() as i32,
+                        std::mem::discriminant(&s.reader_prefs.theme),
+                    );
+                    let md_el = rune::memo(
+                        format!("note_md_{}", node.id.as_str()),
+                        memo_ver,
+                        || {
+                            let md_style = theme::card_markdown_style(zoom, md_w);
+                            col()
+                                .w_full()
+                                .child(Markdown::new(md_src).selectable(false).render(&md_style))
+                        },
+                    );
                     body = body.child(md_el);
                 }
                 body
@@ -2550,7 +2616,21 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                     node.content.trim()
                 };
                 let md_w = (w - 30.0 * zoom).max(80.0 * zoom);
-                let md_style = theme::card_markdown_style(zoom * 0.9, md_w);
+                let memo_ver = (
+                    md_src,
+                    cur_page_idx,
+                    (md_w * 2.0).round() as i32,
+                    (zoom * 100.0).round() as i32,
+                    std::mem::discriminant(&s.reader_prefs.theme),
+                );
+                let rendered_md = rune::memo(
+                    format!("doc_md_body_{}", node.id.as_str()),
+                    memo_ver,
+                    || {
+                        let md_style = theme::card_markdown_style(zoom * 0.9, md_w);
+                        Markdown::new(md_src).selectable(false).render(&md_style)
+                    },
+                );
                 attach_card_scroll_wheel(
                     col()
                         .key(format!("doc_md_scroll_{}", node.id.as_str()))
@@ -2560,7 +2640,7 @@ fn render_node_card(s: &AppState, node: &Node, screen_pos: ScreenPos, zoom: f32)
                         .scroll(ScrollSpec { stick_bottom: false })
                         .padding(7.0 * zoom),
                 )
-                .child(Markdown::new(md_src).selectable(false).render(&md_style))
+                .child(rendered_md)
             } else if let Some(ref pages) = text_pages {
                 let page = &pages[cur_page_idx];
                 attach_card_scroll_wheel(
@@ -3555,6 +3635,39 @@ fn render_checklist_body(node: &Node, body_size: f32, badge_size: f32, zoom: f32
 }
 
 fn render_graph_formula_card_body(
+    s: &AppState,
+    node: &Node,
+    is_selected: bool,
+    body_size: f32,
+    badge_size: f32,
+    zoom: f32,
+) -> El {
+    let is_editing = is_selected && s.editing_node_id.as_ref() == Some(&node.id);
+    if !is_editing {
+        let (node_w, node_h) = crate::state::node_world_size(node);
+        let vp = graph_formula::GraphViewport::from_meta(&node.meta);
+        let memo_ver = (
+            node.content.as_str(),
+            vp.center_x.to_bits(),
+            vp.center_y.to_bits(),
+            vp.span_x.to_bits(),
+            (node_w * 2.0).round() as i32,
+            (node_h * 2.0).round() as i32,
+            (zoom * 100.0).round() as i32,
+            is_selected,
+            std::mem::discriminant(&s.reader_prefs.theme),
+            s.reader_prefs.ui_locale,
+        );
+        return rune::memo(
+            format!("graph_formula_memo_{}", node.id.as_str()),
+            memo_ver,
+            || render_graph_formula_card_body_inner(s, node, is_selected, body_size, badge_size, zoom),
+        );
+    }
+    render_graph_formula_card_body_inner(s, node, is_selected, body_size, badge_size, zoom)
+}
+
+fn render_graph_formula_card_body_inner(
     s: &AppState,
     node: &Node,
     is_selected: bool,

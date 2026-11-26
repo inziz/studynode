@@ -46,6 +46,16 @@ pub enum AppScreen {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SettingsTab {
+    #[default]
+    General,
+    Appearance,
+    Ai,
+    Chat,
+    Vision,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum DocViewTab {
     #[default]
     Preview,
@@ -430,6 +440,7 @@ pub enum MediaJobResult {
 pub struct AppState {
     pub screen: AppScreen,
     pub settings_return_screen: AppScreen,
+    pub settings_tab: SettingsTab,
     pub is_fullscreen: bool,
     pub projects_dir: PathBuf,
     pub recent_projects: Vec<ProjectMetadata>,
@@ -519,6 +530,8 @@ pub struct AppState {
     pub inspector_answer_edit: TextEdit,
     pub hide_all_edge_labels: bool,
     pub wire_anim_phase: f32,
+    pub wire_pulse_trim: Live<[f32; 2]>,
+    pub last_interaction_at: Instant,
     pub popped_out_node_id: Option<NodeId>,
 
     // Background OCR & Translation pipeline (non-blocking)
@@ -617,6 +630,14 @@ pub struct AppState {
     pub io_waker_slot: Arc<Mutex<Option<Waker>>>,
     pub save_tx: mpsc::Sender<(ProjectBundle, StudyGraph)>,
     pub pending_graph_save_at: Option<Instant>,
+
+    // GitHub Releases automatic updater
+    pub update_status: crate::updater::UpdateStatus,
+    pub update_banner_dismissed: bool,
+    pub update_tx: mpsc::Sender<crate::updater::UpdateJobResult>,
+    pub update_rx: mpsc::Receiver<crate::updater::UpdateJobResult>,
+    pub update_waker: Option<Waker>,
+    pub update_auto_checked: bool,
 }
 
 impl Default for AppState {
@@ -626,11 +647,7 @@ impl Default for AppState {
 }
 
 fn dirs_or_local_projects_dir() -> PathBuf {
-    let p = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("study_projects");
-    let _ = std::fs::create_dir_all(&p);
-    p
+    crate::platform_paths::default_projects_dir()
 }
 
 fn format_modified_time(path: &Path) -> (String, u64) {
@@ -762,6 +779,7 @@ impl AppState {
         let (pdf_tx, pdf_rx) = mpsc::channel();
         let (save_tx, save_rx) = mpsc::channel();
         let (media_resolve_tx, media_resolve_rx) = mpsc::channel();
+        let (update_tx, update_rx) = mpsc::channel();
         let io_waker_slot: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
         spawn_pdf_worker(pdf_rx, io_tx.clone(), io_waker_slot.clone());
         spawn_graph_saver_worker(save_rx);
@@ -772,6 +790,7 @@ impl AppState {
         let mut state = Self {
             screen: AppScreen::Dashboard,
             settings_return_screen: AppScreen::Dashboard,
+            settings_tab: SettingsTab::General,
             is_fullscreen: false,
             projects_dir,
             recent_projects: Vec::new(),
@@ -845,6 +864,8 @@ impl AppState {
             inspector_answer_edit: TextEdit::new(""),
             hide_all_edge_labels: false,
             wire_anim_phase: 0.35,
+            wire_pulse_trim: Live::new([0.0, 0.0]),
+            last_interaction_at: Instant::now(),
             popped_out_node_id: None,
             vision_service_override: None,
             vision_tx,
@@ -927,6 +948,12 @@ impl AppState {
             io_waker_slot,
             save_tx,
             pending_graph_save_at: None,
+            update_status: crate::updater::UpdateStatus::Idle,
+            update_banner_dismissed: false,
+            update_tx,
+            update_rx,
+            update_waker: None,
+            update_auto_checked: false,
         };
 
         if sync_scan {
@@ -941,6 +968,7 @@ impl AppState {
         self.image_cache = ImageCache::new(waker.clone());
         self.vision_waker = Some(waker.clone());
         self.llm_waker = Some(waker.clone());
+        self.update_waker = Some(waker.clone());
         if let Ok(mut guard) = self.io_waker_slot.lock() {
             *guard = Some(waker.clone());
         }
@@ -949,6 +977,14 @@ impl AppState {
         }
         for (_, player) in self.media_players.values() {
             player.set_waker(waker.clone());
+        }
+        if !cfg!(test)
+            && !rune::is_headless()
+            && self.reader_prefs.auto_check_updates
+            && !self.update_auto_checked
+        {
+            self.update_auto_checked = true;
+            self.check_for_updates();
         }
         // Rebind any pre-setup handles so background image decodes wake the real window.
         if !self.decoded_images.is_empty()
@@ -966,10 +1002,40 @@ impl AppState {
         }
     }
 
+    /// Record user activity so idle-sleep timers stay awake while interacting.
+    pub fn mark_user_activity(&mut self) {
+        self.last_interaction_at = Instant::now();
+    }
+
+    /// Fast O(N) check for whether any Video/Audio node currently carries a media URL.
+    pub fn has_any_embed_nodes(&self) -> bool {
+        self.graph.nodes.values().any(|n| {
+            matches!(n.kind, NodeKind::Video | NodeKind::Audio)
+                && n.meta
+                    .media_url
+                    .as_deref()
+                    .is_some_and(|u| !u.trim().is_empty())
+        })
+    }
+
     /// Return a cached `rune::Image` handle for `path`, decoding only once per asset path.
     pub fn get_or_load_image(&mut self, path: &Path) -> rune::Image {
         if let Some(img) = self.decoded_images.get(path) {
             return img.clone();
+        }
+        // Cap long-session decoded image handles to avoid unbounded GPU/RAM growth.
+        if self.decoded_images.len() >= 128 {
+            let active_path = self.active_image.as_ref().map(|(_, p, _)| p.clone());
+            let mut drop_keys: Vec<PathBuf> = self
+                .decoded_images
+                .keys()
+                .filter(|k| active_path.as_ref() != Some(*k) && *k != path)
+                .take(16)
+                .cloned()
+                .collect();
+            for k in drop_keys.drain(..) {
+                self.decoded_images.remove(&k);
+            }
         }
         let img = self.image_cache.file(path, 1024.0, 2.0);
         self.decoded_images.insert(path.to_path_buf(), img.clone());
@@ -1069,9 +1135,11 @@ impl AppState {
             }
         }
         let pages = doc_reader::split_document_preview_pages(&node.content, max_lines);
-        self.doc_preview_cache
-            .borrow_mut()
-            .insert(node.id.clone(), (key_hash, pages.clone()));
+        let mut cache = self.doc_preview_cache.borrow_mut();
+        if cache.len() >= 64 {
+            cache.clear();
+        }
+        cache.insert(node.id.clone(), (key_hash, pages.clone()));
         pages
     }
 
@@ -5597,6 +5665,75 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
         });
     }
 
+    pub fn toggle_auto_check_updates(&mut self) {
+        self.reader_prefs.auto_check_updates = !self.reader_prefs.auto_check_updates;
+        let _ = doc_reader::save_preferences(&self.projects_dir, &self.reader_prefs);
+        self.notify_toast(if self.reader_prefs.auto_check_updates {
+            "Auto-check for updates enabled"
+        } else {
+            "Auto-check for updates disabled"
+        });
+    }
+
+    pub fn check_for_updates(&mut self) {
+        if matches!(
+            self.update_status,
+            crate::updater::UpdateStatus::Checking | crate::updater::UpdateStatus::Downloading(_)
+        ) {
+            return;
+        }
+        self.update_status = crate::updater::UpdateStatus::Checking;
+        self.update_banner_dismissed = false;
+        crate::updater::spawn_update_check(self.update_tx.clone(), self.update_waker.clone());
+    }
+
+    pub fn start_update_download(&mut self) {
+        let info = match &self.update_status {
+            crate::updater::UpdateStatus::Available(info) => info.clone(),
+            _ => return,
+        };
+        self.flush_graph_save_now();
+        self.update_status = crate::updater::UpdateStatus::Downloading(info.clone());
+        self.notify_toast(format!("Downloading StudyNodes v{}...", info.version));
+        crate::updater::spawn_download_and_apply(
+            info,
+            self.update_tx.clone(),
+            self.update_waker.clone(),
+        );
+    }
+
+    pub fn dismiss_update_banner(&mut self) {
+        self.update_banner_dismissed = true;
+    }
+
+    pub fn poll_update_jobs(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(res) = self.update_rx.try_recv() {
+            changed = true;
+            match res {
+                crate::updater::UpdateJobResult::Checked(Ok(Some(info))) => {
+                    self.update_status = crate::updater::UpdateStatus::Available(info);
+                    self.update_banner_dismissed = false;
+                }
+                crate::updater::UpdateJobResult::Checked(Ok(None)) => {
+                    self.update_status = crate::updater::UpdateStatus::UpToDate;
+                }
+                crate::updater::UpdateJobResult::Checked(Err(err)) => {
+                    self.update_status = crate::updater::UpdateStatus::Failed(err);
+                }
+                crate::updater::UpdateJobResult::Installed(Ok(ver)) => {
+                    self.update_status = crate::updater::UpdateStatus::ReadyToRestart(ver.clone());
+                    self.notify_toast(format!("Updated to v{ver} — restarting..."));
+                }
+                crate::updater::UpdateJobResult::Installed(Err(err)) => {
+                    self.update_status = crate::updater::UpdateStatus::Failed(err.clone());
+                    self.notify_toast(err);
+                }
+            }
+        }
+        changed
+    }
+
     pub fn set_edge_color(
         &mut self,
         edge_id: &EdgeId,
@@ -7045,6 +7182,7 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
     }
 
     pub fn pan_live_by(&mut self, dx: f32, dy: f32, tx: Option<&mut Tx>) {
+        self.mark_user_activity();
         self.graph.viewport.pan_by_screen_delta(dx, dy);
         if self.smooth_zoom_enabled {
             self.sync_live_camera();
@@ -7073,6 +7211,7 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
         if !factor.is_finite() || factor <= 0.0 {
             return;
         }
+        self.mark_user_activity();
         if !self.smooth_zoom_enabled {
             self.cancel_smooth_zoom();
             self.graph.viewport.zoom_at(anchor, factor);
@@ -7155,8 +7294,11 @@ const UNIVERSAL_API_ENV_VARS: &[&str] = &[
                 }
             }
         }
-        if changed && self.smooth_zoom_enabled {
-            self.sync_live_camera();
+        if changed {
+            self.mark_user_activity();
+            if self.smooth_zoom_enabled {
+                self.sync_live_camera();
+            }
         }
         changed
     }

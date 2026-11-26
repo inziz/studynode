@@ -10,6 +10,7 @@ mod i18n;
 mod icons;
 mod inspector_view;
 mod media_helper;
+mod platform_paths;
 mod project_io;
 mod quiz_overlay;
 mod reader_window;
@@ -17,6 +18,7 @@ mod settings_view;
 mod state;
 mod theme;
 mod touchpad_win32;
+mod updater;
 
 use rune::{App, AppSpec, Cx, El, Titlebar, col, row};
 
@@ -68,6 +70,7 @@ fn view(s: &AppState, cx: &mut Cx<AppState>) -> El {
         .fill(theme::bg_canvas())
         .child(main_content)
         .on_key_up(|s: &mut AppState, ev, _| {
+            s.mark_user_activity();
             if let rune::Key::Text(k) = &ev.key {
                 if k == " " && s.space_held {
                     s.space_held = false;
@@ -266,7 +269,10 @@ fn setup_graph_formula_demo(s: &mut AppState) {
     s.ai_panel_open = false;
 }
 
+const IDLE_WIRE_SLEEP_SECS: u64 = 30;
+
 fn handle_app_key(s: &mut AppState, ev: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
+    s.mark_user_activity();
     if ev.key == rune::Key::Function(11) {
         s.is_fullscreen = !s.is_fullscreen;
         tx.toggle_full_screen();
@@ -353,6 +359,7 @@ fn handle_app_key(s: &mut AppState, ev: &rune::KeyEvent, tx: &mut rune::Tx) -> b
 }
 
 fn main() {
+    updater::cleanup_old_binary();
     let _ = rune::set_app_icon(include_bytes!("../assets/logo.png"));
 
     let mut spec = AppSpec::new(
@@ -383,8 +390,11 @@ fn main() {
         let llm_changed = s.poll_llm_jobs();
         let media_resolved = s.poll_media_jobs();
         let io_changed = s.poll_background_io();
+        let update_changed = s.poll_update_jobs();
         let toast_changed = s.sync_toast_and_feedback();
-        if !rune::is_headless() {
+        if !rune::is_headless()
+            && (s.has_any_embed_nodes() || embed_webview::has_active_embeds())
+        {
             embed_webview::sync_embeds(&s.desired_embeds());
         }
 
@@ -395,17 +405,27 @@ fn main() {
             || !matches!(s.canvas_mode, CanvasMode::Idle);
         let cam_needs_commit = s.should_commit_live_camera();
 
-        let mut anim_changed = false;
+        let wire_idle_awake =
+            s.last_interaction_at.elapsed() < std::time::Duration::from_secs(IDLE_WIRE_SLEEP_SECS);
         let animate_wires = s.reader_prefs.animate_wires
             && !s.graph.edges.is_empty()
             && !cam_moving
-            && !s.cam_live_dirty;
+            && !s.cam_live_dirty
+            && wire_idle_awake;
         let playing_media = s.has_playing_media();
+        let mut wire_live_tick = false;
         let mut media_tick = false;
         if s.screen == AppScreen::Workspace && !rune::is_headless() {
             if animate_wires {
-                s.wire_anim_phase = ((tx.clock() * 0.35).rem_euclid(1.0)) as f32;
-                anim_changed = true;
+                let phase = ((tx.clock() * 0.35).rem_euclid(1.0)) as f32;
+                let head = 0.08 + phase * 0.84;
+                let tail = (head - 0.10).max(0.02);
+                s.wire_anim_phase = phase;
+                s.wire_pulse_trim.set([tail, head]);
+                wire_live_tick = true;
+            } else if s.wire_pulse_trim.get() != [0.0, 0.0] {
+                s.wire_pulse_trim.set([0.0, 0.0]);
+                wire_live_tick = true;
             }
             if playing_media {
                 media_tick = true;
@@ -419,7 +439,9 @@ fn main() {
             } else if s.cam_live_dirty {
                 tx.wake_after(std::time::Duration::from_millis(50));
             } else if animate_wires {
-                tx.wake_after(std::time::Duration::from_millis(16));
+                // 30 FPS GPU-only live_trim ticks (zero view rebuilds); auto-sleeps after 30s idle
+                // so Rune enters window::rest and reclaims GPU layer/staging buffers.
+                tx.wake_after(std::time::Duration::from_millis(33));
             } else if playing_media {
                 tx.wake_after(std::time::Duration::from_millis(120));
             } else if let Some(due) = s.pending_graph_save_at {
@@ -431,6 +453,9 @@ fn main() {
                 tx.wake_after(std::time::Duration::from_millis(250));
             }
         } else if !rune::is_headless() {
+            if s.wire_pulse_trim.get() != [0.0, 0.0] {
+                s.wire_pulse_trim.set([0.0, 0.0]);
+            }
             if let Some(due) = s.pending_graph_save_at {
                 let wait = due
                     .saturating_duration_since(std::time::Instant::now())
@@ -446,8 +471,8 @@ fn main() {
             || llm_changed
             || media_resolved
             || io_changed
+            || update_changed
             || toast_changed
-            || anim_changed
             || media_tick;
         let cam_committed = if cam_needs_commit || (other_changed && s.cam_live_dirty) {
             s.flush_live_camera()
@@ -458,7 +483,7 @@ fn main() {
         if other_changed || cam_committed {
             tx.instant();
             true
-        } else if tp_changed || zoom_anim_changed {
+        } else if tp_changed || zoom_anim_changed || wire_live_tick {
             tx.live_only();
             false
         } else {
@@ -1910,10 +1935,12 @@ mod tests {
         click_key(rt, "btn_open_settings");
         settle_frames(rt, 12);
         assert_eq!(rt.state.screen, AppScreen::Settings);
-        assert!(rt
-            .elements()
-            .iter()
-            .any(|e| e.key.as_deref() == Some("settings_ai_section") && !e.exiting));
+        assert!(has_element_key(rt, "settings_sidebar"));
+        assert!(has_element_key(rt, "settings_general_section"));
+
+        click_key(rt, "btn_settings_tab_ai");
+        settle_frames(rt, 6);
+        assert!(has_element_key(rt, "settings_ai_section"));
 
         rt.state.ai_api_key_edit = rune::TextEdit::new("  sk-demo-test-key  ");
         rt.state.ai_base_url_edit = rune::TextEdit::new("https://openrouter.ai/api/v1");
@@ -1921,6 +1948,15 @@ mod tests {
         rt.state.vision_api_key_edit = rune::TextEdit::new("AIzaDemoVisionKey");
         click_key(rt, "btn_settings_save");
         settle_frames(rt, 12);
+
+        click_key(rt, "btn_settings_tab_chat");
+        settle_frames(rt, 4);
+        assert!(has_element_key(rt, "settings_chat_ai_section"));
+
+        click_key(rt, "btn_settings_tab_vision");
+        settle_frames(rt, 4);
+        assert!(has_element_key(rt, "settings_vision_section"));
+        assert!(has_element_key(rt, "settings_ollama_section"));
 
         assert_eq!(rt.state.reader_prefs.ai_api_key, "sk-demo-test-key");
         assert_eq!(
@@ -2099,23 +2135,35 @@ mod tests {
 
         click_key(rt, "btn_open_settings");
         settle_frames(rt, 12);
-        assert!(rt
-            .elements()
-            .iter()
-            .any(|e| e.key.as_deref() == Some("settings_appearance_section") && !e.exiting));
+        click_key(rt, "btn_settings_tab_appearance");
+        settle_frames(rt, 6);
+        assert!(has_element_key(rt, "settings_appearance_section"));
 
-        click_key(rt, "btn_theme_warm_paper");
-        settle_frames(rt, 12);
-        assert_eq!(rt.state.reader_prefs.theme, theme::ThemeId::WarmPaper);
-        assert_eq!(theme::active_theme(), theme::ThemeId::WarmPaper);
+        click_key(rt, "btn_theme_tokyo_night");
+        settle_frames(rt, 8);
+        assert_eq!(rt.state.reader_prefs.theme, theme::ThemeId::TokyoNight);
+        assert_eq!(theme::active_theme(), theme::ThemeId::TokyoNight);
 
         let reloaded = crate::doc_reader::load_preferences(&dir_path);
-        assert_eq!(reloaded.theme, theme::ThemeId::WarmPaper);
+        assert_eq!(reloaded.theme, theme::ThemeId::TokyoNight);
+
+        click_key(rt, "btn_theme_solarized_light");
+        settle_frames(rt, 8);
+        assert_eq!(rt.state.reader_prefs.theme, theme::ThemeId::SolarizedLight);
+        assert_eq!(theme::active_theme(), theme::ThemeId::SolarizedLight);
 
         click_key(rt, "btn_theme_warm_charcoal");
-        settle_frames(rt, 12);
+        settle_frames(rt, 8);
         assert_eq!(rt.state.reader_prefs.theme, theme::ThemeId::WarmCharcoal);
         assert_eq!(theme::active_theme(), theme::ThemeId::WarmCharcoal);
+
+        // Legacy serialized theme aliases deserialize cleanly into Antigravity themes
+        let legacy_wp: theme::ThemeId = serde_json::from_str("\"WarmPaper\"").unwrap();
+        let legacy_ms: theme::ThemeId = serde_json::from_str("\"MidnightSlate\"").unwrap();
+        let legacy_nm: theme::ThemeId = serde_json::from_str("\"NordicMist\"").unwrap();
+        assert_eq!(legacy_wp, theme::ThemeId::SolarizedLight);
+        assert_eq!(legacy_ms, theme::ThemeId::TokyoNight);
+        assert_eq!(legacy_nm, theme::ThemeId::Light);
     }
 
     #[test]
@@ -2252,6 +2300,8 @@ mod tests {
         settle_frames(rt, 12);
         click_key(rt, "btn_locale_es");
         settle_frames(rt, 8);
+        click_key(rt, "btn_settings_tab_ai");
+        settle_frames(rt, 6);
         click_key(rt, "btn_toggle_ai_summary_lang");
         settle_frames(rt, 8);
         assert!(rt.state.reader_prefs.ai_summary_follow_ui_language);
@@ -4110,6 +4160,8 @@ mod tests {
         rt.state.open_settings();
         rt.invalidate();
         settle_frames(rt, 8);
+        click_key(rt, "btn_settings_tab_ai");
+        settle_frames(rt, 6);
 
         click_key(rt, "btn_ai_preset_airforce");
         settle_frames(rt, 6);
@@ -6042,5 +6094,167 @@ mod tests {
         let (_, loaded) = studynodes_graph::ProjectBundle::open(&dir).expect("open bundle");
         let persisted = loaded.get_node(&f_id).expect("persisted Formula node");
         assert_eq!(persisted.content, "2x + root(3, 27) = ln(e)");
+    }
+
+    #[test]
+    fn test_dock_more_no_duplicate_plus_and_chat_key_icon_button() {
+        {
+            let _lock = TEST_THEME_LOCK.write().unwrap_or_else(|e| e.into_inner());
+            let prev = i18n::active_locale();
+            for locale in i18n::UiLocale::all() {
+                i18n::set_active_locale(locale);
+                let more = i18n::t(i18n::TextKey::DockMore);
+                assert!(
+                    !more.contains('+'),
+                    "DockMore for {:?} must not duplicate '+' alongside PLUS icon: '{}'",
+                    locale,
+                    more
+                );
+            }
+            i18n::set_active_locale(prev);
+        }
+
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Chat Key Icon Test");
+        rt.state.open_ai_chat_panel();
+        rt.invalidate();
+        settle_frames(rt, 6);
+
+        let key_r = element_rect(rt, "btn_ai_chat_toggle_key_drawer");
+        assert!(
+            key_r[2] <= 28.0 && key_r[3] <= 28.0,
+            "chat API key button should be a compact icon button, got rect {:?}",
+            key_r
+        );
+        click_key(rt, "btn_ai_chat_toggle_key_drawer");
+        settle_frames(rt, 4);
+        assert!(rt.state.ai_chat_key_drawer_open);
+    }
+
+    #[test]
+    fn test_wire_pulse_live_layer_and_documents_migration() {
+        // 1. Verify legacy ./study_projects migration copies bundles + prefs only when target is empty
+        let tmp = TempDir::new().unwrap();
+        let legacy = tmp.path().join("legacy_study_projects");
+        let target = tmp.path().join("Documents").join("StudyNodes");
+        std::fs::create_dir_all(legacy.join("Biology.studynodes").join("assets")).unwrap();
+        std::fs::write(legacy.join("Biology.studynodes").join("graph.json"), "{\"nodes\":{}}").unwrap();
+        std::fs::write(legacy.join("Biology.studynodes").join("assets").join("a.txt"), "ok").unwrap();
+        std::fs::write(legacy.join("reader_prefs.json"), "{\"animate_wires\":true}").unwrap();
+
+        let count = platform_paths::migrate_legacy_projects_if_needed(&target, &legacy);
+        assert_eq!(count, 2, "should migrate reader_prefs.json + Biology.studynodes");
+        assert!(target.join("reader_prefs.json").is_file());
+        assert!(target.join("Biology.studynodes").join("graph.json").is_file());
+        assert!(target.join("Biology.studynodes").join("assets").join("a.txt").is_file());
+
+        // Second call must skip because target already has StudyNodes data
+        let count_again = platform_paths::migrate_legacy_projects_if_needed(&target, &legacy);
+        assert_eq!(count_again, 0);
+
+        // 2. Verify live_trim wire pulse layer renders on workspace with an edge
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.create_project("Wire Pulse Perf Test");
+        let n1 = rt.state.add_note_node(Some(WorldPos::new(100.0, 120.0)));
+        let n2 = rt.state.add_note_node(Some(WorldPos::new(420.0, 120.0)));
+        rt.state.connect_nodes(&n1, &n2);
+        let edge_id = rt
+            .state
+            .graph
+            .edges
+            .keys()
+            .next()
+            .cloned()
+            .expect("edge should connect");
+        rt.invalidate();
+        settle_frames(rt, 5);
+        assert!(
+            has_element_key(rt, &format!("wire_pulse_{}", edge_id.as_str())),
+            "GPU live_trim pulse layer should exist for visible edge"
+        );
+    }
+
+    #[test]
+    fn test_updater_semver_asset_selection_and_ui() {
+        assert_eq!(updater::parse_semver("v0.5.1"), Some((0, 5, 1)));
+        assert_eq!(updater::parse_semver("0.4.0-rc.1"), Some((0, 4, 0)));
+        assert!(updater::is_newer_version("v0.5.0", "0.4.0"));
+        assert!(!updater::is_newer_version("v0.4.0", "0.4.0"));
+        assert!(!updater::is_newer_version("v0.3.9", "0.4.0"));
+
+        let assets = vec![
+            updater::ReleaseAsset {
+                name: "StudyNodes-Setup-v0.5.0-windows-x86_64.exe".into(),
+                browser_download_url: "https://example.com/setup.exe".into(),
+            },
+            updater::ReleaseAsset {
+                name: "studynodes-v0.5.0-windows-x86_64.exe".into(),
+                browser_download_url: "https://example.com/app.exe".into(),
+            },
+        ];
+        let picked = updater::select_windows_binary_asset(&assets).expect("should pick app binary");
+        assert_eq!(picked.name, "studynodes-v0.5.0-windows-x86_64.exe");
+
+        assert!(updater::validate_pe_binary(b"not-a-pe").is_err());
+        let mut fake_pe = vec![0u8; (updater::MIN_BINARY_BYTES as usize) + 64];
+        fake_pe[0] = b'M';
+        fake_pe[1] = b'Z';
+        assert!(updater::validate_pe_binary(&fake_pe).is_ok());
+
+        // Verify Dashboard banner + Settings auto-update controls
+        let mut th = make_test_runtime();
+        let rt = &mut th.rt;
+        rt.state.update_status = updater::UpdateStatus::Available(updater::UpdateInfo {
+            version: "0.9.0".into(),
+            tag_name: "v0.9.0".into(),
+            release_url: "https://github.com/inziz/studynode/releases/tag/v0.9.0".into(),
+            asset_name: "studynodes-v0.9.0-windows-x86_64.exe".into(),
+            download_url: "https://example.com/studynodes.exe".into(),
+            notes: "New release".into(),
+        });
+        rt.invalidate();
+        settle_frames(rt, 4);
+        assert!(has_element_key(rt, "update_available_banner"));
+        assert!(has_element_key(rt, "btn_update_install"));
+        click_key(rt, "btn_update_dismiss");
+        settle_frames(rt, 4);
+        assert!(!has_element_key(rt, "update_available_banner"));
+
+        // Settings General tab shows auto-update toggle + install button
+        rt.state.open_settings();
+        rt.invalidate();
+        settle_frames(rt, 4);
+        assert!(has_element_key(rt, "btn_toggle_auto_updates"));
+        assert!(has_element_key(rt, "btn_check_updates"));
+        assert!(has_element_key(rt, "btn_settings_update_install"));
+        let before = rt.state.reader_prefs.auto_check_updates;
+        click_key(rt, "btn_toggle_auto_updates");
+        settle_frames(rt, 3);
+        assert_eq!(rt.state.reader_prefs.auto_check_updates, !before);
+
+        // Verify boolean settings render as compact 40x22 sliding toggle switches (not wide pill labels)
+        for sw_key in [
+            "btn_toggle_dock_auto_orient",
+            "btn_toggle_touchpad_dm",
+            "btn_toggle_animate_wires",
+            "btn_toggle_trace_colors",
+            "btn_settings_fullscreen",
+            "btn_toggle_auto_updates",
+        ] {
+            let r = element_rect(rt, sw_key);
+            assert!(
+                (r[2] - 40.0).abs() <= 2.0 && (r[3] - 22.0).abs() <= 2.0,
+                "setting switch '{sw_key}' should be a 40x22 toggle switch, got rect {r:?}"
+            );
+        }
+
+        // Verify Dashboard top-right Import and Settings buttons are present and wider than icon-only
+        rt.state.close_settings();
+        rt.invalidate();
+        settle_frames(rt, 4);
+        assert!(has_element_key(rt, "btn_import_project"));
+        assert!(has_element_key(rt, "btn_open_settings"));
     }
 }

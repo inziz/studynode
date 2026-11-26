@@ -116,9 +116,19 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                     });
                 })
                 .child(
-                    text(i18n::t(TextKey::DashImportBtn))
-                        .font(theme::STATUS_TEXT)
-                        .color(theme::text_secondary()),
+                    row()
+                        .center_y()
+                        .gap(5.5)
+                        .child(icons::ph(
+                            &icons::DOWNLOAD_SIMPLE,
+                            13.5,
+                            theme::text_secondary(),
+                        ))
+                        .child(
+                            text(i18n::t(TextKey::DashImportBtn))
+                                .font(theme::STATUS_TEXT)
+                                .color(theme::text_secondary()),
+                        ),
                 ),
         )
         .child(
@@ -160,13 +170,27 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
                     s.open_settings();
                 })
                 .child(
-                    text(i18n::t(TextKey::DashSettingsBtn))
-                        .font(theme::STATUS_TEXT)
-                        .color(if s.ai_api_configured() {
-                            theme::accent_claude()
-                        } else {
-                            theme::text_secondary()
-                        }),
+                    row()
+                        .center_y()
+                        .gap(5.5)
+                        .child(icons::ph(
+                            &icons::GEAR,
+                            13.5,
+                            if s.ai_api_configured() {
+                                theme::accent_claude()
+                            } else {
+                                theme::text_secondary()
+                            },
+                        ))
+                        .child(
+                            text(i18n::t(TextKey::DashSettingsBtn))
+                                .font(theme::STATUS_TEXT)
+                                .color(if s.ai_api_configured() {
+                                    theme::accent_claude()
+                                } else {
+                                    theme::text_secondary()
+                                }),
+                        ),
                 ),
         );
 
@@ -813,6 +837,117 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
         }
     }
 
+    let mut inner = col().w_full().max_w(620.0).gap(22.0);
+
+    if !s.update_banner_dismissed {
+        match &s.update_status {
+            crate::updater::UpdateStatus::Available(info) => {
+                inner = inner.child(
+                    row()
+                        .key("update_available_banner")
+                        .w_full()
+                        .px(12.0)
+                        .py(9.0)
+                        .gap(10.0)
+                        .center_y()
+                        .radius(9.0)
+                        .fill(theme::accent_claude().alpha(0.12))
+                        .border(1.0, theme::accent_claude().alpha(0.38))
+                        .child(icons::ph(&icons::ARROW_DOWN, 14.0, theme::accent_claude()))
+                        .child(
+                            el().grow(1.0).min_w(0.0).child(
+                                text(format!(
+                                    "StudyNodes v{} is available (current v{})",
+                                    info.version,
+                                    crate::updater::CURRENT_VERSION
+                                ))
+                                .font(theme::STATUS_TEXT)
+                                .color(theme::text_primary())
+                                .truncate(),
+                            ),
+                        )
+                        .child(
+                            el()
+                                .key("btn_update_install")
+                                .px(10.0)
+                                .py(4.5)
+                                .radius(6.0)
+                                .fill(theme::accent_claude())
+                                .hover(theme::accent_claude().alpha(0.88))
+                                .cursor(Cursor::Pointer)
+                                .on_press(|s: &mut AppState| {
+                                    s.start_update_download();
+                                })
+                                .child(
+                                    text("Update & Restart")
+                                        .font(theme::BADGE_TEXT)
+                                        .color(theme::text_inverted()),
+                                ),
+                        )
+                        .child(
+                            el()
+                                .key("btn_update_dismiss")
+                                .size(24.0, 24.0)
+                                .radius(6.0)
+                                .hover(theme::hover_subtle())
+                                .center()
+                                .cursor(Cursor::Pointer)
+                                .on_press(|s: &mut AppState| {
+                                    s.dismiss_update_banner();
+                                })
+                                .child(icons::ph(&icons::X, 12.0, theme::text_muted())),
+                        ),
+                );
+            }
+            crate::updater::UpdateStatus::Downloading(info) => {
+                inner = inner.child(
+                    row()
+                        .key("update_available_banner")
+                        .w_full()
+                        .px(12.0)
+                        .py(9.0)
+                        .gap(10.0)
+                        .center_y()
+                        .radius(9.0)
+                        .fill(theme::bg_card())
+                        .border(1.0, theme::border_subtle())
+                        .child(icons::ph(&icons::ARROW_CLOCKWISE, 14.0, theme::accent_claude()))
+                        .child(
+                            text(format!("Downloading StudyNodes v{}...", info.version))
+                                .font(theme::STATUS_TEXT)
+                                .color(theme::text_secondary()),
+                        ),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    inner = inner
+        .child(
+            col()
+                .gap(4.0)
+                .child(
+                    text(i18n::t(TextKey::DashTitle))
+                        .font(HERO_TITLE)
+                        .color(theme::text_primary()),
+                )
+                .child(
+                    text(i18n::t(TextKey::DashSubtitle))
+                        .font(theme::BODY_TEXT)
+                        .color(theme::text_secondary()),
+                ),
+        )
+        .child(
+            col()
+                .w_full()
+                .gap(10.0)
+                .child(command_bar)
+                .child(starter_strip)
+                .child(collections_bar),
+        )
+        .child(list_col);
+
     let body = col()
         .w_full()
         .grow(1.0)
@@ -821,35 +956,7 @@ pub fn render_dashboard(s: &AppState, cx: &mut Cx<AppState>) -> El {
         .items_center()
         .px(24.0)
         .py(48.0)
-        .child(
-            col()
-                .w_full()
-                .max_w(620.0)
-                .gap(22.0)
-                .child(
-                    col()
-                        .gap(4.0)
-                        .child(
-                            text(i18n::t(TextKey::DashTitle))
-                                .font(HERO_TITLE)
-                                .color(theme::text_primary()),
-                        )
-                        .child(
-                            text(i18n::t(TextKey::DashSubtitle))
-                                .font(theme::BODY_TEXT)
-                                .color(theme::text_secondary()),
-                        ),
-                )
-                .child(
-                    col()
-                        .w_full()
-                        .gap(10.0)
-                        .child(command_bar)
-                        .child(starter_strip)
-                        .child(collections_bar),
-                )
-                .child(list_col),
-        );
+        .child(inner);
 
     col()
         .key("dashboard_root")

@@ -315,8 +315,7 @@ fn render_dedicated_ai_chat_panel(s: &AppState, panel_width: f32) -> El {
         .child(
             el()
                 .key("btn_ai_chat_toggle_key_drawer")
-                .px(7.0)
-                .py(3.5)
+                .size(24.0, 24.0)
                 .radius(5.0)
                 .fill(if s.ai_chat_key_drawer_open || has_custom_key {
                     theme::accent_claude().alpha(0.14)
@@ -324,14 +323,16 @@ fn render_dedicated_ai_chat_panel(s: &AppState, panel_width: f32) -> El {
                     Color::TRANSPARENT
                 })
                 .hover(theme::hover_subtle())
+                .press(theme::press_subtle())
                 .border(
                     1.0,
                     if s.ai_chat_key_drawer_open || has_custom_key {
                         theme::accent_claude().alpha(0.42)
                     } else {
-                        theme::border_subtle()
+                        Color::TRANSPARENT
                     },
                 )
+                .center()
                 .cursor(Cursor::Pointer)
                 .on_press(|s: &mut AppState| {
                     s.ai_chat_key_drawer_open = !s.ai_chat_key_drawer_open;
@@ -341,15 +342,15 @@ fn render_dedicated_ai_chat_panel(s: &AppState, panel_width: f32) -> El {
                         s.chat_model_edit = rune::TextEdit::new(&s.reader_prefs.chat_model);
                     }
                 })
-                .child(
-                    text(i18n::t(TextKey::AiChatCustomKeyBtn))
-                        .font(theme::BADGE_TEXT)
-                        .color(if s.ai_chat_key_drawer_open || has_custom_key {
-                            theme::accent_claude()
-                        } else {
-                            theme::text_secondary()
-                        }),
-                ),
+                .child(icons::ph(
+                    &icons::KEY,
+                    13.5,
+                    if s.ai_chat_key_drawer_open || has_custom_key {
+                        theme::accent_claude()
+                    } else {
+                        theme::text_secondary()
+                    },
+                )),
         );
 
     if !s.ai_chat_messages.is_empty() {
@@ -787,17 +788,23 @@ fn render_dedicated_ai_chat_panel(s: &AppState, panel_width: f32) -> El {
                         .min_w(0.0)
                         .wrap(),
                 )
-                .child(ghost_btn(
-                    "btn_ai_panel_error_settings",
-                    i18n::t(TextKey::AiChatCustomKeyBtn),
-                    theme::text_secondary(),
-                    |s| {
-                        s.ai_chat_key_drawer_open = true;
-                        s.chat_api_key_edit = rune::TextEdit::new(&s.reader_prefs.chat_api_key);
-                        s.chat_base_url_edit = rune::TextEdit::new(&s.reader_prefs.chat_base_url);
-                        s.chat_model_edit = rune::TextEdit::new(&s.reader_prefs.chat_model);
-                    },
-                ))
+                .child(
+                    el()
+                        .key("btn_ai_panel_error_settings")
+                        .size(22.0, 22.0)
+                        .radius(5.0)
+                        .hover(theme::hover_subtle())
+                        .press(theme::press_subtle())
+                        .center()
+                        .cursor(Cursor::Pointer)
+                        .on_press(|s: &mut AppState| {
+                            s.ai_chat_key_drawer_open = true;
+                            s.chat_api_key_edit = rune::TextEdit::new(&s.reader_prefs.chat_api_key);
+                            s.chat_base_url_edit = rune::TextEdit::new(&s.reader_prefs.chat_base_url);
+                            s.chat_model_edit = rune::TextEdit::new(&s.reader_prefs.chat_model);
+                        })
+                        .child(icons::ph(&icons::KEY, 13.0, theme::text_secondary())),
+                )
                 .child(
                     el()
                         .key("btn_dismiss_ai_error")

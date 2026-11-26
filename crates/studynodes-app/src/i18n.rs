@@ -39,6 +39,7 @@ impl UiLocale {
         }
     }
 
+    #[allow(dead_code)]
     pub const fn short_label(self) -> &'static str {
         match self {
             UiLocale::En => "EN",
@@ -274,6 +275,11 @@ pub enum TextKey {
     SettingsTitle,
     SettingsSave,
     SettingsSavedToast,
+    SettingsTabGeneral,
+    SettingsTabAppearance,
+    SettingsTabAi,
+    SettingsTabChat,
+    SettingsTabVision,
     SettingsHeroTitle,
     SettingsHeroSubtitle,
     SettingsAppearanceTitle,
@@ -522,6 +528,11 @@ impl TextKey {
         TextKey::SettingsTitle,
         TextKey::SettingsSave,
         TextKey::SettingsSavedToast,
+        TextKey::SettingsTabGeneral,
+        TextKey::SettingsTabAppearance,
+        TextKey::SettingsTabAi,
+        TextKey::SettingsTabChat,
+        TextKey::SettingsTabVision,
         TextKey::SettingsHeroTitle,
         TextKey::SettingsHeroSubtitle,
         TextKey::SettingsAppearanceTitle,
@@ -815,12 +826,12 @@ pub fn t_in(locale: UiLocale, key: TextKey) -> &'static str {
         (UiLocale::Pt, DockImage) => "Imagem",
         (UiLocale::Ja, DockImage) => "画像",
 
-        (UiLocale::En, DockMore) => "+ More ▾",
-        (UiLocale::Es, DockMore) => "+ Más ▾",
-        (UiLocale::Fr, DockMore) => "+ Plus ▾",
-        (UiLocale::De, DockMore) => "+ Mehr ▾",
-        (UiLocale::Pt, DockMore) => "+ Mais ▾",
-        (UiLocale::Ja, DockMore) => "+ 他 ▾",
+        (UiLocale::En, DockMore) => "More ▾",
+        (UiLocale::Es, DockMore) => "Más ▾",
+        (UiLocale::Fr, DockMore) => "Plus ▾",
+        (UiLocale::De, DockMore) => "Mehr ▾",
+        (UiLocale::Pt, DockMore) => "Mais ▾",
+        (UiLocale::Ja, DockMore) => "他 ▾",
 
         (UiLocale::En, DockAi) => "AI",
         (UiLocale::Es, DockAi) => "IA",
@@ -1667,6 +1678,41 @@ pub fn t_in(locale: UiLocale, key: TextKey) -> &'static str {
         (UiLocale::Pt, SettingsSavedToast) => "Configurações salvas",
         (UiLocale::Ja, SettingsSavedToast) => "設定を保存しました",
 
+        (UiLocale::En, SettingsTabGeneral) => "General",
+        (UiLocale::Es, SettingsTabGeneral) => "General",
+        (UiLocale::Fr, SettingsTabGeneral) => "Général",
+        (UiLocale::De, SettingsTabGeneral) => "Allgemein",
+        (UiLocale::Pt, SettingsTabGeneral) => "Geral",
+        (UiLocale::Ja, SettingsTabGeneral) => "一般",
+
+        (UiLocale::En, SettingsTabAppearance) => "Appearance",
+        (UiLocale::Es, SettingsTabAppearance) => "Apariencia",
+        (UiLocale::Fr, SettingsTabAppearance) => "Apparence",
+        (UiLocale::De, SettingsTabAppearance) => "Darstellung",
+        (UiLocale::Pt, SettingsTabAppearance) => "Aparência",
+        (UiLocale::Ja, SettingsTabAppearance) => "外観",
+
+        (UiLocale::En, SettingsTabAi) => "AI & Models",
+        (UiLocale::Es, SettingsTabAi) => "IA y modelos",
+        (UiLocale::Fr, SettingsTabAi) => "IA et modèles",
+        (UiLocale::De, SettingsTabAi) => "KI & Modelle",
+        (UiLocale::Pt, SettingsTabAi) => "IA e modelos",
+        (UiLocale::Ja, SettingsTabAi) => "AIとモデル",
+
+        (UiLocale::En, SettingsTabChat) => "Project Chat",
+        (UiLocale::Es, SettingsTabChat) => "Chat del proyecto",
+        (UiLocale::Fr, SettingsTabChat) => "Chat du projet",
+        (UiLocale::De, SettingsTabChat) => "Projekt-Chat",
+        (UiLocale::Pt, SettingsTabChat) => "Chat do projeto",
+        (UiLocale::Ja, SettingsTabChat) => "プロジェクトチャット",
+
+        (UiLocale::En, SettingsTabVision) => "Vision & Local",
+        (UiLocale::Es, SettingsTabVision) => "Visión y local",
+        (UiLocale::Fr, SettingsTabVision) => "Vision et local",
+        (UiLocale::De, SettingsTabVision) => "Vision & Lokal",
+        (UiLocale::Pt, SettingsTabVision) => "Visão e local",
+        (UiLocale::Ja, SettingsTabVision) => "Visionとローカル",
+
         (UiLocale::En, SettingsHeroTitle) => "Preferences & API Keys",
         (UiLocale::Es, SettingsHeroTitle) => "Preferencias y claves API",
         (UiLocale::Fr, SettingsHeroTitle) => "Préférences et clés API",
@@ -1856,12 +1902,12 @@ pub fn t_in(locale: UiLocale, key: TextKey) -> &'static str {
         (UiLocale::Pt, SettingsFieldServerUrl) => "URL do servidor",
         (UiLocale::Ja, SettingsFieldServerUrl) => "サーバーURL",
 
-        (UiLocale::En, SettingsStorageNote) => "Stored locally in study_projects/reader_prefs.json (gitignored).",
-        (UiLocale::Es, SettingsStorageNote) => "Guardado localmente en study_projects/reader_prefs.json.",
-        (UiLocale::Fr, SettingsStorageNote) => "Enregistré localement dans study_projects/reader_prefs.json.",
-        (UiLocale::De, SettingsStorageNote) => "Lokal gespeichert in study_projects/reader_prefs.json.",
-        (UiLocale::Pt, SettingsStorageNote) => "Salvo localmente em study_projects/reader_prefs.json.",
-        (UiLocale::Ja, SettingsStorageNote) => "設定はローカルの study_projects/reader_prefs.json に保存されます。",
+        (UiLocale::En, SettingsStorageNote) => "Stored locally in Documents/StudyNodes/reader_prefs.json.",
+        (UiLocale::Es, SettingsStorageNote) => "Guardado localmente en Documents/StudyNodes/reader_prefs.json.",
+        (UiLocale::Fr, SettingsStorageNote) => "Enregistré localement dans Documents/StudyNodes/reader_prefs.json.",
+        (UiLocale::De, SettingsStorageNote) => "Lokal gespeichert in Documents/StudyNodes/reader_prefs.json.",
+        (UiLocale::Pt, SettingsStorageNote) => "Salvo localmente em Documents/StudyNodes/reader_prefs.json.",
+        (UiLocale::Ja, SettingsStorageNote) => "設定は Documents/StudyNodes/reader_prefs.json に保存されます。",
 
         (UiLocale::En, SettingsReady) => "Ready",
         (UiLocale::Es, SettingsReady) => "Listo",

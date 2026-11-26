@@ -17,57 +17,78 @@ pub static STUDYNODES_LOGO_ICON: Icon = Icon {
 pub enum ThemeId {
     #[default]
     WarmCharcoal,
-    MidnightSlate,
-    WarmPaper,
-    NordicMist,
+    Dark,
+    #[serde(alias = "NordicMist")]
+    Light,
+    #[serde(alias = "MidnightSlate")]
+    TokyoNight,
+    SolarizedDark,
+    #[serde(alias = "WarmPaper")]
+    SolarizedLight,
 }
 
 impl ThemeId {
-    pub const fn all() -> [ThemeId; 4] {
+    pub const fn all() -> [ThemeId; 6] {
         [
             ThemeId::WarmCharcoal,
-            ThemeId::MidnightSlate,
-            ThemeId::WarmPaper,
-            ThemeId::NordicMist,
+            ThemeId::Dark,
+            ThemeId::Light,
+            ThemeId::TokyoNight,
+            ThemeId::SolarizedDark,
+            ThemeId::SolarizedLight,
         ]
     }
 
     pub const fn key_suffix(self) -> &'static str {
         match self {
             ThemeId::WarmCharcoal => "warm_charcoal",
-            ThemeId::MidnightSlate => "midnight_slate",
-            ThemeId::WarmPaper => "warm_paper",
-            ThemeId::NordicMist => "nordic_mist",
+            ThemeId::Dark => "dark",
+            ThemeId::Light => "light",
+            ThemeId::TokyoNight => "tokyo_night",
+            ThemeId::SolarizedDark => "solarized_dark",
+            ThemeId::SolarizedLight => "solarized_light",
         }
     }
 
     pub const fn display_name(self) -> &'static str {
         match self {
             ThemeId::WarmCharcoal => "Warm Charcoal",
-            ThemeId::MidnightSlate => "Midnight Slate",
-            ThemeId::WarmPaper => "Warm Paper",
-            ThemeId::NordicMist => "Nordic Mist",
+            ThemeId::Dark => "Dark",
+            ThemeId::Light => "Light",
+            ThemeId::TokyoNight => "Tokyo Night",
+            ThemeId::SolarizedDark => "Solarized Dark",
+            ThemeId::SolarizedLight => "Solarized Light",
         }
     }
 
     pub const fn is_dark(self) -> bool {
-        matches!(self, ThemeId::WarmCharcoal | ThemeId::MidnightSlate)
+        matches!(
+            self,
+            ThemeId::WarmCharcoal
+                | ThemeId::Dark
+                | ThemeId::TokyoNight
+                | ThemeId::SolarizedDark
+        )
     }
 
     const fn as_u8(self) -> u8 {
         match self {
             ThemeId::WarmCharcoal => 0,
-            ThemeId::MidnightSlate => 1,
-            ThemeId::WarmPaper => 2,
-            ThemeId::NordicMist => 3,
+            ThemeId::Dark => 1,
+            ThemeId::Light => 2,
+            ThemeId::TokyoNight => 3,
+            ThemeId::SolarizedDark => 4,
+            ThemeId::SolarizedLight => 5,
         }
     }
 
     const fn from_u8(v: u8) -> Self {
         match v {
-            1 => ThemeId::MidnightSlate,
-            2 => ThemeId::WarmPaper,
-            3 => ThemeId::NordicMist,
+            1 => ThemeId::Dark,
+            2 => ThemeId::Light,
+            3 => ThemeId::TokyoNight,
+            4 => ThemeId::SolarizedDark,
+            5 => ThemeId::SolarizedLight,
             _ => ThemeId::WarmCharcoal,
         }
     }
@@ -135,79 +156,125 @@ const WARM_CHARCOAL: ThemePalette = ThemePalette {
     wire_selected: "#ECEBE6",
 };
 
-const MIDNIGHT_SLATE: ThemePalette = ThemePalette {
+const ANTIGRAVITY_DARK: ThemePalette = ThemePalette {
     is_dark: true,
-    bg_canvas: "#0B0F17",
-    bg_chrome: "#101622",
-    bg_sidebar: "#111825",
-    bg_card: "#161E2E",
-    bg_card_header: "#1B2538",
-    bg_card_selected: "#202C42",
-    bg_input: "#0D121C",
-    bg_control: "#1F293D",
-    text_primary: "#E6EDF7",
-    text_secondary: "#9BA8BF",
-    text_muted: "#64738C",
-    text_inverted: "#0B0F17",
-    accent: "#60A5FA",
-    accent_primary: "#E6EDF7",
-    accent_subtle: "#B4C2D9",
-    accent_danger: "#F87171",
-    wire_default: "#34425E",
-    wire_selected: "#E6EDF7",
+    bg_canvas: "#111215",
+    bg_chrome: "#16181D",
+    bg_sidebar: "#15171C",
+    bg_card: "#1C1F26",
+    bg_card_header: "#22262F",
+    bg_card_selected: "#272C36",
+    bg_input: "#14161B",
+    bg_control: "#252933",
+    text_primary: "#E8EAED",
+    text_secondary: "#9AA0A6",
+    text_muted: "#6C727F",
+    text_inverted: "#111215",
+    accent: "#8AB4F8",
+    accent_primary: "#E8EAED",
+    accent_subtle: "#BDC1C6",
+    accent_danger: "#F28B82",
+    wire_default: "#3C4043",
+    wire_selected: "#E8EAED",
 };
 
-const WARM_PAPER: ThemePalette = ThemePalette {
+const ANTIGRAVITY_LIGHT: ThemePalette = ThemePalette {
     is_dark: false,
-    bg_canvas: "#F4F1EA",
-    bg_chrome: "#FAF8F4",
-    bg_sidebar: "#F6F3EC",
+    bg_canvas: "#F6F8FA",
+    bg_chrome: "#FFFFFF",
+    bg_sidebar: "#F8F9FA",
     bg_card: "#FFFFFF",
-    bg_card_header: "#F7F4ED",
-    bg_card_selected: "#EFEAE0",
-    bg_input: "#EFECE4",
-    bg_control: "#E9E4D9",
-    text_primary: "#1C1B18",
-    text_secondary: "#57544D",
-    text_muted: "#858077",
-    text_inverted: "#FAF8F4",
-    accent: "#C96442",
-    accent_primary: "#1C1B18",
-    accent_subtle: "#4B4842",
-    accent_danger: "#B94A40",
-    wire_default: "#C8C2B6",
-    wire_selected: "#1C1B18",
+    bg_card_header: "#F1F3F4",
+    bg_card_selected: "#E8F0FE",
+    bg_input: "#F1F3F4",
+    bg_control: "#E8EAED",
+    text_primary: "#1F1F1F",
+    text_secondary: "#5F6368",
+    text_muted: "#80868B",
+    text_inverted: "#FFFFFF",
+    accent: "#1A73E8",
+    accent_primary: "#1F1F1F",
+    accent_subtle: "#3C4043",
+    accent_danger: "#D93025",
+    wire_default: "#DADCE0",
+    wire_selected: "#1F1F1F",
 };
 
-const NORDIC_MIST: ThemePalette = ThemePalette {
+const TOKYO_NIGHT: ThemePalette = ThemePalette {
+    is_dark: true,
+    bg_canvas: "#1A1B26",
+    bg_chrome: "#16161E",
+    bg_sidebar: "#16161E",
+    bg_card: "#24283B",
+    bg_card_header: "#1F2335",
+    bg_card_selected: "#292E42",
+    bg_input: "#16161E",
+    bg_control: "#292E42",
+    text_primary: "#C0CAF5",
+    text_secondary: "#A9B1D6",
+    text_muted: "#565F89",
+    text_inverted: "#15161E",
+    accent: "#7AA2F7",
+    accent_primary: "#C0CAF5",
+    accent_subtle: "#9AA5CE",
+    accent_danger: "#F7768E",
+    wire_default: "#414868",
+    wire_selected: "#C0CAF5",
+};
+
+const SOLARIZED_DARK: ThemePalette = ThemePalette {
+    is_dark: true,
+    bg_canvas: "#002B36",
+    bg_chrome: "#00212B",
+    bg_sidebar: "#00242E",
+    bg_card: "#073642",
+    bg_card_header: "#0A3E4C",
+    bg_card_selected: "#0E4B5B",
+    bg_input: "#00212B",
+    bg_control: "#0A3E4C",
+    text_primary: "#93A1A1",
+    text_secondary: "#839496",
+    text_muted: "#586E75",
+    text_inverted: "#002B36",
+    accent: "#268BD2",
+    accent_primary: "#EEE8D5",
+    accent_subtle: "#93A1A1",
+    accent_danger: "#DC322F",
+    wire_default: "#2E545E",
+    wire_selected: "#EEE8D5",
+};
+
+const SOLARIZED_LIGHT: ThemePalette = ThemePalette {
     is_dark: false,
-    bg_canvas: "#EEF2F6",
-    bg_chrome: "#F8FAFC",
-    bg_sidebar: "#F1F5F9",
-    bg_card: "#FFFFFF",
-    bg_card_header: "#F4F7FA",
-    bg_card_selected: "#E6EDF5",
-    bg_input: "#E9EFF5",
-    bg_control: "#E2E8F0",
-    text_primary: "#0F172A",
-    text_secondary: "#475569",
-    text_muted: "#7B899D",
-    text_inverted: "#F8FAFC",
-    accent: "#2563EB",
-    accent_primary: "#0F172A",
-    accent_subtle: "#334155",
-    accent_danger: "#DC2626",
-    wire_default: "#CBD5E1",
-    wire_selected: "#0F172A",
+    bg_canvas: "#FDF6E3",
+    bg_chrome: "#F5EEDB",
+    bg_sidebar: "#F7F0DD",
+    bg_card: "#FFFDF5",
+    bg_card_header: "#EEE8D5",
+    bg_card_selected: "#E6DFC8",
+    bg_input: "#EEE8D5",
+    bg_control: "#E6DFC8",
+    text_primary: "#073642",
+    text_secondary: "#586E75",
+    text_muted: "#839496",
+    text_inverted: "#FDF6E3",
+    accent: "#268BD2",
+    accent_primary: "#073642",
+    accent_subtle: "#586E75",
+    accent_danger: "#DC322F",
+    wire_default: "#C7C0AE",
+    wire_selected: "#073642",
 };
 
 #[inline]
 const fn palette_for(id: ThemeId) -> &'static ThemePalette {
     match id {
         ThemeId::WarmCharcoal => &WARM_CHARCOAL,
-        ThemeId::MidnightSlate => &MIDNIGHT_SLATE,
-        ThemeId::WarmPaper => &WARM_PAPER,
-        ThemeId::NordicMist => &NORDIC_MIST,
+        ThemeId::Dark => &ANTIGRAVITY_DARK,
+        ThemeId::Light => &ANTIGRAVITY_LIGHT,
+        ThemeId::TokyoNight => &TOKYO_NIGHT,
+        ThemeId::SolarizedDark => &SOLARIZED_DARK,
+        ThemeId::SolarizedLight => &SOLARIZED_LIGHT,
     }
 }
 

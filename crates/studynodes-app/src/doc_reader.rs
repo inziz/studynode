@@ -175,6 +175,9 @@ pub struct ReaderPreferences {
     /// Automatically switch floating dock between horizontal and vertical when dragged near left/right edges.
     #[serde(default = "default_true")]
     pub dock_auto_orient: bool,
+    /// Automatically check GitHub Releases for newer StudyNodes versions on startup.
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
 }
 
 impl Default for ReaderPreferences {
@@ -209,6 +212,7 @@ impl Default for ReaderPreferences {
             enable_trace_colors: true,
             dock_custom_pos: None,
             dock_auto_orient: true,
+            auto_check_updates: true,
         }
     }
 }

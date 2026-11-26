@@ -160,6 +160,10 @@ mod imp {
         }
     }
 
+    pub fn has_active_embeds() -> bool {
+        ACTIVE_EMBEDS.with(|views_cell| !views_cell.borrow().is_empty())
+    }
+
     pub fn sync_embeds(desired: &[DesiredEmbed]) {
         if rune::is_headless() {
             return;
@@ -243,7 +247,10 @@ mod imp {
     use super::*;
 
     pub fn attach(_window: &rune::WindowHandle) {}
+    pub fn has_active_embeds() -> bool {
+        false
+    }
     pub fn sync_embeds(_desired: &[DesiredEmbed]) {}
 }
 
-pub use imp::{attach, sync_embeds};
+pub use imp::{attach, has_active_embeds, sync_embeds};
