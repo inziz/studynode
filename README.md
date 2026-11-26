@@ -1,8 +1,14 @@
+<div align="center">
+
+<img src="crates/studynodes-app/assets/logo.png" alt="StudyNodes" width="88" />
+
 # StudyNodes — Visual Knowledge Canvas
 
 > A native GPU-accelerated desktop study environment built in **Rust** on the **Rune** UI runtime (`wgpu` / DirectX 12). StudyNodes combines an infinite spatial canvas, structured multi-format reading, live 2D mathematical typesetting and plotting, active recall quizzes, offline/cloud OCR, and human-in-the-loop LLM synthesis.
 
 ![StudyNodes Exam Prep Canvas](docs/screenshots/exam-template.png)
+
+</div>
 
 ---
 
